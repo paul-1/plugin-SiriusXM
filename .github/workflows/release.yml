@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Perl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: '5.30'
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils zip
+        cpanm --notest JSON::XS LWP::UserAgent HTTP::Request
+    
+    - name: Run tests
+      run: |
+        # Validate XML files
+        xmllint --noout --valid install.xml
+        xmllint --noout --wellformed repo.xml
+        
+        # Check Perl syntax
+        find Plugins -name "*.pm" -exec perl -c {} \;
+    
+    - name: Extract version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+    
+    - name: Update version in install.xml
+      run: |
+        sed -i "s/<version>.*<\/version>/<version>${{ steps.version.outputs.version }}<\/version>/" install.xml
+        
+        # Verify the change
+        grep -o '<version>.*</version>' install.xml
+    
+    - name: Update version in repo.xml
+      run: |
+        sed -i "s/version=\"[^\"]*\"/version=\"${{ steps.version.outputs.version }}\"/" repo.xml
+        
+        # Verify the change
+        grep -o 'version="[^"]*"' repo.xml
+    
+    - name: Create plugin package
+      run: |
+        # Create a clean package directory
+        mkdir -p package/SiriusXM
+        
+        # Copy plugin files
+        cp -r Plugins package/SiriusXM/
+        cp -r HTML package/SiriusXM/
+        cp install.xml package/SiriusXM/
+        cp strings.txt package/SiriusXM/
+        cp README.md package/SiriusXM/
+        
+        # Create the zip package
+        cd package
+        zip -r ../SiriusXM-${{ steps.version.outputs.version }}.zip SiriusXM/
+        cd ..
+        
+        # Calculate SHA checksum
+        SHA=$(sha256sum SiriusXM-${{ steps.version.outputs.version }}.zip | cut -d' ' -f1)
+        echo "Package SHA: $SHA"
+        echo "sha=$SHA" >> $GITHUB_ENV
+    
+    - name: Update repo.xml with download URL and SHA
+      run: |
+        # Update download URL
+        sed -i "s|<url>.*</url>|<url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v${{ steps.version.outputs.version }}/SiriusXM-${{ steps.version.outputs.version }}.zip</url>|" repo.xml
+        
+        # Update SHA
+        sed -i "s|<sha>.*</sha>|<sha>${{ env.sha }}</sha>|" repo.xml
+        
+        # Verify changes
+        cat repo.xml
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          SiriusXM-${{ steps.version.outputs.version }}.zip
+          repo.xml
+        body: |
+          ## SiriusXM Plugin v${{ steps.version.outputs.version }}
+          
+          ### Changes
+          - See commit history for detailed changes
+          
+          ### Installation
+          1. Download the SiriusXM-${{ steps.version.outputs.version }}.zip file
+          2. Extract to your Logitech Media Server Plugins directory
+          3. Install the SiriusXM-Perl helper application
+          4. Configure your SiriusXM credentials in plugin settings
+          5. Restart Logitech Media Server
+          
+          ### Requirements
+          - Logitech Media Server 7.9 or higher
+          - SiriusXM subscription
+          - SiriusXM-Perl helper application
+          
+          ### Repository Update
+          To add this plugin repository to your Logitech Media Server:
+          1. Go to Settings → Plugins → Add Repository
+          2. Enter: `https://github.com/paul-1/plugin-SiriusXM/releases/download/v${{ steps.version.outputs.version }}/repo.xml`
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Commit updated files
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add install.xml repo.xml
+        git commit -m "Update version to ${{ steps.version.outputs.version }} for release" || exit 0
+        git push || exit 0
