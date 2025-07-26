@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<extension>
+    <id>C5B2A14D-F3E3-D789-AF52-FD3159753CAD</id>
+    <n>PLUGIN_SIRIUSXM</n>
+    <module>Plugins::SiriusXM::Plugin</module>
+    <category>musicservices</category>
+
+    <version>0.1.0</version>
+    <description>PLUGIN_SIRIUSXM_DESC</description>
+    <creator>paul-1</creator>
+    <email>your-email@example.com</email>
+    <defaultState>enabled</defaultState>
+    <icon>plugins/SiriusXM/html/images/siriusxm.png</icon>
+    <optionsURL>plugins/SiriusXM/settings/basic.html</optionsURL>
+
+    <homepageURL>https://github.com/paul-1/plugin-SiriusXM</homepageURL>
+    <type>2</type><!-- type=extension -->
+
+    <targetApplication>
+        <id>SqueezeCenter</id>
+        <minVersion>7.9</minVersion>
+        <maxVersion>*</maxVersion>
+    </targetApplication>
+</extension>
