@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<extensions>
+    <details>
+        <title lang="EN">SiriusXM Plugin Repository</title>
+    </details>
+    <plugins>
+        <plugin name="SiriusXM" version="0.1.0" minTarget="7.9" maxTarget="*">
+            <title lang="EN">SiriusXM</title>
+            <desc lang="EN">Stream SiriusXM satellite radio through Logitech Media Server</desc>
+            <url>https://github.com/paul-1/plugin-SiriusXM/archive/main.zip</url>
+            <sha><!-- SHA will be updated during release --></sha>
+            <link>https://github.com/paul-1/plugin-SiriusXM</link>
+            <creator>paul-1</creator>
+            <email>your-email@example.com</email>
+        </plugin>
+    </plugins>
+</extensions>

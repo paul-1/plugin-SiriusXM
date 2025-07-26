@@ -1,0 +1,59 @@
+# SiriusXM Plugin Strings
+# English (EN)
+
+PLUGIN_SIRIUSXM
+	EN	SiriusXM
+
+PLUGIN_SIRIUSXM_DESC
+	EN	Stream SiriusXM satellite radio through Logitech Media Server
+
+PLUGIN_SIRIUSXM_SETTINGS
+	EN	SiriusXM Settings
+
+PLUGIN_SIRIUSXM_USERNAME
+	EN	Username
+
+PLUGIN_SIRIUSXM_USERNAME_DESC
+	EN	Your SiriusXM username or email address
+
+PLUGIN_SIRIUSXM_PASSWORD
+	EN	Password
+
+PLUGIN_SIRIUSXM_PASSWORD_DESC
+	EN	Your SiriusXM account password
+
+PLUGIN_SIRIUSXM_QUALITY
+	EN	Audio Quality
+
+PLUGIN_SIRIUSXM_QUALITY_DESC
+	EN	Select preferred audio streaming quality
+
+PLUGIN_SIRIUSXM_QUALITY_LOW
+	EN	Low (32 kbps)
+
+PLUGIN_SIRIUSXM_QUALITY_MEDIUM
+	EN	Medium (64 kbps)
+
+PLUGIN_SIRIUSXM_QUALITY_HIGH
+	EN	High (128 kbps)
+
+PLUGIN_SIRIUSXM_HELPER_PATH
+	EN	Helper Application Path
+
+PLUGIN_SIRIUSXM_HELPER_PATH_DESC
+	EN	Path to the SiriusXM-Perl helper application
+
+PLUGIN_SIRIUSXM_ERROR_NO_CREDENTIALS
+	EN	Please configure your SiriusXM username and password in plugin settings
+
+PLUGIN_SIRIUSXM_ERROR_HELPER_NOT_FOUND
+	EN	SiriusXM-Perl helper application not found. Please check the helper path in settings
+
+PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED
+	EN	Login to SiriusXM failed. Please check your credentials
+
+PLUGIN_SIRIUSXM_CONNECTING
+	EN	Connecting to SiriusXM...
+
+PLUGIN_SIRIUSXM_BROWSING
+	EN	Browsing SiriusXM channels...

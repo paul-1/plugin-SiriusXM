@@ -1,0 +1,92 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Perl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: '5.30'
+    
+    - name: Install Perl dependencies
+      run: |
+        cpanm --notest --installdeps .
+        cpanm --notest JSON::XS LWP::UserAgent HTTP::Request
+    
+    - name: Validate XML files
+      run: |
+        # Install xmllint for validation
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils
+        
+        # Validate install.xml
+        xmllint --noout --valid install.xml
+        
+        # Validate repo.xml
+        xmllint --noout --wellformed repo.xml
+    
+    - name: Check Perl syntax
+      run: |
+        # Check all Perl modules for syntax errors
+        find Plugins -name "*.pm" -exec perl -c {} \;
+    
+    - name: Validate directory structure
+      run: |
+        # Ensure required directories exist
+        test -d Plugins/SiriusXM
+        test -d HTML/EN/plugins/SiriusXM/settings
+        test -d .github/workflows
+        
+        # Ensure required files exist
+        test -f install.xml
+        test -f repo.xml
+        test -f strings.txt
+        test -f README.md
+        test -f .gitignore
+        test -f Plugins/SiriusXM/Plugin.pm
+        test -f Plugins/SiriusXM/API.pm
+        test -f Plugins/SiriusXM/ProtocolHandler.pm
+        test -f Plugins/SiriusXM/Settings.pm
+        test -f HTML/EN/plugins/SiriusXM/settings/basic.html
+    
+    - name: Check strings file format
+      run: |
+        # Basic validation of strings.txt format
+        grep -q "PLUGIN_SIRIUSXM" strings.txt
+        grep -q "EN" strings.txt
+    
+    - name: Validate HTML template
+      run: |
+        # Check that HTML template contains required elements
+        grep -q "PLUGIN_SIRIUSXM_SETTINGS" HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_username" HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_password" HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_quality" HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_helper_path" HTML/EN/plugins/SiriusXM/settings/basic.html
+    
+    - name: Test plugin loading simulation
+      run: |
+        # Create a simple test to validate basic plugin structure
+        perl -e '
+        use strict;
+        use warnings;
+        use lib "Plugins";
+        
+        # Test that modules can be compiled
+        eval "use SiriusXM::Plugin; 1" or die "Plugin.pm compilation failed: $@";
+        eval "use SiriusXM::API; 1" or die "API.pm compilation failed: $@";
+        eval "use SiriusXM::ProtocolHandler; 1" or die "ProtocolHandler.pm compilation failed: $@";
+        eval "use SiriusXM::Settings; 1" or die "Settings.pm compilation failed: $@";
+        
+        print "All modules compiled successfully\n";
+        '
