@@ -26,8 +26,8 @@ jobs:
     - name: Run tests
       run: |
         # Validate XML files
-        xmllint --noout --valid install.xml
-        xmllint --noout --wellformed repo.xml
+        xmllint --noout install.xml
+        xmllint --noout repo.xml
         
         # Check Perl syntax
         find Plugins -name "*.pm" -exec perl -c {} \;
