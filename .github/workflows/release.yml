@@ -71,7 +71,7 @@ jobs:
         cd ..
         
         # Calculate SHA checksum
-        SHA=$(sha256sum SiriusXM-${{ steps.version.outputs.version }}.zip | cut -d' ' -f1)
+        SHA=$(sha1sum SiriusXM-${{ steps.version.outputs.version }}.zip | cut -d' ' -f1)
         echo "Package SHA: $SHA"
         echo "sha=$SHA" >> $GITHUB_ENV
     
