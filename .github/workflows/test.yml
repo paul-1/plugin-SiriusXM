@@ -9,46 +9,46 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Perl
       uses: shogo82148/actions-setup-perl@v1
       with:
-        perl-version: '5.30'
-    
+        perl-version: '5.36'
+
     - name: Install Perl dependencies
       run: |
         # Install system packages for Perl modules
         sudo apt-get update
         sudo apt-get install -y libwww-perl libjson-xs-perl libhttp-message-perl
-        
+
         # Install cpanm
         curl -L https://cpanmin.us | perl - --sudo App::cpanminus || true
-        
-        # Install additional modules if cpanm is available
+
+        # Install additional modules if cpanm is available  (Replace with slimserver and @INC)
         which cpanm && cpanm --notest JSON::XS LWP::UserAgent HTTP::Request::Common || true
-    
+
     - name: Validate XML files
       run: |
         # Install xmllint for validation
         sudo apt-get update
         sudo apt-get install -y libxml2-utils
-        
+
         # Validate install.xml
-        xmllint --noout install.xml
+        xmllint --noout Plugins/SiriusXM/install.xml
         echo "✓ install.xml is well-formed"
-        
+
         # Validate repo.xml
         xmllint --noout repo.xml
         echo "✓ repo.xml is well-formed"
-    
+
     - name: Check Perl syntax
       run: |
         # Check Perl modules for basic syntax without compilation
         # Since modules depend on LMS framework, we can't compile them in isolation
-        
+
         echo "Checking Perl syntax (structure validation only)..."
         for file in Plugins/SiriusXM/*.pm; do
           echo "Validating $file structure..."
@@ -59,63 +59,63 @@ jobs:
           }
           echo "✓ $file structure looks valid"
         done
-    
+
     - name: Validate directory structure
       run: |
         # Ensure required directories exist
         test -d Plugins/SiriusXM
-        test -d HTML/EN/plugins/SiriusXM/settings
+        test -d Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings
         test -d .github/workflows
-        
+
         # Ensure required files exist
-        test -f install.xml
+        test -f Plugins/SiriusXM/install.xml
         test -f repo.xml
-        test -f strings.txt
+        test -f Plugins/SiriusXM/strings.txt
         test -f README.md
         test -f .gitignore
         test -f Plugins/SiriusXM/Plugin.pm
         test -f Plugins/SiriusXM/API.pm
         test -f Plugins/SiriusXM/ProtocolHandler.pm
         test -f Plugins/SiriusXM/Settings.pm
-        test -f HTML/EN/plugins/SiriusXM/settings/basic.html
-    
+        test -f Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+
     - name: Check strings file format
       run: |
         # Basic validation of strings.txt format
-        grep -q "PLUGIN_SIRIUSXM" strings.txt
-        grep -q "EN" strings.txt
-    
+        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/strings.txt
+        grep -q "EN" Plugins/SiriusXM/strings.txt
+
     - name: Validate HTML template
       run: |
         # Check that HTML template contains required elements
-        grep -q "PLUGIN_SIRIUSXM_SETTINGS" HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_username" HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_password" HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_quality" HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_helper_path" HTML/EN/plugins/SiriusXM/settings/basic.html
-    
-       
+        grep -q "PLUGIN_SIRIUSXM_SETTINGS" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_username" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_password" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_quality" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_helper_path" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+
+
     - name: Test plugin structure validation
       run: |
         # Validate plugin structure without trying to load LMS-dependent modules
         perl -e '
         use strict;
         use warnings;
-        
+
         # Check that all Perl modules have proper package declarations
         my @modules = glob("Plugins/SiriusXM/*.pm");
         foreach my $module (@modules) {
             open(my $fh, "<", $module) or die "Cannot open $module: $!";
             my $content = do { local $/; <$fh> };
             close($fh);
-            
+
             # Check for package declaration
             if ($content =~ /^package\s+Plugins::SiriusXM::\w+;/m) {
                 print "✓ $module has proper package declaration\n";
             } else {
                 die "✗ $module missing proper package declaration\n";
             }
-            
+
             # Check for use strict and warnings
             if ($content =~ /use strict;/ && $content =~ /use warnings;/) {
                 print "✓ $module has strict and warnings\n";
@@ -123,6 +123,6 @@ jobs:
                 die "✗ $module missing strict/warnings pragmas\n";
             }
         }
-        
+
         print "All modules passed structure validation\n";
         '
