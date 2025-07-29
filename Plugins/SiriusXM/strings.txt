@@ -29,25 +29,16 @@ PLUGIN_SIRIUSXM_QUALITY_DESC
 	EN	Select preferred audio streaming quality
 
 PLUGIN_SIRIUSXM_QUALITY_LOW
-	EN	Low (32 kbps)
+	EN	Low (64 kbps)
 
 PLUGIN_SIRIUSXM_QUALITY_MEDIUM
-	EN	Medium (64 kbps)
+	EN	Medium (96 kbps)
 
 PLUGIN_SIRIUSXM_QUALITY_HIGH
-	EN	High (128 kbps)
-
-PLUGIN_SIRIUSXM_HELPER_PATH
-	EN	Helper Application Path
-
-PLUGIN_SIRIUSXM_HELPER_PATH_DESC
-	EN	Path to the SiriusXM-Perl helper application
+	EN	High (256 kbps)
 
 PLUGIN_SIRIUSXM_ERROR_NO_CREDENTIALS
 	EN	Please configure your SiriusXM username and password in plugin settings
-
-PLUGIN_SIRIUSXM_ERROR_HELPER_NOT_FOUND
-	EN	SiriusXM-Perl helper application not found. Please check the helper path in settings
 
 PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED
 	EN	Login to SiriusXM failed. Please check your credentials

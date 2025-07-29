@@ -32,8 +32,8 @@ sub initPlugin {
     $prefs->init({
         username => '',
         password => '',
-        quality => 'medium',
-        helper_path => '/usr/local/bin/siriusxm-perl',
+        quality => 'high',
+        port => '9999'
     });
     
     # Initialize the API module
@@ -91,17 +91,6 @@ sub handleFeed {
         return;
     }
     
-    # Check if helper application is available
-    unless (-x $prefs->get('helper_path')) {
-        $cb->({
-            items => [{
-                name => string('PLUGIN_SIRIUSXM_ERROR_HELPER_NOT_FOUND'),
-                type => 'text',
-            }]
-        });
-        return;
-    }
-    
     # Get channels from API
     Plugins::SiriusXM::API->getChannels($client, sub {
         my $channels = shift;
@@ -121,7 +110,7 @@ sub handleFeed {
                 name => $_->{name},
                 type => 'audio',
                 url  => 'sxm://' . $_->{id},
-                icon => $_->{logo} || 'plugins/SiriusXM/html/images/siriusxm.png',
+                icon => $_->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
                 on_select => 'play',
             }
         } @$channels;
@@ -151,7 +140,7 @@ sub trackInfoMenu {
 
 sub getIcon {
     my ($class, $url) = @_;
-    return 'plugins/SiriusXM/html/images/siriusxm.png';
+    return 'plugins/SiriusXM/html/images/SiriusXMLogo.png';
 }
 
 sub playerMenu {

@@ -33,23 +33,18 @@ sub handler {
     # Handle form submission
     if ($params->{saveSettings}) {
         
-        # Validate helper path
-        if ($params->{pref_helper_path} && !-x $params->{pref_helper_path}) {
-            $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_HELPER_NOT_FOUND');
-        }
-        
         # Test authentication if credentials are provided
         if ($params->{pref_username} && $params->{pref_password} && 
-            $params->{pref_helper_path} && -x $params->{pref_helper_path}) {
+            $params->{pref_port} ) {
             
             # Temporarily set prefs for testing
             my $old_username = $prefs->get('username');
             my $old_password = $prefs->get('password');
-            my $old_helper = $prefs->get('helper_path');
+            my $old_port = $prefs->get('port');
             
             $prefs->set('username', $params->{pref_username});
             $prefs->set('password', $params->{pref_password});
-            $prefs->set('helper_path', $params->{pref_helper_path});
+            $prefs->set('port', $params->{pref_port});
             
             # Test authentication
             Plugins::SiriusXM::API->authenticate(sub {
@@ -77,16 +72,6 @@ sub handler {
         { value => 'medium', text => string('PLUGIN_SIRIUSXM_QUALITY_MEDIUM') },
         { value => 'high',   text => string('PLUGIN_SIRIUSXM_QUALITY_HIGH') },
     ];
-    
-    # Check helper application status
-    my $helper_path = $prefs->get('helper_path');
-    if ($helper_path) {
-        if (-x $helper_path) {
-            $params->{helper_status} = 'found';
-        } else {
-            $params->{helper_status} = 'not_found';
-        }
-    }
     
     return $class->SUPER::handler($client, $params, $callback, @args);
 }

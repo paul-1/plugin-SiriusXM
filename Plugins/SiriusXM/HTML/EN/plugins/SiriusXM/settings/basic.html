@@ -1,158 +1,21 @@
 [% PROCESS settings/header.html %]
 
-<div class="prefHead">
-    [% "PLUGIN_SIRIUSXM_SETTINGS" | string %]
-</div>
+	[% WRAPPER settingSection %]
+		[% WRAPPER settingGroup title="PLUGIN_SIRIUSXM" desc="" %]
+			<div class="prefDesc"><p>[% "PLUGIN_SIRIUSXM_DESC" | string %]</p></div>
+		[% END %]
+	[% END %]
 
-[% IF warning %]
-<div class="prefWarning">
-    [% warning %]
-</div>
-[% END %]
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_USERNAME" desc="" %]
+		<input type="text" class="stdedit" name="pref_username" id="username" value="[% prefs.pref_username | html %]" size="40">
+	[% END %]
 
-[% IF info %]
-<div class="prefInfo">
-    [% info %]
-</div>
-[% END %]
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PASSWORD" desc="" %]
+		<input type="password" class="stdedit" name="pref_password" id="password" value="[% prefs.pref_password | html %]" size="40">
+	[% END %]
 
-<form method="post">
-    <input type="hidden" name="saveSettings" value="1">
-    
-    <div class="prefSection">
-        <h3>[% "PLUGIN_SIRIUSXM" | string %] [% "SETTINGS" | string %]</h3>
-        
-        <div class="prefItem">
-            <div class="prefLabel">
-                <label for="pref_username">[% "PLUGIN_SIRIUSXM_USERNAME" | string %]:</label>
-            </div>
-            <div class="prefForm">
-                <input type="text" name="pref_username" id="pref_username" 
-                       value="[% prefs.username | html %]" size="40" maxlength="255">
-                <div class="prefHelp">
-                    [% "PLUGIN_SIRIUSXM_USERNAME_DESC" | string %]
-                </div>
-            </div>
-        </div>
-        
-        <div class="prefItem">
-            <div class="prefLabel">
-                <label for="pref_password">[% "PLUGIN_SIRIUSXM_PASSWORD" | string %]:</label>
-            </div>
-            <div class="prefForm">
-                <input type="password" name="pref_password" id="pref_password" 
-                       value="[% prefs.password | html %]" size="40" maxlength="255">
-                <div class="prefHelp">
-                    [% "PLUGIN_SIRIUSXM_PASSWORD_DESC" | string %]
-                </div>
-            </div>
-        </div>
-        
-        <div class="prefItem">
-            <div class="prefLabel">
-                <label for="pref_quality">[% "PLUGIN_SIRIUSXM_QUALITY" | string %]:</label>
-            </div>
-            <div class="prefForm">
-                <select name="pref_quality" id="pref_quality">
-                    [% FOREACH option IN quality_options %]
-                        <option value="[% option.value %]" 
-                                [% IF option.value == prefs.quality %]selected[% END %]>
-                            [% option.text %]
-                        </option>
-                    [% END %]
-                </select>
-                <div class="prefHelp">
-                    [% "PLUGIN_SIRIUSXM_QUALITY_DESC" | string %]
-                </div>
-            </div>
-        </div>
-        
-        <div class="prefItem">
-            <div class="prefLabel">
-                <label for="pref_helper_path">[% "PLUGIN_SIRIUSXM_HELPER_PATH" | string %]:</label>
-            </div>
-            <div class="prefForm">
-                <input type="text" name="pref_helper_path" id="pref_helper_path" 
-                       value="[% prefs.helper_path | html %]" size="60" maxlength="512">
-                [% IF helper_status == 'found' %]
-                    <span class="prefGood">✓ Found</span>
-                [% ELSIF helper_status == 'not_found' %]
-                    <span class="prefError">✗ Not found</span>
-                [% END %]
-                <div class="prefHelp">
-                    [% "PLUGIN_SIRIUSXM_HELPER_PATH_DESC" | string %]
-                    <br>
-                    Download the SiriusXM-Perl helper from: 
-                    <a href="https://github.com/paul-1/SiriusXM-Perl" target="_blank">
-                        https://github.com/paul-1/SiriusXM-Perl
-                    </a>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="prefSection">
-        <h3>[% "INFORMATION" | string %]</h3>
-        
-        <div class="prefItem">
-            <div class="prefLabel">Plugin Version:</div>
-            <div class="prefForm">[% plugin_version %]</div>
-        </div>
-        
-        <div class="prefItem">
-            <div class="prefLabel">Requirements:</div>
-            <div class="prefForm">
-                • Logitech Media Server 7.9 or higher<br>
-                • SiriusXM subscription<br>
-                • SiriusXM-Perl helper application
-            </div>
-        </div>
-        
-        <div class="prefItem">
-            <div class="prefLabel">Support:</div>
-            <div class="prefForm">
-                <a href="https://github.com/paul-1/plugin-SiriusXM" target="_blank">
-                    GitHub Repository
-                </a>
-            </div>
-        </div>
-    </div>
-    
-    <div class="prefButtons">
-        <input type="submit" name="save" value="[% "SAVE" | string %]" class="stdButton">
-    </div>
-</form>
-
-<style>
-.prefGood {
-    color: green;
-    font-weight: bold;
-    margin-left: 10px;
-}
-
-.prefError {
-    color: red;
-    font-weight: bold;
-    margin-left: 10px;
-}
-
-.prefInfo {
-    background-color: #d4edda;
-    border: 1px solid #c3e6cb;
-    color: #155724;
-    padding: 10px;
-    margin: 10px 0;
-    border-radius: 4px;
-}
-
-.prefWarning {
-    background-color: #fff3cd;
-    border: 1px solid #ffd60a;
-    color: #856404;
-    padding: 10px;
-    margin: 10px 0;
-    border-radius: 4px;
-}
-</style>
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PORT" desc="" %]
+		<input type="text" class="stdedit" name="pref_passport" id="port" value="[% prefs.pref_port | html %]" size="40">
+	[% END %]
 
 [% PROCESS settings/footer.html %]
