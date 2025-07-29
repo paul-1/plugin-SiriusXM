@@ -56,10 +56,10 @@ jobs:
     - name: Create plugin package
       run: |
         # Create a clean package directory
-        mkdir -p package/SiriusXM
+        mkdir -p package
 
         # Copy plugin files
-        cp -r Plugins/SiriusXM package/SiriusXM/
+        cp -r Plugins/SiriusXM package/
 
         # Create the zip package
         cd package

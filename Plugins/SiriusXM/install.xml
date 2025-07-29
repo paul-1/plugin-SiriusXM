@@ -9,7 +9,7 @@
     <creator>paul-1</creator>
     <email>your-email@example.com</email>
     <defaultState>enabled</defaultState>
-    <icon>plugins/SiriusXM/html/images/siriusxm.png</icon>
+    <icon>plugins/SiriusXM/html/images/SiriusXMLogo.png</icon>
     <optionsURL>plugins/SiriusXM/settings/basic.html</optionsURL>
     <homepageURL>https://github.com/paul-1/plugin-SiriusXM</homepageURL>
     <type>2</type>
