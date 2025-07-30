@@ -22,7 +22,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality helper_path));
+    return ($prefs, qw(username password quality port));
 }
 
 sub handler {

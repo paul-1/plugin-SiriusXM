@@ -9,6 +9,7 @@ use LWP::UserAgent;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
+use Slim::Networking::SimpleAsyncHTTP;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
@@ -33,7 +34,7 @@ sub cleanup {
 sub getChannels {
     my ($class, $client, $cb) = @_;
     
-    $log->debug("Getting SiriusXM channels");
+    $log->debug("Getting SiriusXM channels from proxy");
     
     # Check cache first
     my $cached = $cache->get('siriusxm_channels');
@@ -43,62 +44,50 @@ sub getChannels {
         return;
     }
     
-    # Get channels from helper application
-    my $helper_path = $prefs->get('helper_path');
-    my $username = $prefs->get('username');
-    my $password = $prefs->get('password');
-    my $quality = $prefs->get('quality') || 'medium';
+    my $port = $prefs->get('port') || '9999';
+    my $url = "http://localhost:$port/channel/all";
     
-    unless (-x $helper_path) {
-        $log->error("Helper application not found: $helper_path");
-        $cb->([]);
-        return;
-    }
+    $log->debug("Fetching channels from proxy: $url");
     
-    # Build command to execute helper
-    my @cmd = (
-        $helper_path,
-        '--username', $username,
-        '--password', $password,
-        '--quality', $quality,
-        '--list-channels',
-        '--format', 'json'
+    # Use async HTTP request to avoid blocking
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            my $content = $response->content;
+            
+            $log->debug("Received channel data from proxy");
+            
+            my $channels_data;
+            eval {
+                $channels_data = decode_json($content);
+            };
+            
+            if ($@) {
+                $log->error("Failed to parse channel data from proxy: $@");
+                $cb->([]);
+                return;
+            }
+            
+            # Process and organize channels
+            my $processed_channels = $class->processChannelData($channels_data);
+            
+            # Cache the processed results
+            $cache->set('siriusxm_channels', $processed_channels, CACHE_TIMEOUT);
+            
+            $log->info("Retrieved and processed " . scalar(@$processed_channels) . " channels");
+            $cb->($processed_channels);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->error("Failed to fetch channels from proxy: $error");
+            $cb->([]);
+        },
+        {
+            timeout => 30,
+        }
     );
     
-    # Execute helper asynchronously
-    Slim::Utils::Timers::setTimer(undef, time(), sub {
-        my $output = eval {
-            local $SIG{ALRM} = sub { die "timeout\n" };
-            alarm 30; # 30 second timeout
-            my $result = `@cmd 2>&1`;
-            alarm 0;
-            return $result;
-        };
-        
-        if ($@) {
-            $log->error("Helper execution failed: $@");
-            $cb->([]);
-            return;
-        }
-        
-        my $channels = eval {
-            my $data = decode_json($output);
-            return $data->{channels} || [];
-        };
-        
-        if ($@) {
-            $log->error("Failed to parse channel data: $@");
-            $log->debug("Raw output: $output");
-            $cb->([]);
-            return;
-        }
-        
-        # Cache the results
-        $cache->set('siriusxm_channels', $channels, CACHE_TIMEOUT);
-        
-        $log->info("Retrieved " . scalar(@$channels) . " channels");
-        $cb->($channels);
-    });
+    $http->get($url);
 }
 
 sub getStreamUrl {
@@ -106,123 +95,98 @@ sub getStreamUrl {
     
     $log->debug("Getting stream URL for channel: $channel_id");
     
-    my $helper_path = $prefs->get('helper_path');
-    my $username = $prefs->get('username');
-    my $password = $prefs->get('password');
-    my $quality = $prefs->get('quality') || 'medium';
+    my $port = $prefs->get('port') || '9999';
+    my $stream_url = "http://localhost:$port/$channel_id.m3u8";
     
-    unless (-x $helper_path) {
-        $log->error("Helper application not found: $helper_path");
-        $cb->(undef);
-        return;
-    }
-    
-    # Build command to get stream URL
-    my @cmd = (
-        $helper_path,
-        '--username', $username,
-        '--password', $password,
-        '--quality', $quality,
-        '--channel', $channel_id,
-        '--get-stream-url',
-        '--format', 'json'
-    );
-    
-    # Execute helper asynchronously
-    Slim::Utils::Timers::setTimer(undef, time(), sub {
-        my $output = eval {
-            local $SIG{ALRM} = sub { die "timeout\n" };
-            alarm 30; # 30 second timeout
-            my $result = `@cmd 2>&1`;
-            alarm 0;
-            return $result;
-        };
-        
-        if ($@) {
-            $log->error("Helper execution failed: $@");
-            $cb->(undef);
-            return;
-        }
-        
-        my $stream_data = eval {
-            my $data = decode_json($output);
-            return $data;
-        };
-        
-        if ($@) {
-            $log->error("Failed to parse stream data: $@");
-            $log->debug("Raw output: $output");
-            $cb->(undef);
-            return;
-        }
-        
-        my $stream_url = $stream_data->{stream_url};
-        unless ($stream_url) {
-            $log->error("No stream URL returned for channel: $channel_id");
-            $cb->(undef);
-            return;
-        }
-        
-        $log->debug("Stream URL retrieved: $stream_url");
-        $cb->($stream_url);
-    });
+    $log->debug("Stream URL: $stream_url");
+    $cb->($stream_url);
 }
 
 sub authenticate {
     my ($class, $cb) = @_;
     
-    $log->debug("Authenticating with SiriusXM");
+    $log->debug("Testing authentication with SiriusXM proxy");
     
-    my $helper_path = $prefs->get('helper_path');
-    my $username = $prefs->get('username');
-    my $password = $prefs->get('password');
+    my $port = $prefs->get('port') || '9999';
+    my $url = "http://localhost:$port/channel/all";
     
-    unless (-x $helper_path) {
-        $log->error("Helper application not found: $helper_path");
-        $cb->(0);
-        return;
-    }
-    
-    # Build command to test authentication
-    my @cmd = (
-        $helper_path,
-        '--username', $username,
-        '--password', $password,
-        '--test-auth',
-        '--format', 'json'
+    # Use async HTTP request to test proxy connection
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            $log->info("Authentication test successful - proxy is responding");
+            $cb->(1);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->error("Authentication test failed - proxy not responding: $error");
+            $cb->(0);
+        },
+        {
+            timeout => 15,
+        }
     );
     
-    # Execute helper asynchronously
-    Slim::Utils::Timers::setTimer(undef, time(), sub {
-        my $output = eval {
-            local $SIG{ALRM} = sub { die "timeout\n" };
-            alarm 15; # 15 second timeout for auth test
-            my $result = `@cmd 2>&1`;
-            alarm 0;
-            return $result;
+    $http->get($url);
+}
+
+sub processChannelData {
+    my ($class, $raw_channels) = @_;
+    
+    return [] unless $raw_channels && ref($raw_channels) eq 'ARRAY';
+    
+    my @processed_channels = ();
+    my %categories = ();
+    
+    # First pass: organize channels by category
+    for my $channel (@$raw_channels) {
+        next unless $channel->{channelId} && $channel->{name};
+        
+        # Get the primary category or use a default
+        my $category = $channel->{categoryList}->[0]->{categoryName} || 'Other';
+        
+        # Store channel info
+        my $channel_info = {
+            id => $channel->{channelId},
+            name => $channel->{name},
+            category => $category,
+            number => $channel->{siriusChannelNumber} || '',
+            description => $channel->{description} || '',
+            logo => $channel->{channelLogo} || '',
         };
         
-        if ($@) {
-            $log->error("Authentication test failed: $@");
-            $cb->(0);
-            return;
+        # Add to category group
+        push @{$categories{$category}}, $channel_info;
+    }
+    
+    # Second pass: create menu structure with categories
+    for my $category (sort keys %categories) {
+        my $channels_in_category = $categories{$category};
+        
+        # Sort channels within category by channel number
+        my @sorted_channels = sort {
+            my $a_num = $a->{number} || 9999;
+            my $b_num = $b->{number} || 9999;
+            $a_num <=> $b_num;
+        } @$channels_in_category;
+        
+        # Add each channel with category prefix
+        for my $channel (@sorted_channels) {
+            push @processed_channels, {
+                id => $channel->{id},
+                name => "$category / $channel->{name}",
+                display_name => $channel->{name},
+                category => $category,
+                number => $channel->{number},
+                description => $channel->{description},
+                logo => $channel->{logo},
+            };
         }
-        
-        my $auth_result = eval {
-            my $data = decode_json($output);
-            return $data->{authenticated} || 0;
-        };
-        
-        if ($@) {
-            $log->error("Failed to parse authentication result: $@");
-            $log->debug("Raw output: $output");
-            $cb->(0);
-            return;
-        }
-        
-        $log->info("Authentication " . ($auth_result ? "successful" : "failed"));
-        $cb->($auth_result);
-    });
+    }
+    
+    $log->debug("Processed " . scalar(@processed_channels) . " channels into " . scalar(keys %categories) . " categories");
+    
+    return \@processed_channels;
 }
 
 1;

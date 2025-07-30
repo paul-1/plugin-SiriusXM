@@ -37,6 +37,12 @@ PLUGIN_SIRIUSXM_QUALITY_MEDIUM
 PLUGIN_SIRIUSXM_QUALITY_HIGH
 	EN	High (256 kbps)
 
+PLUGIN_SIRIUSXM_PORT
+	EN	Proxy Port
+
+PLUGIN_SIRIUSXM_PORT_DESC
+	EN	Port number for the SiriusXM proxy server (default: 9999)
+
 PLUGIN_SIRIUSXM_ERROR_NO_CREDENTIALS
 	EN	Please configure your SiriusXM username and password in plugin settings
 
