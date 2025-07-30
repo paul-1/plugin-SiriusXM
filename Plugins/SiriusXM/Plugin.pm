@@ -114,11 +114,11 @@ sub handleFeed {
         return;
     }
     
-    # Get channels from API
+    # Get channels from API (now returns hierarchical menu)
     Plugins::SiriusXM::API->getChannels($client, sub {
-        my $channels = shift;
+        my $menu_items = shift;
         
-        if (!$channels || !@$channels) {
+        if (!$menu_items || !@$menu_items) {
             $cb->({
                 items => [{
                     name => string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED'),
@@ -128,18 +128,8 @@ sub handleFeed {
             return;
         }
         
-        my @items = map {
-            {
-                name => $_->{name},
-                type => 'audio',
-                url  => 'sxm://' . $_->{id},
-                icon => $_->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
-                on_select => 'play',
-            }
-        } @$channels;
-        
         $cb->({
-            items => \@items
+            items => $menu_items
         });
     });
 }

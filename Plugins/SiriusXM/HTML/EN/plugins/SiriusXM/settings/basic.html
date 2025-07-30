@@ -3,19 +3,35 @@
 	[% WRAPPER settingSection %]
 		[% WRAPPER settingGroup title="PLUGIN_SIRIUSXM" desc="" %]
 			<div class="prefDesc"><p>[% "PLUGIN_SIRIUSXM_DESC" | string %]</p></div>
+			<div class="prefDesc">
+				<p><strong>[% "PLUGIN_SIRIUSXM_PROXY_STATUS" | string %]:</strong> 
+				<span style="color: [% proxy_status.match('Running') ? 'green' : 'red' %]">[% proxy_status %]</span></p>
+			</div>
 		[% END %]
 	[% END %]
 
-	[% WRAPPER setting title="PLUGIN_SIRIUSXM_USERNAME" desc="" %]
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_USERNAME" desc="PLUGIN_SIRIUSXM_USERNAME_DESC" %]
 		<input type="text" class="stdedit" name="pref_username" id="username" value="[% prefs.pref_username | html %]" size="40">
 	[% END %]
 
-	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PASSWORD" desc="" %]
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PASSWORD" desc="PLUGIN_SIRIUSXM_PASSWORD_DESC" %]
 		<input type="password" class="stdedit" name="pref_password" id="password" value="[% prefs.pref_password | html %]" size="40">
 	[% END %]
 
-	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PORT" desc="" %]
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PORT" desc="PLUGIN_SIRIUSXM_PORT_DESC" %]
 		<input type="text" class="stdedit" name="pref_port" id="port" value="[% prefs.pref_port | html %]" size="40">
 	[% END %]
+
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_QUALITY" desc="PLUGIN_SIRIUSXM_QUALITY_DESC" %]
+		<select name="pref_quality" class="stdedit">
+			[% FOREACH option = quality_options %]
+				<option value="[% option.value %]" [% IF prefs.pref_quality == option.value %]selected[% END %]>[% option.text %]</option>
+			[% END %]
+		</select>
+	[% END %]
+
+	<div class="prefDesc">
+		<input type="submit" name="saveSettings" value="[% 'PLUGIN_SIRIUSXM_SAVE_SETTINGS' | string %]" class="stdclick">
+	</div>
 
 [% PROCESS settings/footer.html %]

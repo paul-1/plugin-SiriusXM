@@ -68,14 +68,17 @@ sub getChannels {
                 return;
             }
             
-            # Process and organize channels
-            my $processed_channels = $class->processChannelData($channels_data);
+            # Process and organize channels by category
+            my $categories = $class->processChannelData($channels_data);
+            
+            # Build hierarchical menu structure
+            my $menu_items = $class->buildCategoryMenu($categories);
             
             # Cache the processed results
-            $cache->set('siriusxm_channels', $processed_channels, CACHE_TIMEOUT);
+            $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
             
-            $log->info("Retrieved and processed " . scalar(@$processed_channels) . " channels");
-            $cb->($processed_channels);
+            $log->info("Retrieved and processed channels into menu structure");
+            $cb->($menu_items);
         },
         sub {
             my ($http, $error) = @_;
@@ -130,38 +133,15 @@ sub authenticate {
     $http->get($url);
 }
 
-sub processChannelData {
-    my ($class, $raw_channels) = @_;
+sub buildCategoryMenu {
+    my ($class, $categories) = @_;
     
-    return [] unless $raw_channels && ref($raw_channels) eq 'ARRAY';
+    my @menu_items = ();
+    my $port = $prefs->get('port') || '9999';
     
-    my @processed_channels = ();
-    my %categories = ();
-    
-    # First pass: organize channels by category
-    for my $channel (@$raw_channels) {
-        next unless $channel->{channelId} && $channel->{name};
-        
-        # Get the primary category or use a default
-        my $category = $channel->{categoryList}->[0]->{categoryName} || 'Other';
-        
-        # Store channel info
-        my $channel_info = {
-            id => $channel->{channelId},
-            name => $channel->{name},
-            category => $category,
-            number => $channel->{siriusChannelNumber} || '',
-            description => $channel->{description} || '',
-            logo => $channel->{channelLogo} || '',
-        };
-        
-        # Add to category group
-        push @{$categories{$category}}, $channel_info;
-    }
-    
-    # Second pass: create menu structure with categories
-    for my $category (sort keys %categories) {
-        my $channels_in_category = $categories{$category};
+    # Create folder menu for each category
+    for my $category_name (sort keys %$categories) {
+        my $channels_in_category = $categories->{$category_name};
         
         # Sort channels within category by channel number
         my @sorted_channels = sort {
@@ -170,23 +150,85 @@ sub processChannelData {
             $a_num <=> $b_num;
         } @$channels_in_category;
         
-        # Add each channel with category prefix
+        # Create menu items for channels in this category
+        my @category_items = ();
         for my $channel (@sorted_channels) {
-            push @processed_channels, {
-                id => $channel->{id},
-                name => "$category / $channel->{name}",
-                display_name => $channel->{name},
-                category => $category,
-                number => $channel->{number},
+            # Build proper proxy URL
+            my $stream_url = "http://localhost:$port/" . $channel->{id} . ".m3u8";
+            
+            push @category_items, {
+                name => $channel->{name},
+                type => 'audio',
+                url  => 'sxm://' . $channel->{id},
+                icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+                on_select => 'play',
                 description => $channel->{description},
-                logo => $channel->{logo},
+                channel_number => $channel->{number},
             };
         }
+        
+        # Create category folder
+        push @menu_items, {
+            name => $category_name,
+            type => 'opml',
+            items => \@category_items,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        };
     }
     
-    $log->debug("Processed " . scalar(@processed_channels) . " channels into " . scalar(keys %categories) . " categories");
+    return \@menu_items;
+}
+
+sub processChannelData {
+    my ($class, $raw_channels) = @_;
     
-    return \@processed_channels;
+    return [] unless $raw_channels && ref($raw_channels) eq 'ARRAY';
+    
+    my %categories = ();
+    
+    # Process channels and organize by primary category
+    for my $channel (@$raw_channels) {
+        next unless $channel->{channelId} && $channel->{name};
+        
+        # Find the primary category
+        my $primary_category = 'Other';  # Default fallback
+        
+        if ($channel->{categories} && $channel->{categories}->{categories}) {
+            my $category_list = $channel->{categories}->{categories};
+            
+            # Look for category with isPrimary = true
+            for my $cat (@$category_list) {
+                if ($cat->{isPrimary} && $cat->{name}) {
+                    $primary_category = $cat->{name};
+                    last;
+                }
+            }
+        }
+        
+        # Store channel info with high-resolution logo (520x520)
+        my $logo_url = '';
+        if ($channel->{channelLogo}) {
+            # Use 520x520 resolution for logos
+            $logo_url = $channel->{channelLogo};
+            $logo_url =~ s/\/\d+x\d+\//\/520x520\//;  # Replace any existing resolution with 520x520
+        }
+        
+        my $channel_info = {
+            id => $channel->{channelId},
+            name => $channel->{name},
+            category => $primary_category,
+            number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
+            description => $channel->{description} || '',
+            logo => $logo_url,
+        };
+        
+        # Add to category group
+        push @{$categories{$primary_category}}, $channel_info;
+    }
+    
+    $log->debug("Processed channels into " . scalar(keys %categories) . " categories");
+    
+    return \%categories;  # Return categories hash instead of flat list
 }
 
 1;
