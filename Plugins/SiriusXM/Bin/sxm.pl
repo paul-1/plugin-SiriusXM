@@ -14,6 +14,7 @@ sxm.pl - SiriusXM proxy server
         -ca, --canada           Use Canadian region
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
+        -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
         -h, --help              Show this help message
 
 =head1 DESCRIPTION
@@ -87,6 +88,7 @@ my %CONFIG = (
     env          => 0,
     verbose      => LOG_INFO,
     help         => 0,
+    quality      => 'High',
 );
 
 # Global state
@@ -657,6 +659,32 @@ sub get_playlist {
     
     my $content = $response->decoded_content;
     
+    # Check if this is a master playlist with quality variants
+    if ($content =~ /#EXT-X-STREAM-INF/) {
+        main::log_debug("Master playlist detected, selecting quality variant");
+        my $variant_url = $self->select_quality_variant($content, $url);
+        if ($variant_url) {
+            main::log_info("Selected quality variant: $variant_url");
+            # Fetch the selected variant playlist
+            my $variant_uri = URI->new($variant_url);
+            $variant_uri->query_form(
+                token    => $token,
+                consumer => 'k2',
+                gupId    => $gup_id,
+            );
+            
+            my $variant_response = $self->{ua}->get($variant_uri);
+            if (!$variant_response->is_success) {
+                main::log_error("Failed to fetch quality variant: " . $variant_response->code);
+                return undef;
+            }
+            $content = $variant_response->decoded_content;
+            $url = $variant_url; # Update URL for base path calculation
+        } else {
+            main::log_warn("Failed to select quality variant, using original content");
+        }
+    }
+    
     # Calculate and store base path for this channel
     my $base_url = $url;
     $base_url =~ s/\/[^\/]+$//;
@@ -685,6 +713,90 @@ sub get_playlist {
     
     main::log_trace("Modified $modified_segments segments with base path");
     return join("\n", @lines);
+}
+
+sub select_quality_variant {
+    my ($self, $master_playlist, $base_url) = @_;
+    
+    # Define bandwidth mappings for quality levels
+    my %quality_bandwidths = (
+        'High' => 281600,
+        'Med'  => 105600,
+        'Low'  => 70400,
+    );
+    
+    # Get desired bandwidth from global config
+    my $desired_bandwidth = $quality_bandwidths{$main::CONFIG{quality}};
+    if (!$desired_bandwidth) {
+        main::log_error("Invalid quality setting: $main::CONFIG{quality}");
+        return undef;
+    }
+    
+    main::log_debug("Selecting quality variant for: $main::CONFIG{quality} ($desired_bandwidth bps)");
+    
+    my @lines = split /\n/, $master_playlist;
+    my %variants = ();
+    
+    # Parse master playlist to extract variants with their bandwidths
+    for my $i (0..$#lines) {
+        $lines[$i] =~ s/\r?\n$//;
+        if ($lines[$i] =~ /#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
+            my $bandwidth = $1;
+            # Next line should contain the variant URL
+            if ($i + 1 <= $#lines && $lines[$i + 1] !~ /^#/) {
+                my $variant_url = $lines[$i + 1];
+                $variant_url =~ s/\r?\n$//;
+                
+                # Convert relative URL to absolute if needed
+                if ($variant_url !~ /^https?:\/\//) {
+                    my $base = $base_url;
+                    $base =~ s/\/[^\/]*$/\//;
+                    $variant_url = $base . $variant_url;
+                }
+                
+                $variants{$bandwidth} = $variant_url;
+                main::log_trace("Found variant: $bandwidth bps -> $variant_url");
+            }
+        }
+    }
+    
+    # Select the best matching variant
+    my $selected_url = undef;
+    my $selected_bandwidth = undef;
+    
+    if (exists $variants{$desired_bandwidth}) {
+        # Exact match found
+        $selected_url = $variants{$desired_bandwidth};
+        $selected_bandwidth = $desired_bandwidth;
+        main::log_debug("Found exact bandwidth match: $desired_bandwidth");
+    } else {
+        # Find closest match - prefer lower bandwidth over higher to avoid buffering issues
+        my @available_bandwidths = sort { $a <=> $b } keys %variants;
+        
+        for my $bandwidth (@available_bandwidths) {
+            if ($bandwidth <= $desired_bandwidth) {
+                $selected_url = $variants{$bandwidth};
+                $selected_bandwidth = $bandwidth;
+            } else {
+                last;
+            }
+        }
+        
+        # If no suitable lower bandwidth found, use the lowest available
+        if (!$selected_url && @available_bandwidths) {
+            $selected_bandwidth = $available_bandwidths[0];
+            $selected_url = $variants{$selected_bandwidth};
+            main::log_warn("No suitable quality variant found, using lowest: $selected_bandwidth");
+        }
+    }
+    
+    if ($selected_url) {
+        main::log_info("Selected quality variant: $main::CONFIG{quality} -> $selected_bandwidth bps");
+        return $selected_url;
+    } else {
+        main::log_error("No quality variants found in master playlist");
+        return undef;
+    }
 }
 
 sub get_segment {
@@ -1027,6 +1139,23 @@ sub handle_http_request {
             send_error_response($client, 404, 'Channel Not Found');
         }
     }
+    elsif ($path eq '/auth') {
+        # Handle authentication state requests
+        main::log_debug("Authentication state request");
+        
+        my $authenticated = ($sxm->is_logged_in() && $sxm->is_session_authenticated()) ? 1 : 0;
+        my $auth_state = { authenticated => $authenticated };
+        my $json_data = $sxm->{json}->encode($auth_state);
+        
+        my $response = HTTP::Response->new(200);
+        $response->content_type('application/json');
+        $response->header('Connection', 'close');
+        $response->content($json_data);
+        eval { $client->send_response($response); };
+        if ($@) {
+            main::log_warn("Error sending authentication state response: $@");
+        }
+    }
     else {
         # Handle unknown requests
         main::log_warn("Unknown request: $path");
@@ -1074,6 +1203,19 @@ sub parse_arguments {
                 $CONFIG{verbose} = $levels{uc($value)};
             } else {
                 die "Invalid verbose level: $value. Use: ERROR, WARN, INFO, DEBUG, TRACE\n";
+            }
+        },
+        'quality|q=s'   => sub {
+            my ($name, $value) = @_;
+            my %qualities = (
+                'HIGH' => 'High',
+                'MED'  => 'Med', 
+                'LOW'  => 'Low',
+            );
+            if (exists $qualities{uc($value)}) {
+                $CONFIG{quality} = $qualities{uc($value)};
+            } else {
+                die "Invalid quality level: $value. Use: High, Med, Low\n";
             }
         },
         'help|h'        => \$help_text,
