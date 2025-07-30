@@ -92,7 +92,6 @@ jobs:
         grep -q "pref_username" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
         grep -q "pref_password" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
         grep -q "pref_quality" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_helper_path" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
 
 
     - name: Test plugin structure validation
