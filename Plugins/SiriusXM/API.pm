@@ -180,7 +180,7 @@ sub buildCategoryMenu {
             push @category_items, {
                 name => $channel->{name},
                 type => 'audio',
-                url  => 'sxm://' . $channel->{id},
+                url  => $stream_url,
                 icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
                 on_select => 'play',
                 description => $channel->{description},
