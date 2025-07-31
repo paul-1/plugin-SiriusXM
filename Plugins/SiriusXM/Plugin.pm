@@ -12,7 +12,6 @@ use File::Spec;
 use File::Basename qw(dirname);
 
 use Plugins::SiriusXM::API;
-#use Plugins::SiriusXM::ProtocolHandler;
 use Plugins::SiriusXM::Settings;
 
 my $prefs = preferences('plugin.siriusxm');
@@ -58,11 +57,6 @@ sub initPlugin {
     
     # Initialize the API module
     Plugins::SiriusXM::API->init();
-    
-    # Register protocol handler
- #   Slim::Player::ProtocolHandlers->registerHandler(
- #       sxm => 'Plugins::SiriusXM::ProtocolHandler'
- #   );
     
     # Add to music services menu
     Slim::Menu::TrackInfo->registerInfoProvider( siriusxm => (
