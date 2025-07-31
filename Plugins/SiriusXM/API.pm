@@ -111,14 +111,35 @@ sub authenticate {
     $log->debug("Testing authentication with SiriusXM proxy");
     
     my $port = $prefs->get('port') || '9999';
-    my $url = "http://localhost:$port/channel/all";
+    my $url = "http://localhost:$port/auth";
     
-    # Use async HTTP request to test proxy connection
+    # Use async HTTP request to test proxy authentication
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
             my $response = shift;
-            $log->info("Authentication test successful - proxy is responding");
-            $cb->(1);
+            my $content = $response->content;
+            
+            $log->debug("Authentication response received");
+            
+            my $auth_data;
+            eval {
+                $auth_data = decode_json($content);
+            };
+            
+            if ($@) {
+                $log->error("Failed to parse authentication response: $@");
+                $cb->(0);
+                return;
+            }
+            
+            my $authenticated = $auth_data->{authenticated} || 0;
+            if ($authenticated) {
+                $log->info("Authentication test successful - user is authenticated");
+                $cb->(1);
+            } else {
+                $log->warn("Authentication test failed - user is not authenticated");
+                $cb->(0);
+            }
         },
         sub {
             my ($http, $error) = @_;
@@ -179,6 +200,31 @@ sub buildCategoryMenu {
     return \@menu_items;
 }
 
+sub findBestImage {
+    my ($class, $images_data, $target_width, $target_height) = @_;
+    
+    return '' unless $images_data && $images_data->{images} && ref($images_data->{images}) eq 'ARRAY';
+    
+    my $best_image = '';
+    my $best_score = 999999; # Start with a high score
+    
+    for my $image (@{$images_data->{images}}) {
+        next unless $image->{width} && $image->{height} && $image->{url};
+        
+        # Calculate distance from target size (Euclidean distance)
+        my $width_diff = abs($image->{width} - $target_width);
+        my $height_diff = abs($image->{height} - $target_height);
+        my $score = sqrt($width_diff * $width_diff + $height_diff * $height_diff);
+        
+        if ($score < $best_score) {
+            $best_score = $score;
+            $best_image = $image->{url};
+        }
+    }
+    
+    return $best_image;
+}
+
 sub processChannelData {
     my ($class, $raw_channels) = @_;
     
@@ -205,12 +251,10 @@ sub processChannelData {
             }
         }
         
-        # Store channel info with high-resolution logo (520x520)
+        # Store channel info with best matching logo (closest to 520x520)
         my $logo_url = '';
-        if ($channel->{channelLogo}) {
-            # Use 520x520 resolution for logos
-            $logo_url = $channel->{channelLogo};
-            $logo_url =~ s/\/\d+x\d+\//\/520x520\//;  # Replace any existing resolution with 520x520
+        if ($channel->{images}) {
+            $logo_url = $class->findBestImage($channel->{images}, 520, 520);
         }
         
         my $channel_info = {

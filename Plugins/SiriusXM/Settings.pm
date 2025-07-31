@@ -59,34 +59,27 @@ sub handler {
             
             if (Plugins::SiriusXM::Plugin->startProxy()) {
                 $params->{info} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
+                
+                # Test authentication right after starting proxy if credentials are provided
+                if ($params->{pref_username} && $params->{pref_password}) {
+                    Plugins::SiriusXM::API->authenticate(sub {
+                        my $success = shift;
+                        
+                        if ($success) {
+                            $params->{info} = ($params->{info} || '') . ' ' . string('PLUGIN_SIRIUSXM_AUTH_SUCCESS');
+                            $log->info("Authentication test successful");
+                        } else {
+                            $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED');
+                            $log->warn("Authentication test failed");
+                        }
+                    });
+                }
             } else {
                 $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_FAILED');
             }
             
             # Clear cached channels since proxy settings changed
             Plugins::SiriusXM::API->cleanup();
-        }
-        
-        # Test authentication if credentials are provided
-        if ($params->{pref_username} && $params->{pref_password} && 
-            $params->{pref_port}) {
-            
-            # Test authentication
-            Plugins::SiriusXM::API->authenticate(sub {
-                my $success = shift;
-                
-                if ($success) {
-                    $params->{info} = ($params->{info} || '') . ' ' . string('PLUGIN_SIRIUSXM_AUTH_SUCCESS');
-                    $log->info("Authentication test successful");
-                } else {
-                    $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED');
-                    $log->warn("Authentication test failed");
-                }
-                
-                return $result;
-            });
-            
-            return $result;
         }
         
         return $result;
