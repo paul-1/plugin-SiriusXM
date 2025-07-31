@@ -95,7 +95,6 @@ sub shutdownPlugin {
     # Clean up API connections
     Plugins::SiriusXM::API->cleanup();
     
-    $class->SUPER::shutdownPlugin();
 }
 
 sub handleFeed {
