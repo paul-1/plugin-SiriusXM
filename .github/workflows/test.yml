@@ -88,9 +88,10 @@ jobs:
     - name: Validate HTML template
       run: |
         # Check that HTML template contains required elements
-        grep -q "PLUGIN_SIRIUSXM_SETTINGS" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
         grep -q "pref_username" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
         grep -q "pref_password" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_port" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
         grep -q "pref_quality" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
 
 
