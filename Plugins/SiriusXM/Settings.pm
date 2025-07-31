@@ -22,7 +22,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality helper_path));
+    return ($prefs, qw(username password quality port));
 }
 
 sub handler {
@@ -33,38 +33,68 @@ sub handler {
     # Handle form submission
     if ($params->{saveSettings}) {
         
-        # Test authentication if credentials are provided
-        if ($params->{pref_username} && $params->{pref_password} && 
-            $params->{pref_port} ) {
+        # Store old values to check if proxy restart is needed
+        my $old_username = $prefs->get('username');
+        my $old_password = $prefs->get('password');
+        my $old_port = $prefs->get('port');
+        
+        # Save the settings first
+        my $result = $class->SUPER::handler($client, $params, $callback, @args);
+        
+        # Check if proxy-related settings changed
+        my $need_restart = (
+            ($params->{pref_username} && $params->{pref_username} ne $old_username) ||
+            ($params->{pref_password} && $params->{pref_password} ne $old_password) ||
+            ($params->{pref_port} && $params->{pref_port} ne $old_port)
+        );
+        
+        if ($need_restart) {
+            $log->info("Settings changed, restarting proxy");
             
-            # Temporarily set prefs for testing
-            my $old_username = $prefs->get('username');
-            my $old_password = $prefs->get('password');
-            my $old_port = $prefs->get('port');
+            # Restart proxy with new settings
+            Plugins::SiriusXM::Plugin->stopProxy();
             
-            $prefs->set('username', $params->{pref_username});
-            $prefs->set('password', $params->{pref_password});
-            $prefs->set('port', $params->{pref_port});
+            # Give it a moment to shut down
+            sleep(1);
             
-            # Test authentication
-            Plugins::SiriusXM::API->authenticate(sub {
-                my $success = shift;
+            if (Plugins::SiriusXM::Plugin->startProxy()) {
+                $params->{info} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
                 
-                if ($success) {
-                    $params->{info} = string('Authentication successful');
-                    $log->info("Authentication test successful");
-                } else {
-                    $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED');
-                    $log->warn("Authentication test failed");
+                # Test authentication right after starting proxy if credentials are provided
+                if ($params->{pref_username} && $params->{pref_password}) {
+                    Plugins::SiriusXM::API->authenticate(sub {
+                        my $success = shift;
+                        
+                        if ($success) {
+                            $params->{info} = ($params->{info} || '') . ' ' . string('PLUGIN_SIRIUSXM_AUTH_SUCCESS');
+                            $log->info("Authentication test successful");
+                        } else {
+                            $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED');
+                            $log->warn("Authentication test failed");
+                        }
+                    });
                 }
-                
-                # Continue with normal settings handling
-                $class->SUPER::handler($client, $params, $callback, @args);
-            });
+            } else {
+                $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_FAILED');
+            }
             
-            return;
+            # Clear cached channels since proxy settings changed
+            Plugins::SiriusXM::API->cleanup();
         }
+        
+        return $result;
     }
+    
+    return $class->SUPER::handler($client, $params, $callback, @args);
+}
+
+sub beforeRender {
+    my ($class, $params) = @_;
+    
+    # Add proxy status information
+    $params->{proxy_status} = Plugins::SiriusXM::Plugin->isProxyRunning() ? 
+        string('PLUGIN_SIRIUSXM_PROXY_RUNNING') : 
+        string('PLUGIN_SIRIUSXM_PROXY_STOPPED');
     
     # Prepare template variables
     $params->{quality_options} = [
@@ -72,12 +102,6 @@ sub handler {
         { value => 'medium', text => string('PLUGIN_SIRIUSXM_QUALITY_MEDIUM') },
         { value => 'high',   text => string('PLUGIN_SIRIUSXM_QUALITY_HIGH') },
     ];
-    
-    return $class->SUPER::handler($client, $params, $callback, @args);
-}
-
-sub beforeRender {
-    my ($class, $params) = @_;
     
     # Add any additional template processing here
     $params->{plugin_version} = $Plugins::SiriusXM::Plugin::VERSION || '0.1.0';
