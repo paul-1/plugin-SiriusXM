@@ -52,6 +52,8 @@ sub initPlugin {
         port => '9999'
     });
     
+
+    
     # Start the proxy process
     $class->startProxy();
     
@@ -68,7 +70,7 @@ sub initPlugin {
     Plugins::SiriusXM::Settings->new();
     
     $class->SUPER::initPlugin(
-        feed   => \&handleFeed,
+        feed   => \&toplevelMenu,
         tag    => 'siriusxm',
         menu   => 'radios',
         is_app => 1,
@@ -91,10 +93,38 @@ sub shutdownPlugin {
     
 }
 
-sub handleFeed {
+sub validateHLSSupport {
+    my $class = shift;
+    
+    $log->debug("Validating HLS stream support requirements");
+    
+    # Check for HLS mimetype support
+    my $hlssupported = Slim::Music::Info::mimeToType('application/vnd.apple.mpegurl');
+    
+    if ($hlssupported) {
+        $log->info("HLS mimetype support found - HLS streams supported");
+        return 1;
+    } else {
+        $log->warn("HLS mimetype support not found - HLS streams may not be supported");
+        return 0;
+    }
+}
+
+sub toplevelMenu {
     my ($client, $cb, $args) = @_;
     
-    $log->debug("Handling feed request");
+    $log->debug("Building top level menu");
+    
+    # Check HLS support
+    unless (__PACKAGE__->validateHLSSupport()) {
+        $cb->({
+            items => [{
+                name => string('PLUGIN_SIRIUSXM_ERROR_HLS_UNSUPPORTED'),
+                type => 'text',
+            }]
+        });
+        return;
+    }
     
     # Check if credentials are configured
     unless ($prefs->get('username') && $prefs->get('password')) {
@@ -107,7 +137,72 @@ sub handleFeed {
         return;
     }
     
-    # Get channels from API (now returns hierarchical menu)
+    # Build simplified top-level menu structure
+    my @menu_items = (
+        {
+            name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
+            type => 'search',
+            url  => \&searchMenu,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        },
+        {
+            name => string('PLUGIN_SIRIUSXM_MENU_BROWSE_BY_GENRE'),
+            type => 'opml',
+            url  => \&browseByGenre,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        }
+    );
+    
+    $cb->({
+        items => \@menu_items
+    });
+}
+
+sub searchMenu {
+    my ($client, $cb, $args, $pt) = @_;
+    
+    my $search_term = $pt->[0] || $args->{search} || '';
+    
+    $log->debug("Search menu called with term: $search_term");
+    
+    if (!$search_term) {
+        # Return empty search menu
+        $cb->({
+            items => [{
+                name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
+                type => 'search',
+                url  => \&searchMenu,
+            }]
+        });
+        return;
+    }
+    
+    # Search channels via API
+    Plugins::SiriusXM::API->searchChannels($client, $search_term, sub {
+        my $results = shift;
+        
+        if (!$results || !@$results) {
+            $cb->({
+                items => [{
+                    name => "No results found for '$search_term'",
+                    type => 'text',
+                }]
+            });
+            return;
+        }
+        
+        $cb->({
+            items => $results
+        });
+    });
+}
+
+sub browseByGenre {
+    my ($client, $cb, $args) = @_;
+    
+    $log->debug("Browse by genre menu");
+    
+    # Get channels organized by genre from API
     Plugins::SiriusXM::API->getChannels($client, sub {
         my $menu_items = shift;
         

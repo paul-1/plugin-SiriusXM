@@ -75,3 +75,18 @@ PLUGIN_SIRIUSXM_AUTH_SUCCESS
 
 PLUGIN_SIRIUSXM_SAVE_SETTINGS
 	EN	Save Settings
+
+PLUGIN_SIRIUSXM_ERROR_HLS_UNSUPPORTED
+	EN	HLS stream support is not available. Please install a plugin that supports HLS streams such as PlayHLS.
+
+PLUGIN_SIRIUSXM_ERROR_FFMPEG_MISSING
+	EN	FFmpeg is not available in the system. Please install FFmpeg to use SiriusXM plugin.
+
+PLUGIN_SIRIUSXM_ERROR_REQUIREMENTS_NOT_MET
+	EN	SiriusXM plugin requirements not met. Check plugin settings for details.
+
+PLUGIN_SIRIUSXM_MENU_SEARCH
+	EN	Search
+
+PLUGIN_SIRIUSXM_MENU_BROWSE_BY_GENRE
+	EN	Browse by Genre

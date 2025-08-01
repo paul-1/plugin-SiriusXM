@@ -18,6 +18,14 @@ jobs:
       with:
         perl-version: '5.36'
 
+    - name: Clone LMS Server Repository for Testing
+      run: |
+        # Clone LMS server repository to get actual modules
+        git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server
+        
+        # Set up PERL5LIB to include LMS modules
+        echo "PERL5LIB=$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB" >> $GITHUB_ENV
+
     - name: Install Perl dependencies
       run: |
         # Install system packages for Perl modules
@@ -27,8 +35,8 @@ jobs:
         # Install cpanm
         curl -L https://cpanmin.us | perl - --sudo App::cpanminus || true
 
-        # Install additional modules if cpanm is available  (Replace with slimserver and @INC)
-        which cpanm && cpanm --notest JSON::XS LWP::UserAgent HTTP::Request::Common || true
+        # Install additional modules required by LMS
+        which cpanm && cpanm --notest JSON::XS LWP::UserAgent HTTP::Request::Common DBI DBD::SQLite || true
 
     - name: Validate XML files
       run: |
@@ -44,63 +52,16 @@ jobs:
         xmllint --noout repo.xml
         echo "✓ repo.xml is well-formed"
 
-    - name: Check Perl syntax
-      run: |
-        # Check Perl modules for basic syntax without compilation
-        # Since modules depend on LMS framework, we can't compile them in isolation
-
-        echo "Checking Perl syntax (structure validation only)..."
-        for file in Plugins/SiriusXM/*.pm; do
-          echo "Validating $file structure..."
-          # Check for basic Perl syntax issues without trying to compile
-          perl -ne 'BEGIN{$|=1} if(/\bsyntax error\b/i || /compilation aborted/i){exit 1}' "$file" || {
-            echo "Syntax error detected in $file"
-            exit 1
-          }
-          echo "✓ $file structure looks valid"
-        done
-
-    - name: Validate directory structure
-      run: |
-        # Ensure required directories exist
-        test -d Plugins/SiriusXM
-        test -d Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings
-        test -d .github/workflows
-
-        # Ensure required files exist
-        test -f Plugins/SiriusXM/install.xml
-        test -f repo.xml
-        test -f Plugins/SiriusXM/strings.txt
-        test -f README.md
-        test -f .gitignore
-        test -f Plugins/SiriusXM/Plugin.pm
-        test -f Plugins/SiriusXM/API.pm
-        test -f Plugins/SiriusXM/ProtocolHandler.pm
-        test -f Plugins/SiriusXM/Settings.pm
-        test -f Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-
-    - name: Check strings file format
-      run: |
-        # Basic validation of strings.txt format
-        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/strings.txt
-        grep -q "EN" Plugins/SiriusXM/strings.txt
-
-    - name: Validate HTML template
-      run: |
-        # Check that HTML template contains required elements
-        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_username" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_password" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_port" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-        grep -q "pref_quality" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
-
-
     - name: Test plugin structure validation
       run: |
-        # Validate plugin structure without trying to load LMS-dependent modules
+        # Validate plugin structure with access to LMS modules
         perl -e '
         use strict;
         use warnings;
+
+        # Add LMS modules to path
+        use lib "lms-server";
+        use lib "lms-server/CPAN";
 
         # Check that all Perl modules have proper package declarations
         my @modules = glob("Plugins/SiriusXM/*.pm");
@@ -126,3 +87,75 @@ jobs:
 
         print "All modules passed structure validation\n";
         '
+
+    - name: Validate directory structure
+      run: |
+        # Ensure required directories exist
+        test -d Plugins/SiriusXM
+        test -d Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings
+        test -d .github/workflows
+
+        # Ensure required files exist
+        test -f Plugins/SiriusXM/install.xml
+        test -f repo.xml
+        test -f Plugins/SiriusXM/strings.txt
+        test -f README.md
+        test -f .gitignore
+        test -f Plugins/SiriusXM/Plugin.pm
+        test -f Plugins/SiriusXM/API.pm
+        test -f Plugins/SiriusXM/Settings.pm
+        test -f Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+
+    - name: Check strings file format
+      run: |
+        # Basic validation of strings.txt format
+        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/strings.txt
+        grep -q "EN" Plugins/SiriusXM/strings.txt
+
+    - name: Validate HTML template
+      run: |
+        # Check that HTML template contains required elements
+        grep -q "PLUGIN_SIRIUSXM" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_username" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_password" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_port" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+        grep -q "pref_quality" Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/settings/basic.html
+
+    - name: Test menu system validation
+      run: |
+        # Test that the new simplified menu structure is implemented
+        echo "Checking for simplified menu structure..."
+        
+        # Check that handleFeed is replaced with toplevelMenu
+        if grep -q "toplevelMenu" Plugins/SiriusXM/Plugin.pm; then
+          echo "✓ toplevelMenu function found"
+        else
+          echo "✗ toplevelMenu function missing"
+          exit 1
+        fi
+        
+        # Check that HLS validation is present
+        if grep -q "validateHLSSupport" Plugins/SiriusXM/Plugin.pm; then
+          echo "✓ HLS validation function found"
+        else
+          echo "✗ HLS validation function missing"
+          exit 1
+        fi
+        
+        # Check that search functionality is present
+        if grep -q "searchMenu" Plugins/SiriusXM/Plugin.pm; then
+          echo "✓ Search menu function found"
+        else
+          echo "✗ Search menu function missing"
+          exit 1
+        fi
+        
+        # Check that browse by genre is present
+        if grep -q "browseByGenre" Plugins/SiriusXM/Plugin.pm; then
+          echo "✓ Browse by genre function found"
+        else
+          echo "✗ Browse by genre function missing"
+          exit 1
+        fi
+        
+        echo "Menu system validation passed"

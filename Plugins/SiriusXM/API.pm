@@ -177,8 +177,14 @@ sub buildCategoryMenu {
             # Build proper proxy URL
             my $stream_url = "http://localhost:$port/" . $channel->{id} . ".m3u8";
             
+            # Format channel name: "Channel Icon - Channel Name (siriusChannelNumber)"
+            my $display_name = $channel->{name};
+            if ($channel->{number}) {
+                $display_name .= " (" . $channel->{number} . ")";
+            }
+            
             push @category_items, {
-                name => $channel->{name},
+                name => $display_name,
                 type => 'audio',
                 url  => $stream_url,
                 icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
@@ -273,6 +279,50 @@ sub processChannelData {
     $log->debug("Processed channels into " . scalar(keys %categories) . " categories");
     
     return \%categories;  # Return categories hash instead of flat list
+}
+
+sub searchChannels {
+    my ($class, $client, $search_term, $cb) = @_;
+    
+    $log->debug("Searching channels for: $search_term");
+    
+    # Get all channels first
+    $class->getChannels($client, sub {
+        my $category_menu = shift;
+        
+        return $cb->([]) unless $category_menu && @$category_menu;
+        
+        my @search_results = ();
+        my $search_lc = lc($search_term);
+        
+        # Search through all categories and channels
+        for my $category (@$category_menu) {
+            next unless $category->{items};
+            
+            for my $channel (@{$category->{items}}) {
+                my $channel_name = lc($channel->{name} || '');
+                my $channel_desc = lc($channel->{description} || '');
+                
+                # Match on channel name or description
+                if ($channel_name =~ /\Q$search_lc\E/ || $channel_desc =~ /\Q$search_lc\E/) {
+                    # Format channel name: "Channel Icon - Channel Name (siriusChannelNumber) (Category)"
+                    my $display_name = $channel->{name};
+                    if ($channel->{channel_number}) {
+                        $display_name .= " (" . $channel->{channel_number} . ")";
+                    }
+                    $display_name .= " (" . $category->{name} . ")";
+                    
+                    push @search_results, {
+                        %$channel,
+                        name => $display_name,
+                    };
+                }
+            }
+        }
+        
+        $log->debug("Found " . scalar(@search_results) . " search results");
+        $cb->(\@search_results);
+    });
 }
 
 1;
