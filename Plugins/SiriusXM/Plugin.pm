@@ -52,11 +52,7 @@ sub initPlugin {
         port => '9999'
     });
     
-    # Validate HLS stream support requirements
-    unless ($class->validateHLSSupport()) {
-        $log->error("SiriusXM Plugin cannot initialize: HLS requirements not met");
-        return;
-    }
+
     
     # Start the proxy process
     $class->startProxy();
@@ -102,57 +98,33 @@ sub validateHLSSupport {
     
     $log->debug("Validating HLS stream support requirements");
     
-    # Check if PlayHLS plugin is available and version is adequate
-    my $playHLS_available = 0;
-    eval {
-        require Plugins::PlayHLS::Plugin;
-        my $version = $Plugins::PlayHLS::Plugin::VERSION || '0.0.0';
-        
-        # Simple version comparison for v1.1 or later
-        my ($major, $minor) = split(/\./, $version);
-        $major ||= 0; $minor ||= 0;
-        
-        if ($major > 1 || ($major == 1 && $minor >= 1)) {
-            $playHLS_available = 1;
-            $log->info("PlayHLS plugin v$version found - HLS support available");
-        } else {
-            $log->warn("PlayHLS plugin v$version found but v1.1+ required");
-        }
-    };
+    # Check for HLS mimetype support
+    my $hlssupported = Slim::Music::Info::mimeToType('application/vnd.apple.mpegurl');
     
-    if ($@) {
-        $log->warn("PlayHLS plugin not found: $@");
-    }
-    
-    # Check if FFmpeg is available in the system
-    my $ffmpeg_available = 0;
-    my $ffmpeg_path = `which ffmpeg 2>/dev/null`;
-    chomp($ffmpeg_path);
-    
-    if ($ffmpeg_path && -x $ffmpeg_path) {
-        $ffmpeg_available = 1;
-        $log->info("FFmpeg found at: $ffmpeg_path");
+    if ($hlssupported) {
+        $log->info("HLS mimetype support found - HLS streams supported");
+        return 1;
     } else {
-        $log->warn("FFmpeg not found in system PATH");
-    }
-    
-    # Both requirements must be met
-    if (!$playHLS_available || !$ffmpeg_available) {
-        my @missing = ();
-        push @missing, "PlayHLS v1.1+" unless $playHLS_available;
-        push @missing, "FFmpeg" unless $ffmpeg_available;
-        
-        $log->error("Missing requirements for SiriusXM plugin: " . join(", ", @missing));
+        $log->warn("HLS mimetype support not found - HLS streams may not be supported");
         return 0;
     }
-    
-    return 1;
 }
 
 sub toplevelMenu {
     my ($client, $cb, $args) = @_;
     
     $log->debug("Building top level menu");
+    
+    # Check HLS support
+    unless (__PACKAGE__->validateHLSSupport()) {
+        $cb->({
+            items => [{
+                name => string('PLUGIN_SIRIUSXM_ERROR_HLS_UNSUPPORTED'),
+                type => 'text',
+            }]
+        });
+        return;
+    }
     
     # Check if credentials are configured
     unless ($prefs->get('username') && $prefs->get('password')) {
