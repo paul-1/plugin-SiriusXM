@@ -21,16 +21,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libxml2-utils zip
-        cpanm --notest JSON::XS LWP::UserAgent HTTP::Request
 
-    - name: Run tests
+    - name: Run essential validation
       run: |
-        # Validate XML files
+        # Validate XML files only - other tests are covered in test.yml
         xmllint --noout Plugins/SiriusXM/install.xml
         xmllint --noout repo.xml
-
-        # Check Perl syntax
-        # find Plugins -name "*.pm" -exec perl -c {} \;
 
     - name: Extract version from tag
       id: version

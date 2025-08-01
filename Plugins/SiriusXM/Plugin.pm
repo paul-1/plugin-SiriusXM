@@ -52,6 +52,12 @@ sub initPlugin {
         port => '9999'
     });
     
+    # Validate HLS stream support requirements
+    unless ($class->validateHLSSupport()) {
+        $log->error("SiriusXM Plugin cannot initialize: HLS requirements not met");
+        return;
+    }
+    
     # Start the proxy process
     $class->startProxy();
     
@@ -68,7 +74,7 @@ sub initPlugin {
     Plugins::SiriusXM::Settings->new();
     
     $class->SUPER::initPlugin(
-        feed   => \&handleFeed,
+        feed   => \&toplevelMenu,
         tag    => 'siriusxm',
         menu   => 'radios',
         is_app => 1,
@@ -91,10 +97,62 @@ sub shutdownPlugin {
     
 }
 
-sub handleFeed {
+sub validateHLSSupport {
+    my $class = shift;
+    
+    $log->debug("Validating HLS stream support requirements");
+    
+    # Check if PlayHLS plugin is available and version is adequate
+    my $playHLS_available = 0;
+    eval {
+        require Plugins::PlayHLS::Plugin;
+        my $version = $Plugins::PlayHLS::Plugin::VERSION || '0.0.0';
+        
+        # Simple version comparison for v1.1 or later
+        my ($major, $minor) = split(/\./, $version);
+        $major ||= 0; $minor ||= 0;
+        
+        if ($major > 1 || ($major == 1 && $minor >= 1)) {
+            $playHLS_available = 1;
+            $log->info("PlayHLS plugin v$version found - HLS support available");
+        } else {
+            $log->warn("PlayHLS plugin v$version found but v1.1+ required");
+        }
+    };
+    
+    if ($@) {
+        $log->warn("PlayHLS plugin not found: $@");
+    }
+    
+    # Check if FFmpeg is available in the system
+    my $ffmpeg_available = 0;
+    my $ffmpeg_path = `which ffmpeg 2>/dev/null`;
+    chomp($ffmpeg_path);
+    
+    if ($ffmpeg_path && -x $ffmpeg_path) {
+        $ffmpeg_available = 1;
+        $log->info("FFmpeg found at: $ffmpeg_path");
+    } else {
+        $log->warn("FFmpeg not found in system PATH");
+    }
+    
+    # Both requirements must be met
+    if (!$playHLS_available || !$ffmpeg_available) {
+        my @missing = ();
+        push @missing, "PlayHLS v1.1+" unless $playHLS_available;
+        push @missing, "FFmpeg" unless $ffmpeg_available;
+        
+        $log->error("Missing requirements for SiriusXM plugin: " . join(", ", @missing));
+        return 0;
+    }
+    
+    return 1;
+}
+
+sub toplevelMenu {
     my ($client, $cb, $args) = @_;
     
-    $log->debug("Handling feed request");
+    $log->debug("Building top level menu");
     
     # Check if credentials are configured
     unless ($prefs->get('username') && $prefs->get('password')) {
@@ -107,7 +165,72 @@ sub handleFeed {
         return;
     }
     
-    # Get channels from API (now returns hierarchical menu)
+    # Build simplified top-level menu structure
+    my @menu_items = (
+        {
+            name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
+            type => 'search',
+            url  => \&searchMenu,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        },
+        {
+            name => string('PLUGIN_SIRIUSXM_MENU_BROWSE_BY_GENRE'),
+            type => 'opml',
+            url  => \&browseByGenre,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        }
+    );
+    
+    $cb->({
+        items => \@menu_items
+    });
+}
+
+sub searchMenu {
+    my ($client, $cb, $args, $pt) = @_;
+    
+    my $search_term = $pt->[0] || $args->{search} || '';
+    
+    $log->debug("Search menu called with term: $search_term");
+    
+    if (!$search_term) {
+        # Return empty search menu
+        $cb->({
+            items => [{
+                name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
+                type => 'search',
+                url  => \&searchMenu,
+            }]
+        });
+        return;
+    }
+    
+    # Search channels via API
+    Plugins::SiriusXM::API->searchChannels($client, $search_term, sub {
+        my $results = shift;
+        
+        if (!$results || !@$results) {
+            $cb->({
+                items => [{
+                    name => "No results found for '$search_term'",
+                    type => 'text',
+                }]
+            });
+            return;
+        }
+        
+        $cb->({
+            items => $results
+        });
+    });
+}
+
+sub browseByGenre {
+    my ($client, $cb, $args) = @_;
+    
+    $log->debug("Browse by genre menu");
+    
+    # Get channels organized by genre from API
     Plugins::SiriusXM::API->getChannels($client, sub {
         my $menu_items = shift;
         
