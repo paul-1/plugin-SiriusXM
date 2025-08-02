@@ -249,28 +249,6 @@ sub playerMenu {
     shift->can('nonSNApps') ? undef : 'RADIO';
 }
 
-sub getLogLevel {
-    my $class = shift;
-    
-    # Get current log level for the plugin
-    my $level = $log->level;
-    
-    # Map LMS log levels to proxy verbosity levels
-    # LMS levels: FATAL=0, ERROR=1, WARN=2, INFO=3, DEBUG=4
-    my %level_map = (
-        0 => 'ERROR',  # FATAL -> ERROR
-        1 => 'ERROR',  # ERROR -> ERROR  
-        2 => 'WARN',   # WARN -> WARN
-        3 => 'INFO',   # INFO -> INFO
-        4 => 'DEBUG',  # DEBUG -> DEBUG
-    );
-    
-    my $proxy_level = $level_map{$level} || 'INFO';
-    $log->debug("Mapped plugin log level $level to proxy level: $proxy_level");
-    
-    return $proxy_level;
-}
-
 sub getLogFilePath {
     my $class = shift;
     
@@ -282,19 +260,9 @@ sub getLogFilePath {
         $log_dir = Slim::Utils::OSDetect::dirsFor('log');
     };
     if ($@ || !$log_dir) {
-        # Fallback: try to determine a reasonable log directory
-        if ($ENV{LOGDIR}) {
-            $log_dir = $ENV{LOGDIR};
-        } elsif (-d '/var/log/squeezeboxserver') {
-            $log_dir = '/var/log/squeezeboxserver';
-        } elsif (-d '/var/log/logitech') {
-            $log_dir = '/var/log/logitech';
-        } elsif (-d '/tmp') {
-            $log_dir = '/tmp';
-        } else {
-            $log_dir = '.';
-        }
-        $log->warn("Could not determine LMS log directory, using fallback: $log_dir");
+        # If $log_dir is not set, use the operating system's TMPDIR
+        $log_dir = $ENV{TMPDIR} || '/tmp';
+        $log->warn("Could not determine LMS log directory, using TMPDIR: $log_dir");
     }
     
     my $log_file = File::Spec->catfile($log_dir, 'sxm-proxy.log');
@@ -375,8 +343,8 @@ sub startProxy {
     my $perl_exe = $^X;
     my $inc_path = join(':', @INC);
     
-    # Get log level for proxy
-    my $proxy_log_level = $class->getLogLevel();
+    # Get log level for proxy from preferences
+    my $proxy_log_level = $prefs->get('proxy_log_level') || 'INFO';
     
     # Get log file path and ensure log rotation
     my $log_file = $class->getLogFilePath();
@@ -426,7 +394,12 @@ sub startProxy {
             # Use Proc::Background if available
             # Note: Proc::Background doesn't directly support output redirection,
             # so we'll redirect via shell if possible
-            my $cmd_with_redirect = join(' ', map { "'$_'" } @proxy_cmd) . " >> '$log_file' 2>&1";
+            # Use stdbuf to reduce output buffering for more immediate logging
+            my $stdbuf = '';
+            if (-x '/usr/bin/stdbuf') {
+                $stdbuf = '/usr/bin/stdbuf -o L -e L ';  # Line buffered
+            }
+            my $cmd_with_redirect = $stdbuf . join(' ', map { "'$_'" } @proxy_cmd) . " >> '$log_file' 2>&1";
             $proxyProcess = Proc::Background->new('sh', '-c', $cmd_with_redirect);
             
             if ($proxyProcess->alive()) {
