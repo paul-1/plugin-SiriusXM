@@ -61,6 +61,10 @@ sub initPlugin {
         siriusxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
     
+    # Subscribe to stop events to clean up timers
+    require Slim::Control::Request;
+    Slim::Control::Request::subscribe(\&onStopEvent, [['playlist'], ['stop', 'pause', 'newsong']]);
+    
     # Initialize settings
     Plugins::SiriusXM::Settings->new();
     
@@ -79,6 +83,10 @@ sub shutdownPlugin {
     my $class = shift;
     
     $log->info("Shutting down SiriusXM Plugin");
+    
+    # Unsubscribe from events
+    require Slim::Control::Request;
+    Slim::Control::Request::unsubscribe(\&onStopEvent);
     
     # Stop the proxy process
     $class->stopProxy();
@@ -215,6 +223,30 @@ sub browseByGenre {
             items => $menu_items
         });
     });
+}
+
+sub onStopEvent {
+    my $request = shift;
+    
+    return unless $request;
+    
+    my $client = $request->client();
+    return unless $client;
+    
+    my $command = $request->getRequest(0);
+    my $subcommand = $request->getRequest(1);
+    
+    $log->debug("Stop event: $command $subcommand for client " . $client->name());
+    
+    # Clean up metadata timers when streams stop or change
+    if (($command eq 'playlist' && $subcommand eq 'stop') || 
+        ($command eq 'playlist' && $subcommand eq 'newsong')) {
+        
+        # Kill all SiriusXM metadata timers for this client
+        my $client_id = $client->id;
+        Slim::Utils::Timers::killTimers($client, qr/^siriusxm_metadata_${client_id}_/);
+        $log->debug("Cleaned up metadata timers for client: " . $client->name());
+    }
 }
 
 sub trackInfoMenu {
