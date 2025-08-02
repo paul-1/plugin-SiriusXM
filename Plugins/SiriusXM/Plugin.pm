@@ -380,6 +380,26 @@ sub startProxy {
     
     # Get log file path and ensure log rotation
     my $log_file = $class->getLogFilePath();
+    
+    # Ensure log directory exists and is writable
+    my $log_dir = dirname($log_file);
+    unless (-d $log_dir) {
+        eval { 
+            require File::Path;
+            File::Path::make_path($log_dir);
+        };
+        if ($@) {
+            $log->warn("Could not create log directory $log_dir: $@");
+            $log_file = File::Spec->catfile('/tmp', 'sxm-proxy.log');
+            $log->warn("Using fallback log file: $log_file");
+        }
+    }
+    
+    unless (-w $log_dir) {
+        $log->warn("Log directory $log_dir is not writable, using fallback");
+        $log_file = File::Spec->catfile('/tmp', 'sxm-proxy.log');
+    }
+    
     $class->rotateLogFile($log_file);
     
     # Build proxy command using --env flag and server's perl with logging
@@ -404,18 +424,14 @@ sub startProxy {
     eval {
         if ($use_proc_background) {
             # Use Proc::Background if available
-            $proxyProcess = Proc::Background->new(@proxy_cmd);
+            # Note: Proc::Background doesn't directly support output redirection,
+            # so we'll redirect via shell if possible
+            my $cmd_with_redirect = join(' ', map { "'$_'" } @proxy_cmd) . " >> '$log_file' 2>&1";
+            $proxyProcess = Proc::Background->new('sh', '-c', $cmd_with_redirect);
             
             if ($proxyProcess->alive()) {
-                # Redirect output to log file
-                if (open(my $log_fh, '>>', $log_file)) {
-                    # Note: Proc::Background doesn't support direct output redirection
-                    # The proxy script's output will still go to the parent's STDOUT
-                    # In a real LMS environment, this would be captured by the server's logging
-                    close($log_fh);
-                }
-                
                 $log->info("Proxy process started successfully on port $port using Proc::Background (PID: " . $proxyProcess->pid . ")");
+                $log->info("Proxy output redirected to: $log_file");
                 # Give the proxy a moment to start up
                 sleep(2);
                 return 1;
