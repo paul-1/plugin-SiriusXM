@@ -237,7 +237,18 @@ sub onPlaybackEvent {
     if (($command eq 'playlist' && $subcommand eq 'newsong') || 
         ($command eq 'playlist' && $subcommand eq 'play')) {
         
-        my $url = $client->currentTrack() ? $client->currentTrack()->url : '';
+        # Use the proper method to get current track that works across all client types
+        my $url = '';
+        if ($client->can('song') && $client->song()) {
+            $url = $client->song()->url();
+        } elsif ($client->can('currentSong') && $client->currentSong()) {
+            $url = $client->currentSong()->url();
+        } else {
+            # Try to get URL from the request parameters for newsong events
+            if ($subcommand eq 'newsong') {
+                $url = $request->getParam('_url') || '';
+            }
+        }
         
         if ($url && $url =~ /(localhost|127\.0\.0\.1).*\/([^\/]+)\.m3u8$/) {
             my $channel_name = $2;

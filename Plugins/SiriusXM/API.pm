@@ -430,7 +430,18 @@ sub notifyPlayersOfMetadataChange {
         next unless $client;
         
         # Check if this client is playing a SiriusXM stream for this channel
-        my $url = $client->currentTrack() ? $client->currentTrack()->url : '';
+        my $url = '';
+        my $track = undef;
+        
+        # Use proper method to get current track that works across all client types
+        if ($client->can('song') && $client->song()) {
+            $track = $client->song();
+            $url = $track->url();
+        } elsif ($client->can('currentSong') && $client->currentSong()) {
+            $track = $client->currentSong();
+            $url = $track->url();
+        }
+        
         next unless $url;
         
         # Check if URL matches our channel (localhost or 127.0.0.1 patterns)
@@ -441,17 +452,8 @@ sub notifyPlayersOfMetadataChange {
             if ($url_normalized eq $normalized_channel) {
                 $log->debug("Updating metadata for client playing: $normalized_channel");
                 
-                # Create a request to update the track metadata
-                require Slim::Control::Request;
-                my $request = Slim::Control::Request->new(
-                    $client->id(),
-                    ['songinfo', 0, 100, 'tags:alTC']
-                );
-                
                 # Add nowplaying information to the current track's metadata
-                if ($client->currentTrack()) {
-                    my $track = $client->currentTrack();
-                    
+                if ($track) {
                     # Update track's remote metadata
                     if ($nowplaying_data->{title}) {
                         $track->pluginData('siriusxm_nowplaying_title', $nowplaying_data->{title});
@@ -467,6 +469,7 @@ sub notifyPlayersOfMetadataChange {
                     $client->currentPlaylistUpdateTime(Time::HiRes::time());
                     
                     # Send notification to web interface
+                    require Slim::Control::Request;
                     my $notify_request = Slim::Control::Request->new(
                         $client->id(),
                         ['playlist', 'newsong', $track->title || $nowplaying_data->{title} || 'Unknown']
