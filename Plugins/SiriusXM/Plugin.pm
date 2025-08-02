@@ -56,9 +56,10 @@ sub initPlugin {
         func   => \&trackInfoMenu,
     ));
     
-    # Subscribe to playback events to automatically start nowplaying polling
-    require Slim::Control::Request;
-    Slim::Control::Request::subscribe(\&onPlaybackEvent, [['playlist'], ['newsong', 'play', 'stop', 'pause']]);
+    # Register protocol handler for SiriusXM streams
+    Slim::Player::ProtocolHandlers->registerHandler(
+        siriusxm => 'Plugins::SiriusXM::ProtocolHandler'
+    );
     
     # Initialize settings
     Plugins::SiriusXM::Settings->new();
@@ -78,10 +79,6 @@ sub shutdownPlugin {
     my $class = shift;
     
     $log->info("Shutting down SiriusXM Plugin");
-    
-    # Unsubscribe from playback events
-    require Slim::Control::Request;
-    Slim::Control::Request::unsubscribe(\&onPlaybackEvent);
     
     # Stop the proxy process
     $class->stopProxy();
@@ -220,114 +217,18 @@ sub browseByGenre {
     });
 }
 
-sub onPlaybackEvent {
-    my $request = shift;
-    
-    return unless $request;
-    
-    my $client = $request->client();
-    return unless $client;
-    
-    my $command = $request->getRequest(0);
-    my $subcommand = $request->getRequest(1);
-    
-    $log->debug("Playback event: $command $subcommand for client " . $client->name());
-    
-    # Handle newsong and play events to start nowplaying polling
-    if (($command eq 'playlist' && $subcommand eq 'newsong') || 
-        ($command eq 'playlist' && $subcommand eq 'play')) {
-        
-        # Use the proper method to get current track that works across all client types
-        my $url = '';
-        if ($client->can('song') && $client->song()) {
-            $url = $client->song()->url();
-        } elsif ($client->can('currentSong') && $client->currentSong()) {
-            $url = $client->currentSong()->url();
-        } else {
-            # Try to get URL from the request parameters for newsong events
-            if ($subcommand eq 'newsong') {
-                $url = $request->getParam('_url') || '';
-            }
-        }
-        
-        if ($url && $url =~ /(localhost|127\.0\.0\.1).*\/([^\/]+)\.m3u8$/) {
-            my $channel_name = $2;
-            $log->info("SiriusXM stream started playing: $channel_name");
-            
-            # Start nowplaying polling for this channel
-            Plugins::SiriusXM::API->startNowPlayingPolling($channel_name);
-        }
-    }
-    # Handle stop events to optionally stop polling (though we can let it continue for other clients)
-    elsif ($command eq 'playlist' && $subcommand eq 'stop') {
-        $log->debug("Playback stopped for client " . $client->name());
-        # Note: We don't stop polling here since other clients might still be playing the same channel
-    }
-}
-
 sub trackInfoMenu {
     my ($client, $url, $track, $remoteMeta) = @_;
     
-    return unless $url =~ /^sxm:/ || $url =~ /(localhost|127\.0\.0\.1).*\.m3u8$/;
+    return unless $url =~ /^siriusxm:/ || $url =~ /(localhost|127\.0\.0\.1).*\.m3u8$/;
     
     my $items = [];
     
-    # Extract channel name from URL or metadata
-    my $channel_name;
-    
-    if ($remoteMeta && $remoteMeta->{title}) {
-        # Try to extract channel name from title
-        $channel_name = $remoteMeta->{title};
-        # Remove channel number if present: "Channel Name (123)" -> "Channel Name"
-        $channel_name =~ s/\s*\(\d+\)\s*$//;
-    } elsif ($url =~ m{(localhost|127\.0\.0\.1):\d+/([^/.]+)\.m3u8$}) {
-        # Extract from URL: http://localhost:9999/channelname.m3u8 or http://127.0.0.1:9999/channelname.m3u8
-        $channel_name = $2;
-    }
-    
-    if ($channel_name) {
-        $log->debug("Getting nowplaying info for channel: $channel_name");
-        
-        # Get nowplaying data asynchronously
-        Plugins::SiriusXM::API->getNowPlaying($channel_name, sub {
-            my $nowplaying = shift;
-            
-            if ($nowplaying && $nowplaying->{title}) {
-                $log->debug("Found nowplaying data: " . $nowplaying->{title});
-                
-                # Update the remote metadata with nowplaying info
-                if ($remoteMeta) {
-                    $remoteMeta->{_nowplaying_title} = $nowplaying->{title};
-                    $remoteMeta->{_nowplaying_artist} = $nowplaying->{artist} if $nowplaying->{artist};
-                    $remoteMeta->{_nowplaying_artwork} = $nowplaying->{artwork_url} if $nowplaying->{artwork_url};
-                }
-            }
-        });
-        
-        # Note: Polling is now started automatically via playback events
-    }
-    
-    # Add static menu items
     if ($remoteMeta && $remoteMeta->{title}) {
         push @$items, {
             name => $remoteMeta->{title},
             type => 'text',
         };
-    }
-    
-    # Add nowplaying information if available
-    if ($remoteMeta && $remoteMeta->{_nowplaying_title}) {
-        push @$items, {
-            name => string('PLUGIN_SIRIUSXM_NOW_PLAYING') . ': ' . $remoteMeta->{_nowplaying_title},
-            type => 'text',
-        };
-        
-        if ($remoteMeta->{_nowplaying_artist}) {
-            push @$items, {
-                name => string('PLUGIN_SIRIUSXM_ARTIST') . ': ' . $remoteMeta->{_nowplaying_artist},
-                type => 'text',
-            };
-        }
     }
     
     return $items;
