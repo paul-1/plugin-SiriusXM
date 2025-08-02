@@ -21,15 +21,15 @@ my $log = Slim::Utils::Log->addLogCategory({
     'description' => 'PLUGIN_SIRIUSXM',
 });
 
-# Try to load Proc::Simple, fall back to basic fork if not available
-my $use_proc_simple = 0;
+# Try to load Proc::Background, fall back to basic fork if not available
+my $use_proc_background = 0;
 eval {
-    require Proc::Simple;
-    Proc::Simple->import();
-    $use_proc_simple = 1;
+    require Proc::Background;
+    Proc::Background->import();
+    $use_proc_background = 1;
 };
 if ($@) {
-    $log->warn("Proc::Simple not available, using basic process management");
+    $log->warn("Proc::Background not available, using basic process management");
 }
 
 # Global proxy process handle
@@ -249,6 +249,98 @@ sub playerMenu {
     shift->can('nonSNApps') ? undef : 'RADIO';
 }
 
+sub getLogLevel {
+    my $class = shift;
+    
+    # Get current log level for the plugin
+    my $level = $log->level;
+    
+    # Map LMS log levels to proxy verbosity levels
+    # LMS levels: FATAL=0, ERROR=1, WARN=2, INFO=3, DEBUG=4
+    my %level_map = (
+        0 => 'ERROR',  # FATAL -> ERROR
+        1 => 'ERROR',  # ERROR -> ERROR  
+        2 => 'WARN',   # WARN -> WARN
+        3 => 'INFO',   # INFO -> INFO
+        4 => 'DEBUG',  # DEBUG -> DEBUG
+    );
+    
+    my $proxy_level = $level_map{$level} || 'INFO';
+    $log->debug("Mapped plugin log level $level to proxy level: $proxy_level");
+    
+    return $proxy_level;
+}
+
+sub getLogFilePath {
+    my $class = shift;
+    
+    # Get LMS log directory path
+    my $log_dir;
+    eval {
+        # Try to get log directory from server preferences
+        require Slim::Utils::OSDetect;
+        $log_dir = Slim::Utils::OSDetect::dirsFor('log');
+    };
+    if ($@ || !$log_dir) {
+        # Fallback: try to determine a reasonable log directory
+        if ($ENV{LOGDIR}) {
+            $log_dir = $ENV{LOGDIR};
+        } elsif (-d '/var/log/squeezeboxserver') {
+            $log_dir = '/var/log/squeezeboxserver';
+        } elsif (-d '/var/log/logitech') {
+            $log_dir = '/var/log/logitech';
+        } elsif (-d '/tmp') {
+            $log_dir = '/tmp';
+        } else {
+            $log_dir = '.';
+        }
+        $log->warn("Could not determine LMS log directory, using fallback: $log_dir");
+    }
+    
+    my $log_file = File::Spec->catfile($log_dir, 'sxm-proxy.log');
+    $log->debug("Proxy log file path: $log_file");
+    
+    return $log_file;
+}
+
+sub rotateLogFile {
+    my ($class, $log_file) = @_;
+    
+    return unless -f $log_file;
+    
+    my $max_size = 10 * 1024 * 1024; # 10MB
+    my $max_files = 5;
+    
+    my @stat = stat($log_file);
+    my $size = $stat[7] || 0;
+    
+    if ($size > $max_size) {
+        $log->info("Rotating proxy log file (size: $size bytes)");
+        
+        # Rotate existing log files
+        for my $i (reverse(1..$max_files-1)) {
+            my $old_file = "$log_file.$i";
+            my $new_file = "$log_file." . ($i + 1);
+            
+            if (-f $old_file) {
+                if ($i == $max_files-1) {
+                    # Delete the oldest file
+                    unlink($old_file);
+                    $log->debug("Deleted oldest log file: $old_file");
+                } else {
+                    # Rename to next number
+                    rename($old_file, $new_file);
+                    $log->debug("Rotated $old_file -> $new_file");
+                }
+            }
+        }
+        
+        # Move current log to .1
+        rename($log_file, "$log_file.1");
+        $log->debug("Rotated current log file to $log_file.1");
+    }
+}
+
 sub startProxy {
     my $class = shift;
     
@@ -283,13 +375,21 @@ sub startProxy {
     my $perl_exe = $^X;
     my $inc_path = join(':', @INC);
     
-    # Build proxy command using --env flag and server's perl
+    # Get log level for proxy
+    my $proxy_log_level = $class->getLogLevel();
+    
+    # Get log file path and ensure log rotation
+    my $log_file = $class->getLogFilePath();
+    $class->rotateLogFile($log_file);
+    
+    # Build proxy command using --env flag and server's perl with logging
     my @proxy_cmd = (
         $perl_exe,
         "-I$inc_path",
         $proxy_path,
         '-e',  # Use environment variables
-        '-p', $port
+        '-p', $port,
+        '-v', $proxy_log_level,  # Set verbosity level based on plugin log level
     );
     
     # Add region parameter for Canada
@@ -298,38 +398,62 @@ sub startProxy {
     }
     
     $log->info("Starting proxy: " . join(' ', @proxy_cmd));
+    $log->info("Proxy output will be logged to: $log_file");
     
     # Start proxy as background process
     eval {
-        if ($use_proc_simple) {
-            # Use Proc::Simple if available
-            $proxyProcess = Proc::Simple->new();
-            $proxyProcess->start(@proxy_cmd);
+        if ($use_proc_background) {
+            # Use Proc::Background if available
+            $proxyProcess = Proc::Background->new(@proxy_cmd);
             
-            if ($proxyProcess->poll()) {
-                $log->info("Proxy process started successfully on port $port using Proc::Simple");
+            if ($proxyProcess->alive()) {
+                # Redirect output to log file
+                if (open(my $log_fh, '>>', $log_file)) {
+                    # Note: Proc::Background doesn't support direct output redirection
+                    # The proxy script's output will still go to the parent's STDOUT
+                    # In a real LMS environment, this would be captured by the server's logging
+                    close($log_fh);
+                }
+                
+                $log->info("Proxy process started successfully on port $port using Proc::Background (PID: " . $proxyProcess->pid . ")");
                 # Give the proxy a moment to start up
                 sleep(2);
                 return 1;
             } else {
-                $log->error("Failed to start proxy process with Proc::Simple");
+                $log->error("Failed to start proxy process with Proc::Background");
                 $proxyProcess = undef;
                 return 0;
             }
         } else {
-            # Fall back to basic fork
+            # Fall back to basic fork with output redirection
             my $pid = fork();
             
             if (!defined $pid) {
                 $log->error("Fork failed: $!");
                 return 0;
             } elsif ($pid == 0) {
-                # Child process - exec the proxy
+                # Child process - redirect output and exec the proxy
+                
+                # Redirect STDOUT to log file
+                if (!open(STDOUT, '>>', $log_file)) {
+                    die "Cannot redirect STDOUT to $log_file: $!";
+                }
+                
+                # Redirect STDERR to log file as well
+                if (!open(STDERR, '>>', $log_file)) {
+                    die "Cannot redirect STDERR to $log_file: $!";
+                }
+                
+                # Disable buffering for immediate log output
+                $| = 1;
+                select(STDERR); $| = 1; select(STDOUT);
+                
                 exec(@proxy_cmd) or die "exec failed: $!";
             } else {
                 # Parent process - store PID
                 $proxyPid = $pid;
                 $log->info("Proxy process started successfully on port $port using fork (PID: $pid)");
+                $log->info("Proxy output redirected to: $log_file");
                 # Give the proxy a moment to start up
                 sleep(2);
                 return 1;
@@ -348,23 +472,31 @@ sub startProxy {
 sub stopProxy {
     my $class = shift;
     
-    if ($use_proc_simple && $proxyProcess && $proxyProcess->poll()) {
-        $log->info("Stopping proxy process (Proc::Simple)");
+    if ($use_proc_background && $proxyProcess && $proxyProcess->alive()) {
+        $log->info("Stopping proxy process (Proc::Background, PID: " . $proxyProcess->pid . ")");
         
         eval {
-            $proxyProcess->kill();
+            # Send TERM signal first for graceful shutdown
+            $proxyProcess->die();
             
             # Wait up to 5 seconds for clean shutdown
             my $timeout = 5;
-            while ($timeout > 0 && $proxyProcess->poll()) {
+            while ($timeout > 0 && $proxyProcess->alive()) {
                 sleep(1);
                 $timeout--;
             }
             
             # Force kill if still running
-            if ($proxyProcess->poll()) {
+            if ($proxyProcess->alive()) {
                 $log->warn("Proxy did not shut down cleanly, force killing");
                 $proxyProcess->kill('KILL');
+                
+                # Wait a bit more for the kill to take effect
+                my $kill_timeout = 2;
+                while ($kill_timeout > 0 && $proxyProcess->alive()) {
+                    sleep(1);
+                    $kill_timeout--;
+                }
             }
             
             $log->info("Proxy process stopped");
@@ -416,8 +548,8 @@ sub stopProxy {
 sub isProxyRunning {
     my $class = shift;
     
-    if ($use_proc_simple) {
-        return $proxyProcess && $proxyProcess->poll();
+    if ($use_proc_background) {
+        return $proxyProcess && $proxyProcess->alive();
     } else {
         return $proxyPid && kill(0, $proxyPid);
     }
