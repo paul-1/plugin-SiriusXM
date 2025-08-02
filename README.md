@@ -4,17 +4,16 @@ A plugin for streaming SiriusXM satellite radio through Logitech Media Server us
 
 ## Requirements
 
-- Logitech Media Server 7.9 or higher
+- Logitech Media Server 8.3 or higher
 - SiriusXM subscription
-- SiriusXM-Perl helper application (separate installation required)
+- PlayHLS v1.1 (With ffmpeg)
+- SiriusXM Proxy Server (Included from https://github.com/paul-1/SiriusXM-Perl)
 
 ## Installation
 
 1. Download the plugin from the Logitech Media Server plugin repository or install manually
 2. Install and configure the SiriusXM-Perl helper application
 3. Configure your SiriusXM credentials in the plugin settings
-4. Set the path to the SiriusXM-Perl helper application in settings
-5. Restart Logitech Media Server
 
 ## Configuration
 
@@ -27,14 +26,9 @@ Access the plugin settings through:
 Configure the following:
 - **Username**: Your SiriusXM username or email address
 - **Password**: Your SiriusXM account password
+- **Port**: The system port to use for the Proxy (default:9999)
 - **Audio Quality**: Select preferred streaming quality (Low/Medium/High)
-- **Helper Application Path**: Full path to the SiriusXM-Perl helper executable
-
-### SiriusXM-Perl Helper
-
-This plugin requires the separate SiriusXM-Perl helper application for authentication and streaming. 
-
-Download and install from: [SiriusXM-Perl Repository](https://github.com/paul-1/SiriusXM-Perl)
+- **Region**: United States or Canada (Default:US)
 
 ## Usage
 
@@ -54,10 +48,6 @@ Once configured:
 
 ### Common Issues
 
-**"Helper application not found"**
-- Verify the helper application path in plugin settings
-- Ensure the SiriusXM-Perl helper is properly installed and executable
-
 **"Login failed"**
 - Check your SiriusXM username and password
 - Verify your SiriusXM subscription is active
@@ -67,6 +57,7 @@ Once configured:
 - Restart the plugin or Logitech Media Server
 - Check network connectivity
 - Verify SiriusXM subscription includes streaming access
+- Verify PlayHLS v1.1 is properly installed
 
 ## Support
 
@@ -77,7 +68,7 @@ For issues and support:
 
 ## License
 
-This project is licensed under the GPL-3.0 License - see the repository for details.
+This project is licensed under the GPL-2.0 License - see the repository for details.
 
 ## Contributing
 
