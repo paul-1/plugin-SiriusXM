@@ -21,6 +21,12 @@ my $log = Slim::Utils::Log->addLogCategory({
     'description' => 'PLUGIN_SIRIUSXM',
 });
 
+# Add local lib directory to @INC for Proc::Background
+BEGIN {
+    my $libdir = File::Spec->catdir(dirname(__FILE__), 'lib');
+    unshift @INC, $libdir if -d $libdir;
+}
+
 # Try to load Proc::Background, fall back to basic fork if not available
 my $use_proc_background = 0;
 eval {
@@ -29,7 +35,7 @@ eval {
     $use_proc_background = 1;
 };
 if ($@) {
-    $log->warn("Proc::Background not available, using basic process management");
+    $log->warn("Proc::Background not available, using basic process management: $@");
 }
 
 # Global proxy process handle
@@ -309,6 +315,31 @@ sub rotateLogFile {
     }
 }
 
+sub isPortAvailable {
+    my ($class, $port) = @_;
+    
+    # Try to bind to the port to check if it's available
+    eval {
+        require IO::Socket::INET;
+        my $socket = IO::Socket::INET->new(
+            LocalPort => $port,
+            Proto     => 'tcp',
+            ReuseAddr => 1,
+            Listen    => 1,
+            Timeout   => 1
+        );
+        if ($socket) {
+            $socket->close();
+            return 1;  # Port is available
+        }
+        return 0;  # Port is not available
+    };
+    if ($@) {
+        $log->warn("Could not check port availability: $@");
+        return 1;  # Assume available if we can't check
+    }
+}
+
 sub startProxy {
     my $class = shift;
     
@@ -377,8 +408,12 @@ sub startProxy {
         $proxy_path,
         '-e',  # Use environment variables
         '-p', $port,
-        '-v', $proxy_log_level,  # Set verbosity level based on plugin log level
     );
+    
+    # Only add verbosity flag if log level is not OFF
+    if ($proxy_log_level ne 'OFF') {
+        push @proxy_cmd, '-v', $proxy_log_level;
+    }
     
     # Add region parameter for Canada
     if ($region eq 'Canada') {
@@ -393,13 +428,8 @@ sub startProxy {
         if ($use_proc_background) {
             # Use Proc::Background if available
             # Note: Proc::Background doesn't directly support output redirection,
-            # so we'll redirect via shell if possible
-            # Use stdbuf to reduce output buffering for more immediate logging
-            my $stdbuf = '';
-            if (-x '/usr/bin/stdbuf') {
-                $stdbuf = '/usr/bin/stdbuf -o L -e L ';  # Line buffered
-            }
-            my $cmd_with_redirect = $stdbuf . join(' ', map { "'$_'" } @proxy_cmd) . " >> '$log_file' 2>&1";
+            # so we'll redirect via shell
+            my $cmd_with_redirect = join(' ', map { "'$_'" } @proxy_cmd) . " >> '$log_file' 2>&1";
             $proxyProcess = Proc::Background->new('sh', '-c', $cmd_with_redirect);
             
             if ($proxyProcess->alive()) {

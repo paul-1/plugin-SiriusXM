@@ -58,8 +58,22 @@ sub handler {
             # Restart proxy with new settings
             Plugins::SiriusXM::Plugin->stopProxy();
             
-            # Give it a moment to shut down
-            sleep(1);
+            # Wait for the port to be released
+            my $port = $params->{pref_port} || '9999';
+            my $max_wait = 10;  # Maximum 10 seconds to wait
+            my $wait_count = 0;
+            
+            while ($wait_count < $max_wait && !Plugins::SiriusXM::Plugin->isPortAvailable($port)) {
+                sleep(1);
+                $wait_count++;
+                $log->debug("Waiting for port $port to be released... ($wait_count/$max_wait)");
+            }
+            
+            if ($wait_count >= $max_wait) {
+                $log->warn("Port $port may still be in use, attempting restart anyway");
+            } else {
+                $log->debug("Port $port is now available");
+            }
             
             if (Plugins::SiriusXM::Plugin->startProxy()) {
                 $params->{info} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
