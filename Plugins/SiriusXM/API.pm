@@ -278,7 +278,7 @@ sub processChannelData {
             name => $channel->{name},
             category => $primary_category,
             number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
-            description => $channel->{description} || '',
+            description => $channel->{shortDescription} || '',
             logo => $logo_url,
         };
         
