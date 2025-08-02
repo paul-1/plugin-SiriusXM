@@ -215,7 +215,7 @@ sub browseByGenre {
 sub trackInfoMenu {
     my ($client, $url, $track, $remoteMeta) = @_;
     
-    return unless $url =~ /^sxm:/ || $url =~ /localhost.*\.m3u8$/;
+    return unless $url =~ /^sxm:/ || $url =~ /(localhost|127\.0\.0\.1).*\.m3u8$/;
     
     my $items = [];
     
@@ -227,9 +227,9 @@ sub trackInfoMenu {
         $channel_name = $remoteMeta->{title};
         # Remove channel number if present: "Channel Name (123)" -> "Channel Name"
         $channel_name =~ s/\s*\(\d+\)\s*$//;
-    } elsif ($url =~ m{localhost:\d+/([^/.]+)\.m3u8$}) {
-        # Extract from URL: http://localhost:9999/channelname.m3u8
-        $channel_name = $1;
+    } elsif ($url =~ m{(localhost|127\.0\.0\.1):\d+/([^/.]+)\.m3u8$}) {
+        # Extract from URL: http://localhost:9999/channelname.m3u8 or http://127.0.0.1:9999/channelname.m3u8
+        $channel_name = $2;
     }
     
     if ($channel_name) {
