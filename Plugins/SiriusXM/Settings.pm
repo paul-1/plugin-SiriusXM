@@ -22,7 +22,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality port region));
+    return ($prefs, qw(username password quality port region proxy_log_level));
 }
 
 sub handler {
@@ -38,6 +38,7 @@ sub handler {
         my $old_password = $prefs->get('password');
         my $old_port = $prefs->get('port');
         my $old_region = $prefs->get('region');
+        my $old_proxy_log_level = $prefs->get('proxy_log_level');
         
         # Save the settings first
         my $result = $class->SUPER::handler($client, $params, $callback, @args);
@@ -47,7 +48,8 @@ sub handler {
             ($params->{pref_username} && $params->{pref_username} ne $old_username) ||
             ($params->{pref_password} && $params->{pref_password} ne $old_password) ||
             ($params->{pref_port} && $params->{pref_port} ne $old_port) ||
-            ($params->{pref_region} && $params->{pref_region} ne $old_region)
+            ($params->{pref_region} && $params->{pref_region} ne $old_region) ||
+            ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level)
         );
         
         if ($need_restart) {
@@ -108,6 +110,15 @@ sub beforeRender {
     $params->{region_options} = [
         { value => 'US',     text => string('PLUGIN_SIRIUSXM_REGION_US') },
         { value => 'Canada', text => string('PLUGIN_SIRIUSXM_REGION_CANADA') },
+    ];
+    
+    $params->{proxy_log_level_options} = [
+        { value => 'OFF',   text => string('PLUGIN_SIRIUSXM_PROXY_LOG_OFF') },
+        { value => 'ERROR', text => string('PLUGIN_SIRIUSXM_PROXY_LOG_ERROR') },
+        { value => 'WARN',  text => string('PLUGIN_SIRIUSXM_PROXY_LOG_WARN') },
+        { value => 'INFO',  text => string('PLUGIN_SIRIUSXM_PROXY_LOG_INFO') },
+        { value => 'DEBUG', text => string('PLUGIN_SIRIUSXM_PROXY_LOG_DEBUG') },
+        { value => 'TRACE', text => string('PLUGIN_SIRIUSXM_PROXY_LOG_TRACE') },
     ];
     
     # Add any additional template processing here
