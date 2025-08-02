@@ -215,15 +215,67 @@ sub browseByGenre {
 sub trackInfoMenu {
     my ($client, $url, $track, $remoteMeta) = @_;
     
-    return unless $url =~ /^sxm:/;
+    return unless $url =~ /^sxm:/ || $url =~ /localhost.*\.m3u8$/;
     
     my $items = [];
     
+    # Extract channel name from URL or metadata
+    my $channel_name;
+    
+    if ($remoteMeta && $remoteMeta->{title}) {
+        # Try to extract channel name from title
+        $channel_name = $remoteMeta->{title};
+        # Remove channel number if present: "Channel Name (123)" -> "Channel Name"
+        $channel_name =~ s/\s*\(\d+\)\s*$//;
+    } elsif ($url =~ m{localhost:\d+/([^/.]+)\.m3u8$}) {
+        # Extract from URL: http://localhost:9999/channelname.m3u8
+        $channel_name = $1;
+    }
+    
+    if ($channel_name) {
+        $log->debug("Getting nowplaying info for channel: $channel_name");
+        
+        # Get nowplaying data asynchronously
+        Plugins::SiriusXM::API->getNowPlaying($channel_name, sub {
+            my $nowplaying = shift;
+            
+            if ($nowplaying && $nowplaying->{title}) {
+                $log->debug("Found nowplaying data: " . $nowplaying->{title});
+                
+                # Update the remote metadata with nowplaying info
+                if ($remoteMeta) {
+                    $remoteMeta->{_nowplaying_title} = $nowplaying->{title};
+                    $remoteMeta->{_nowplaying_artist} = $nowplaying->{artist} if $nowplaying->{artist};
+                    $remoteMeta->{_nowplaying_artwork} = $nowplaying->{artwork_url} if $nowplaying->{artwork_url};
+                }
+            }
+        });
+        
+        # Start polling for this channel
+        Plugins::SiriusXM::API->startNowPlayingPolling($channel_name);
+    }
+    
+    # Add static menu items
     if ($remoteMeta && $remoteMeta->{title}) {
         push @$items, {
             name => $remoteMeta->{title},
             type => 'text',
         };
+    }
+    
+    # Add nowplaying information if available
+    if ($remoteMeta && $remoteMeta->{_nowplaying_title}) {
+        push @$items, {
+            name => string('PLUGIN_SIRIUSXM_NOW_PLAYING') . ': ' . $remoteMeta->{_nowplaying_title},
+            type => 'text',
+        };
+        
+        if ($remoteMeta->{_nowplaying_artist}) {
+            push @$items, {
+                name => string('PLUGIN_SIRIUSXM_ARTIST') . ': ' . $remoteMeta->{_nowplaying_artist},
+                type => 'text',
+            };
+        }
     }
     
     return $items;
