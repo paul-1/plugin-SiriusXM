@@ -10,6 +10,7 @@ use Slim::Utils::Log;
 use Slim::Utils::Strings qw(string);
 use File::Spec;
 use File::Basename qw(dirname);
+use Proc::Background;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
@@ -21,20 +22,8 @@ my $log = Slim::Utils::Log->addLogCategory({
     'description' => 'PLUGIN_SIRIUSXM',
 });
 
-# Try to load Proc::Simple, fall back to basic fork if not available
-my $use_proc_simple = 0;
-eval {
-    require Proc::Simple;
-    Proc::Simple->import();
-    $use_proc_simple = 1;
-};
-if ($@) {
-    $log->warn("Proc::Simple not available, using basic process management");
-}
-
 # Global proxy process handle
 my $proxyProcess;
-my $proxyPid;
 
 # Plugin metadata
 sub getDisplayName { 'PLUGIN_SIRIUSXM' }
@@ -301,46 +290,24 @@ sub startProxy {
     
     # Start proxy as background process
     eval {
-        if ($use_proc_simple) {
-            # Use Proc::Simple if available
-            $proxyProcess = Proc::Simple->new();
-            $proxyProcess->start(@proxy_cmd);
-            
-            if ($proxyProcess->poll()) {
-                $log->info("Proxy process started successfully on port $port using Proc::Simple");
-                # Give the proxy a moment to start up
-                sleep(2);
-                return 1;
-            } else {
-                $log->error("Failed to start proxy process with Proc::Simple");
-                $proxyProcess = undef;
-                return 0;
-            }
+        # Use Proc::Background if available
+        $proxyProcess = Proc::Background->new(@proxy_cmd);
+      
+        if ($proxyProcess->alive()) {
+            $log->info("Proxy process started successfully on port $port using Proc::Background");
+            # Give the proxy a moment to start up
+            sleep(2);
+            return 1;
         } else {
-            # Fall back to basic fork
-            my $pid = fork();
-            
-            if (!defined $pid) {
-                $log->error("Fork failed: $!");
-                return 0;
-            } elsif ($pid == 0) {
-                # Child process - exec the proxy
-                exec(@proxy_cmd) or die "exec failed: $!";
-            } else {
-                # Parent process - store PID
-                $proxyPid = $pid;
-                $log->info("Proxy process started successfully on port $port using fork (PID: $pid)");
-                # Give the proxy a moment to start up
-                sleep(2);
-                return 1;
-            }
+            $log->error("Failed to start proxy process with Proc::Background");
+            $proxyProcess = undef;
+            return 0;
         }
     };
     
     if ($@) {
         $log->error("Error starting proxy: $@");
         $proxyProcess = undef;
-        $proxyPid = undef;
         return 0;
     }
 }
@@ -348,66 +315,33 @@ sub startProxy {
 sub stopProxy {
     my $class = shift;
     
-    if ($use_proc_simple && $proxyProcess && $proxyProcess->poll()) {
-        $log->info("Stopping proxy process (Proc::Simple)");
+    $log->info("Stopping proxy process (Proc::Background)");
         
-        eval {
-            $proxyProcess->kill();
-            
-            # Wait up to 5 seconds for clean shutdown
-            my $timeout = 5;
-            while ($timeout > 0 && $proxyProcess->poll()) {
-                sleep(1);
-                $timeout--;
-            }
-            
-            # Force kill if still running
-            if ($proxyProcess->poll()) {
-                $log->warn("Proxy did not shut down cleanly, force killing");
-                $proxyProcess->kill('KILL');
-            }
-            
-            $log->info("Proxy process stopped");
-        };
+    eval {
+        $proxyProcess->die();
         
-        if ($@) {
-            $log->error("Error stopping proxy: $@");
+        # Wait up to 5 seconds for clean shutdown
+        my $timeout = 5;
+        while ($timeout > 0 && $proxyProcess->alive()) {
+            sleep(1);
+            $timeout--;
         }
-        
-        $proxyProcess = undef;
-    } elsif ($proxyPid) {
-        $log->info("Stopping proxy process (fork, PID: $proxyPid)");
-        
-        eval {
-            # Send TERM signal first
-            kill('TERM', $proxyPid);
             
-            # Wait up to 5 seconds for clean shutdown
-            my $timeout = 5;
-            while ($timeout > 0) {
-                my $result = waitpid($proxyPid, 1); # WNOHANG
-                last if $result > 0; # Process has exited
-                sleep(1);
-                $timeout--;
-            }
-            
-            # Force kill if still running
-            if (kill(0, $proxyPid)) { # Check if process still exists
-                $log->warn("Proxy did not shut down cleanly, force killing");
-                kill('KILL', $proxyPid);
-                waitpid($proxyPid, 0); # Wait for cleanup
-            }
-            
-            $log->info("Proxy process stopped");
-        };
-        
-        if ($@) {
-            $log->error("Error stopping proxy: $@");
+        # Force kill if still running
+        if ($proxyProcess->alive()) {
+            $log->warn("Proxy did not shut down cleanly, force killing");
+            $proxyProcess->kill('KILL');
         }
+            
+        $log->info("Proxy process stopped");
+    };
         
-        $proxyPid = undef;
+    if ($@) {
+        $log->error("Error stopping proxy: $@");
     }
-    
+        
+    $proxyProcess = undef;
+
     # Clean up environment variables
     delete $ENV{SXM_USER};
     delete $ENV{SXM_PASS};
@@ -416,11 +350,7 @@ sub stopProxy {
 sub isProxyRunning {
     my $class = shift;
     
-    if ($use_proc_simple) {
-        return $proxyProcess && $proxyProcess->poll();
-    } else {
-        return $proxyPid && kill(0, $proxyPid);
-    }
+    return $proxyProcess && $proxyProcess->alive();
 }
 
 1;
