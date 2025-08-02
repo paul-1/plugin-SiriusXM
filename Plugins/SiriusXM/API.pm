@@ -16,7 +16,7 @@ my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
 # Cache timeout in seconds
-use constant CACHE_TIMEOUT => 300; # 5 minutes
+use constant CACHE_TIMEOUT => 86400; # 24 hours (1 day)
 
 sub init {
     my $class = shift;
@@ -29,6 +29,12 @@ sub cleanup {
     # Clear any cached data
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_auth_token');
+}
+
+sub invalidateChannelCache {
+    my $class = shift;
+    $log->info("Invalidating channel cache due to playback failure");
+    $cache->remove('siriusxm_channels');
 }
 
 sub getChannels {
@@ -83,6 +89,10 @@ sub getChannels {
         sub {
             my ($http, $error) = @_;
             $log->error("Failed to fetch channels from proxy: $error");
+            
+            # Invalidate cache since proxy communication failed
+            $cache->remove('siriusxm_channels');
+            
             $cb->([]);
         },
         {

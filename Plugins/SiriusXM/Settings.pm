@@ -22,7 +22,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality port));
+    return ($prefs, qw(username password quality port region));
 }
 
 sub handler {
@@ -37,6 +37,7 @@ sub handler {
         my $old_username = $prefs->get('username');
         my $old_password = $prefs->get('password');
         my $old_port = $prefs->get('port');
+        my $old_region = $prefs->get('region');
         
         # Save the settings first
         my $result = $class->SUPER::handler($client, $params, $callback, @args);
@@ -45,7 +46,8 @@ sub handler {
         my $need_restart = (
             ($params->{pref_username} && $params->{pref_username} ne $old_username) ||
             ($params->{pref_password} && $params->{pref_password} ne $old_password) ||
-            ($params->{pref_port} && $params->{pref_port} ne $old_port)
+            ($params->{pref_port} && $params->{pref_port} ne $old_port) ||
+            ($params->{pref_region} && $params->{pref_region} ne $old_region)
         );
         
         if ($need_restart) {
@@ -101,6 +103,11 @@ sub beforeRender {
         { value => 'low',    text => string('PLUGIN_SIRIUSXM_QUALITY_LOW') },
         { value => 'medium', text => string('PLUGIN_SIRIUSXM_QUALITY_MEDIUM') },
         { value => 'high',   text => string('PLUGIN_SIRIUSXM_QUALITY_HIGH') },
+    ];
+    
+    $params->{region_options} = [
+        { value => 'US',     text => string('PLUGIN_SIRIUSXM_REGION_US') },
+        { value => 'Canada', text => string('PLUGIN_SIRIUSXM_REGION_CANADA') },
     ];
     
     # Add any additional template processing here

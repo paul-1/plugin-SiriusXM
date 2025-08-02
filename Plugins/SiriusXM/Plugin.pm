@@ -49,7 +49,8 @@ sub initPlugin {
         username => '',
         password => '',
         quality => 'high',
-        port => '9999'
+        port => '9999',
+        region => 'US'
     });
     
 
@@ -254,6 +255,7 @@ sub startProxy {
     my $username = $prefs->get('username');
     my $password = $prefs->get('password');
     my $port = $prefs->get('port') || '9999';
+    my $region = $prefs->get('region') || 'US';
     
     # Check if credentials are configured
     unless ($username && $password) {
@@ -289,6 +291,11 @@ sub startProxy {
         '-e',  # Use environment variables
         '-p', $port
     );
+    
+    # Add region parameter for Canada
+    if ($region eq 'Canada') {
+        push @proxy_cmd, '-ca';
+    }
     
     $log->info("Starting proxy: " . join(' ', @proxy_cmd));
     
