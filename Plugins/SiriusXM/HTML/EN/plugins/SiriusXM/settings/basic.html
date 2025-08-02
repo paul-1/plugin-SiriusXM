@@ -30,6 +30,14 @@
 		</select>
 	[% END %]
 
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_REGION" desc="PLUGIN_SIRIUSXM_REGION_DESC" %]
+		<select name="pref_region" class="stdedit">
+			[% FOREACH option = region_options %]
+				<option value="[% option.value %]" [% IF prefs.pref_region == option.value %]selected[% END %]>[% option.text %]</option>
+			[% END %]
+		</select>
+	[% END %]
+
 	<div class="prefDesc">
 		<input type="submit" name="saveSettings" value="[% 'PLUGIN_SIRIUSXM_SAVE_SETTINGS' | string %]" class="stdclick">
 	</div>
