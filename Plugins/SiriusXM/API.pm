@@ -89,6 +89,10 @@ sub getChannels {
         sub {
             my ($http, $error) = @_;
             $log->error("Failed to fetch channels from proxy: $error");
+            
+            # Invalidate cache since proxy communication failed
+            $cache->remove('siriusxm_channels');
+            
             $cb->([]);
         },
         {
