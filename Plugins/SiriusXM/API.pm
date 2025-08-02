@@ -6,6 +6,7 @@ use warnings;
 use JSON::XS;
 use HTTP::Request;
 use LWP::UserAgent;
+use Time::HiRes;
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
@@ -358,6 +359,125 @@ sub normalizeChannelName {
     return $normalized;
 }
 
+sub fetchNowPlayingFresh {
+    my ($class, $channel_name, $cb) = @_;
+    
+    return $cb->({}) unless $channel_name;
+    
+    $log->debug("Fetching fresh nowplaying data for channel: $channel_name");
+    
+    # Normalize channel name for API
+    my $normalized_channel = $class->normalizeChannelName($channel_name);
+    unless ($normalized_channel) {
+        $log->warn("Could not normalize channel name: $channel_name");
+        return $cb->({});
+    }
+    
+    # Build API URL
+    my $api_url = "https://xmplaylist.com/api/station/$normalized_channel";
+    
+    $log->debug("Fetching nowplaying from: $api_url");
+    
+    # Use async HTTP request (always fetch fresh, no cache check)
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            my $content = $response->content;
+            
+            $log->debug("Received fresh nowplaying response for: $normalized_channel");
+            
+            my $data;
+            eval {
+                $data = decode_json($content);
+            };
+            
+            if ($@) {
+                $log->error("Failed to parse nowplaying JSON for $normalized_channel: $@");
+                return $cb->({});
+            }
+            
+            # Parse the response
+            my $nowplaying = $class->parseNowPlayingResponse($data);
+            
+            $log->debug("Successfully parsed fresh nowplaying data for: $normalized_channel");
+            $cb->($nowplaying);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->warn("Failed to fetch fresh nowplaying for $normalized_channel: $error");
+            $cb->({});
+        },
+        {
+            timeout => 15,
+        }
+    );
+    
+    $http->get($api_url);
+}
+
+sub notifyPlayersOfMetadataChange {
+    my ($class, $normalized_channel, $nowplaying_data) = @_;
+    
+    return unless $normalized_channel && $nowplaying_data;
+    
+    $log->debug("Notifying players of metadata change for: $normalized_channel");
+    
+    # Get all connected clients
+    require Slim::Player::Client;
+    my @clients = Slim::Player::Client::clients();
+    
+    for my $client (@clients) {
+        next unless $client;
+        
+        # Check if this client is playing a SiriusXM stream for this channel
+        my $url = $client->currentTrack() ? $client->currentTrack()->url : '';
+        next unless $url;
+        
+        # Check if URL matches our channel (localhost or 127.0.0.1 patterns)
+        if ($url =~ /(localhost|127\.0\.0\.1).*\/([^\/]+)\.m3u8$/) {
+            my $url_channel = $2;
+            my $url_normalized = $class->normalizeChannelName($url_channel);
+            
+            if ($url_normalized eq $normalized_channel) {
+                $log->debug("Updating metadata for client playing: $normalized_channel");
+                
+                # Create a request to update the track metadata
+                require Slim::Control::Request;
+                my $request = Slim::Control::Request->new(
+                    $client->id(),
+                    ['songinfo', 0, 100, 'tags:alTC']
+                );
+                
+                # Add nowplaying information to the current track's metadata
+                if ($client->currentTrack()) {
+                    my $track = $client->currentTrack();
+                    
+                    # Update track's remote metadata
+                    if ($nowplaying_data->{title}) {
+                        $track->pluginData('siriusxm_nowplaying_title', $nowplaying_data->{title});
+                    }
+                    if ($nowplaying_data->{artist}) {
+                        $track->pluginData('siriusxm_nowplaying_artist', $nowplaying_data->{artist});
+                    }
+                    if ($nowplaying_data->{artwork_url}) {
+                        $track->pluginData('siriusxm_nowplaying_artwork', $nowplaying_data->{artwork_url});
+                    }
+                    
+                    # Notify LMS that metadata has changed
+                    $client->currentPlaylistUpdateTime(Time::HiRes::time());
+                    
+                    # Send notification to web interface
+                    my $notify_request = Slim::Control::Request->new(
+                        $client->id(),
+                        ['playlist', 'newsong', $track->title || $nowplaying_data->{title} || 'Unknown']
+                    );
+                    $notify_request->execute();
+                }
+            }
+        }
+    }
+}
+
 sub fetchNowPlaying {
     my ($class, $channel_name, $cb) = @_;
     
@@ -380,49 +500,15 @@ sub fetchNowPlaying {
         return $cb->($cached);
     }
     
-    # Build API URL
-    my $api_url = "https://xmplaylist.com/api/station/$normalized_channel";
-    
-    $log->debug("Fetching nowplaying from: $api_url");
-    
-    # Use async HTTP request
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
-        sub {
-            my $response = shift;
-            my $content = $response->content;
-            
-            $log->debug("Received nowplaying response for: $normalized_channel");
-            
-            my $data;
-            eval {
-                $data = decode_json($content);
-            };
-            
-            if ($@) {
-                $log->error("Failed to parse nowplaying JSON for $normalized_channel: $@");
-                return $cb->({});
-            }
-            
-            # Parse the response
-            my $nowplaying = $class->parseNowPlayingResponse($data);
-            
-            # Cache the result
-            $cache->set($cache_key, $nowplaying, NOWPLAYING_CACHE_TIMEOUT);
-            
-            $log->debug("Successfully parsed nowplaying data for: $normalized_channel");
-            $cb->($nowplaying);
-        },
-        sub {
-            my ($http, $error) = @_;
-            $log->warn("Failed to fetch nowplaying for $normalized_channel: $error");
-            $cb->({});
-        },
-        {
-            timeout => 15,
-        }
-    );
-    
-    $http->get($api_url);
+    # If not cached, fetch fresh data
+    $class->fetchNowPlayingFresh($normalized_channel, sub {
+        my $nowplaying = shift;
+        
+        # Cache the result
+        $cache->set($cache_key, $nowplaying, NOWPLAYING_CACHE_TIMEOUT);
+        
+        $cb->($nowplaying);
+    });
 }
 
 sub parseNowPlayingResponse {
@@ -522,12 +608,12 @@ sub pollNowPlaying {
     
     $log->debug("Polling nowplaying for: $normalized_channel");
     
-    # Get current cached data
+    # Get current cached data for change detection
     my $cache_key = "nowplaying_$normalized_channel";
     my $current_data = $cache->get($cache_key) || {};
     
-    # Fetch new data
-    $class->fetchNowPlaying($normalized_channel, sub {
+    # Always fetch fresh data during polling (bypass cache)
+    $class->fetchNowPlayingFresh($normalized_channel, sub {
         my $new_data = shift;
         
         # Check if data has changed
@@ -547,8 +633,11 @@ sub pollNowPlaying {
                       ($new_data->{title} || 'Unknown') . " by " . 
                       ($new_data->{artist} || 'Unknown'));
             
-            # Notify clients about the change if needed
-            # This could be extended to push updates to active players
+            # Update cache with new data
+            $cache->set($cache_key, $new_data, NOWPLAYING_CACHE_TIMEOUT);
+            
+            # Notify active players about the change
+            $class->notifyPlayersOfMetadataChange($normalized_channel, $new_data);
         }
         
         # Schedule next poll

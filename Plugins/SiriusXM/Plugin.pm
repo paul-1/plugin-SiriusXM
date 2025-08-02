@@ -56,6 +56,10 @@ sub initPlugin {
         func   => \&trackInfoMenu,
     ));
     
+    # Subscribe to playback events to automatically start nowplaying polling
+    require Slim::Control::Request;
+    Slim::Control::Request::subscribe(\&onPlaybackEvent, [['playlist'], ['newsong', 'play', 'stop', 'pause']]);
+    
     # Initialize settings
     Plugins::SiriusXM::Settings->new();
     
@@ -74,6 +78,10 @@ sub shutdownPlugin {
     my $class = shift;
     
     $log->info("Shutting down SiriusXM Plugin");
+    
+    # Unsubscribe from playback events
+    require Slim::Control::Request;
+    Slim::Control::Request::unsubscribe(\&onPlaybackEvent);
     
     # Stop the proxy process
     $class->stopProxy();
@@ -212,6 +220,40 @@ sub browseByGenre {
     });
 }
 
+sub onPlaybackEvent {
+    my $request = shift;
+    
+    return unless $request;
+    
+    my $client = $request->client();
+    return unless $client;
+    
+    my $command = $request->getRequest(0);
+    my $subcommand = $request->getRequest(1);
+    
+    $log->debug("Playback event: $command $subcommand for client " . $client->name());
+    
+    # Handle newsong and play events to start nowplaying polling
+    if (($command eq 'playlist' && $subcommand eq 'newsong') || 
+        ($command eq 'playlist' && $subcommand eq 'play')) {
+        
+        my $url = $client->currentTrack() ? $client->currentTrack()->url : '';
+        
+        if ($url && $url =~ /(localhost|127\.0\.0\.1).*\/([^\/]+)\.m3u8$/) {
+            my $channel_name = $2;
+            $log->info("SiriusXM stream started playing: $channel_name");
+            
+            # Start nowplaying polling for this channel
+            Plugins::SiriusXM::API->startNowPlayingPolling($channel_name);
+        }
+    }
+    # Handle stop events to optionally stop polling (though we can let it continue for other clients)
+    elsif ($command eq 'playlist' && $subcommand eq 'stop') {
+        $log->debug("Playback stopped for client " . $client->name());
+        # Note: We don't stop polling here since other clients might still be playing the same channel
+    }
+}
+
 sub trackInfoMenu {
     my ($client, $url, $track, $remoteMeta) = @_;
     
@@ -251,8 +293,7 @@ sub trackInfoMenu {
             }
         });
         
-        # Start polling for this channel
-        Plugins::SiriusXM::API->startNowPlayingPolling($channel_name);
+        # Note: Polling is now started automatically via playback events
     }
     
     # Add static menu items
