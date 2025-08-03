@@ -241,6 +241,19 @@ sub findBestImage {
     return $best_image;
 }
 
+sub normalizeChannelName {
+    my ($class, $channel_name) = @_;
+
+    return '' unless $channel_name;
+
+    # Convert to lowercase and remove spaces, underscores, and special characters
+    my $normalized = lc($channel_name);
+    $normalized =~ s/[^a-z0-9]//g;
+
+    return $normalized;
+}
+
+
 sub processChannelData {
     my ($class, $raw_channels) = @_;
     
@@ -252,6 +265,9 @@ sub processChannelData {
     for my $channel (@$raw_channels) {
         next unless $channel->{channelId} && $channel->{name};
         
+        my $channel_name = $channel->{name};
+        my $xmp_name = $class->normalizeChannelName($channel_name);
+
         # Find the primary category
         my $primary_category = 'Other';  # Default fallback
         
@@ -276,6 +292,7 @@ sub processChannelData {
         my $channel_info = {
             id => $channel->{channelId},
             name => $channel->{name},
+            xmplaylist_name => $xmp_name,
             category => $primary_category,
             number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
             description => $channel->{shortDescription} || '',
