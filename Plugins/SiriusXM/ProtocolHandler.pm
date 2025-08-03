@@ -9,11 +9,20 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Misc;
 use Slim::Utils::Cache;
+use Slim::Utils::Timers;
+use Slim::Networking::SimpleAsyncHTTP;
+use JSON::XS;
 
 use Plugins::SiriusXM::API;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
+
+# Metadata update interval (30 seconds)
+use constant METADATA_UPDATE_INTERVAL => 30;
+
+# Global hash to track player metadata timers and states
+my %playerStates = ();
 
 sub new {
     my $class = shift;
@@ -25,6 +34,284 @@ sub new {
         'song' => $song,
         'url'  => $song->track()->url(),
     });
+}
+
+# Initialize player event callbacks for metadata tracking
+sub initPlayerEvents {
+    my $class = shift;
+    
+    $log->debug("Registering player event callbacks for metadata tracking");
+    
+    # Register callbacks for player state changes
+    Slim::Control::Request::subscribe(
+        \&onPlayerEvent,
+        [['play', 'pause', 'stop', 'playlist']]
+    );
+}
+
+# Clean up player event subscriptions and timers
+sub cleanupPlayerEvents {
+    my $class = shift;
+    
+    $log->debug("Cleaning up player event callbacks and timers");
+    
+    # Unsubscribe from player events
+    Slim::Control::Request::unsubscribe(\&onPlayerEvent);
+    
+    # Stop all active metadata timers
+    for my $clientId (keys %playerStates) {
+        if ($playerStates{$clientId}->{timer}) {
+            # Find the client object to cancel timers
+            my $client = Slim::Player::Client::getClient($clientId);
+            if ($client) {
+                Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+            }
+        }
+    }
+    
+    # Clear all player states
+    %playerStates = ();
+}
+
+# Player event callback handler
+sub onPlayerEvent {
+    my $request = shift;
+    my $client = $request->client() || return;
+    my $command = $request->getRequest(0) || return;
+    
+    return unless $client;
+    
+    my $clientId = $client->id();
+    my $song = $client->playingSong();
+    my $url = $song ? $song->currentTrack()->url() : '';
+    
+    # Only handle SiriusXM streams
+    return unless $url =~ /^sxm:/;
+    
+    $log->debug("Player event '$command' for client $clientId, URL: $url");
+    
+    if ($command eq 'play') {
+        _startMetadataTimer($client, $url);
+    } elsif ($command eq 'pause' || $command eq 'stop') {
+        _stopMetadataTimer($client);
+    } elsif ($command eq 'playlist') {
+        # Handle playlist changes - may need to start/stop timers
+        my $mode = $client->playmode();
+        if ($mode eq 'play') {
+            _startMetadataTimer($client, $url);
+        } else {
+            _stopMetadataTimer($client);
+        }
+    }
+}
+
+# Start metadata update timer for a client
+sub _startMetadataTimer {
+    my ($client, $url) = @_;
+    
+    return unless $client && $url;
+    
+    my $clientId = $client->id();
+    
+    # Stop any existing timer
+    _stopMetadataTimer($client);
+    
+    # Get channel info for xmplaylist integration
+    my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+    return unless $channel_info && $channel_info->{xmplaylist_name};
+    
+    $log->info("Starting metadata timer for client $clientId, channel: " . $channel_info->{name});
+    
+    # Initialize player state
+    $playerStates{$clientId} = {
+        url => $url,
+        channel_info => $channel_info,
+        last_next => undef,
+        timer => undef,
+    };
+    
+    # Start immediate metadata fetch
+    _fetchXMPlaylistMetadata($client);
+    
+    # Schedule periodic updates
+    $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
+        $client,
+        time() + METADATA_UPDATE_INTERVAL,
+        \&_onMetadataTimer
+    );
+}
+
+# Stop metadata update timer for a client
+sub _stopMetadataTimer {
+    my $client = shift;
+    
+    return unless $client;
+    
+    my $clientId = $client->id();
+    
+    if (exists $playerStates{$clientId}) {
+        $log->debug("Stopping metadata timer for client $clientId");
+        
+        # Cancel timer if exists
+        if ($playerStates{$clientId}->{timer}) {
+            Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+        }
+        
+        # Clean up state
+        delete $playerStates{$clientId};
+    }
+}
+
+# Timer callback for metadata updates
+sub _onMetadataTimer {
+    my $client = shift;
+    
+    return unless $client;
+    
+    my $clientId = $client->id();
+    
+    # Verify client is still playing
+    my $mode = $client->playmode();
+    if ($mode ne 'play') {
+        $log->debug("Client $clientId no longer playing, stopping metadata timer");
+        _stopMetadataTimer($client);
+        return;
+    }
+    
+    # Fetch metadata update
+    _fetchXMPlaylistMetadata($client);
+    
+    # Schedule next update if still playing
+    if (exists $playerStates{$clientId}) {
+        $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
+            $client,
+            time() + METADATA_UPDATE_INTERVAL,
+            \&_onMetadataTimer
+        );
+    }
+}
+
+# Fetch metadata from xmplaylist.com API
+sub _fetchXMPlaylistMetadata {
+    my $client = shift;
+    
+    return unless $client;
+    
+    my $clientId = $client->id();
+    my $state = $playerStates{$clientId};
+    
+    return unless $state && $state->{channel_info};
+    
+    my $channel_info = $state->{channel_info};
+    my $xmplaylist_name = $channel_info->{xmplaylist_name};
+    
+    return unless $xmplaylist_name;
+    
+    my $url = "https://xmplaylist.com/api/station/$xmplaylist_name";
+    
+    $log->debug("Fetching metadata from xmplaylist.com for channel: $xmplaylist_name");
+    
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            _processXMPlaylistResponse($client, $response);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->warn("Failed to fetch metadata from xmplaylist.com: $error");
+        },
+        {
+            timeout => 15,
+        }
+    );
+    
+    $http->get($url);
+}
+
+# Process xmplaylist.com API response
+sub _processXMPlaylistResponse {
+    my ($client, $response) = @_;
+    
+    return unless $client && $response;
+    
+    my $clientId = $client->id();
+    my $state = $playerStates{$clientId};
+    
+    return unless $state;
+    
+    my $content = $response->content;
+    my $data;
+    
+    eval {
+        $data = decode_json($content);
+    };
+    
+    if ($@) {
+        $log->error("Failed to parse xmplaylist.com response: $@");
+        return;
+    }
+    
+    # Check if metadata has changed using "next" field
+    my $next = $data->{next};
+    if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
+        $log->debug("No new metadata available (next field unchanged)");
+        return;
+    }
+    
+    # Update the last_next value
+    $state->{last_next} = $next;
+    
+    # Extract track information from latest result
+    my $results = $data->{results};
+    return unless $results && @$results;
+    
+    my $latest_track = $results->[0];
+    my $track_info = $latest_track->{track};
+    my $spotify_info = $latest_track->{spotify};
+    
+    return unless $track_info;
+    
+    # Build new metadata
+    my $new_meta = {};
+    
+    # Track title
+    if ($track_info->{title}) {
+        $new_meta->{title} = $track_info->{title};
+    }
+    
+    # Artists (join multiple if present)
+    if ($track_info->{artists} && ref($track_info->{artists}) eq 'ARRAY') {
+        my @artists = @{$track_info->{artists}};
+        if (@artists) {
+            $new_meta->{artist} = join(', ', @artists);
+        }
+    }
+    
+    # Album artwork from Spotify
+    if ($spotify_info && $spotify_info->{albumImageLarge}) {
+        $new_meta->{cover} = $spotify_info->{albumImageLarge};
+        $new_meta->{icon} = $spotify_info->{albumImageLarge};
+    }
+    
+    # Add channel information
+    $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
+    
+    # Update the current song's metadata if we have new information
+    if (keys %$new_meta) {
+        $log->info("Updating metadata for client $clientId: " . 
+                  ($new_meta->{title} || 'Unknown') . " by " . 
+                  ($new_meta->{artist} || 'Unknown Artist'));
+        
+        my $song = $client->playingSong();
+        if ($song) {
+            # Update song metadata
+            $song->pluginData('xmplaylist_meta', $new_meta);
+            
+            # Notify clients of metadata update
+            $client->currentPlaylistUpdateTime(Time::HiRes::time());
+            Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
+        }
+    }
 }
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs
@@ -113,6 +400,7 @@ sub getChannelInfoFromUrl {
                     return {
                         id => $channel_id,
                         name => $channel->{name},
+                        xmplaylist_name => _normalizeChannelName($channel->{name}),
                         description => $channel->{description},
                         channel_number => $channel->{channel_number},
                         icon => $channel->{icon},
@@ -127,8 +415,22 @@ sub getChannelInfoFromUrl {
     return {
         id => $channel_id,
         name => "SiriusXM Channel",
+        xmplaylist_name => $channel_id,
         description => "SiriusXM Channel $channel_id",
     };
+}
+
+# Normalize channel name for xmplaylist.com API (same logic as API.pm)
+sub _normalizeChannelName {
+    my $channel_name = shift;
+
+    return '' unless $channel_name;
+
+    # Convert to lowercase and remove spaces, underscores, and special characters
+    my $normalized = lc($channel_name);
+    $normalized =~ s/[^a-z0-9]//g;
+
+    return $normalized;
 }
 
 # Provide metadata for the stream
@@ -137,9 +439,11 @@ sub getMetadataFor {
     
     my $song = $client->streamingSong() || $client->playingSong();
     my $channel_info;
+    my $xmplaylist_meta;
     
     if ($song) {
         $channel_info = $song->pluginData('channel_info');
+        $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
     }
     
     # If no channel info in song data, try to extract from URL
@@ -149,16 +453,28 @@ sub getMetadataFor {
     
     my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
     
-    if ($channel_info) {
+    # Use xmplaylist metadata if available, otherwise fall back to channel info
+    if ($xmplaylist_meta && keys %$xmplaylist_meta) {
+        # Use enhanced metadata from xmplaylist.com
+        $meta->{title} = $xmplaylist_meta->{title} if $xmplaylist_meta->{title};
+        $meta->{artist} = $xmplaylist_meta->{artist} if $xmplaylist_meta->{artist};
+        $meta->{cover} = $xmplaylist_meta->{cover} if $xmplaylist_meta->{cover};
+        $meta->{icon} = $xmplaylist_meta->{icon} if $xmplaylist_meta->{icon};
+        $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
+        
+        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
+                   " by " . ($meta->{artist} || 'Unknown Artist'));
+    } elsif ($channel_info) {
+        # Fall back to basic channel info
         $meta->{artist} ||= $channel_info->{name};
         $meta->{title} ||= $channel_info->{description} || $channel_info->{name};
         $meta->{icon} ||= $channel_info->{icon};
         $meta->{cover} ||= $channel_info->{icon};
         $meta->{album} ||= 'SiriusXM';
-        
-        # Store channel info for other uses
-        $meta->{channel_info} = $channel_info;
     }
+    
+    # Store channel info for other uses
+    $meta->{channel_info} = $channel_info if $channel_info;
     
     return $meta;
 }
