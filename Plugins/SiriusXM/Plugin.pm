@@ -47,6 +47,11 @@ sub initPlugin {
     # Start the proxy process
     $class->startProxy();
     
+    # Register protocol handler for sxm: URLs
+    Slim::Player::ProtocolHandlers->registerHandler(
+        sxm => 'Plugins::SiriusXM::ProtocolHandler'
+    );
+    
     # Initialize the API module
     Plugins::SiriusXM::API->init();
     

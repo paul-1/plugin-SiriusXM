@@ -108,8 +108,8 @@ sub getStreamUrl {
     
     $log->debug("Getting stream URL for channel: $channel_id");
     
-    my $port = $prefs->get('port') || '9999';
-    my $stream_url = "http://localhost:$port/$channel_id.m3u8";
+    # Generate sxm protocol URL instead of direct HTTP URL
+    my $stream_url = "sxm:$channel_id";
     
     $log->debug("Stream URL: $stream_url");
     $cb->($stream_url);
@@ -168,7 +168,6 @@ sub buildCategoryMenu {
     my ($class, $categories) = @_;
     
     my @menu_items = ();
-    my $port = $prefs->get('port') || '9999';
     
     # Create folder menu for each category
     for my $category_name (sort keys %$categories) {
@@ -184,8 +183,8 @@ sub buildCategoryMenu {
         # Create menu items for channels in this category
         my @category_items = ();
         for my $channel (@sorted_channels) {
-            # Build proper proxy URL
-            my $stream_url = "http://localhost:$port/" . $channel->{id} . ".m3u8";
+            # Build sxm protocol URL
+            my $stream_url = "sxm:" . $channel->{id};
             
             # Format channel name: "Channel Icon - Channel Name (siriusChannelNumber)"
             my $display_name = $channel->{name};
