@@ -23,12 +23,16 @@ sub new {
     my $song      = $args->{song};
     my $originalUrl = $song->streamUrl() || return;
 
+    main::DEBUGLOG && $log->debug("ProtocolHandler new() called with URL: $originalUrl");
+
     # Convert siriusxm:// URL to actual HTTP proxy URL
     my $streamUrl;
     if ($originalUrl =~ /^siriusxm:\/\/(.+)$/) {
         my $channel_name = $1;
         my $port = $prefs->get('port') || '9999';
         $streamUrl = "http://localhost:$port/$channel_name.m3u8";
+        
+        main::DEBUGLOG && $log->debug("Converting $originalUrl to $streamUrl");
         
         # Store the channel name for metadata lookup
         $song->pluginData('siriusxm_channel_name', $channel_name);
@@ -49,7 +53,7 @@ sub canSeek { 0 }
 sub isRemote { 1 }
 sub canDirectStream { 0 }
 sub isRepeatingStream { 1 }
-sub contentType { 'audio/flac' };
+sub contentType { 'audio/flac' }
 
 sub canDoAction {
     my ( $class, $client, $url, $action ) = @_;
@@ -208,9 +212,10 @@ sub refreshMetadata {
     
     return unless $client && $channel_name;
     
-    # Check if client is still playing a SiriusXM stream
+    # Check if client is still playing a SiriusXM stream and is actually playing (not paused)
     my $song = $client->playingSong();
     return unless $song;
+    return unless $client->isPlaying; # Only update metadata when actually playing
     
     my $url = $song->track->url;
     return unless $url =~ /^siriusxm:/;

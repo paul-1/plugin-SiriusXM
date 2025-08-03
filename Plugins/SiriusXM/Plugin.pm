@@ -57,9 +57,11 @@ sub initPlugin {
     ));
     
     # Register protocol handler for SiriusXM streams
+    $log->debug("Registering ProtocolHandler for siriusxm://");
     Slim::Player::ProtocolHandlers->registerHandler(
         siriusxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
+    $log->debug("ProtocolHandler registration completed");
     
     # Subscribe to stop events to clean up timers
     require Slim::Control::Request;
