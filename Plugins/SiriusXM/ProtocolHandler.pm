@@ -96,8 +96,8 @@ sub onPlayerEvent {
         _stopMetadataTimer($client);
     } elsif ($command eq 'playlist') {
         # Handle playlist changes - may need to start/stop timers
-        my $mode = $client->playmode();
-        if ($mode eq 'play') {
+        my $isPlaying = $client->isPlaying();
+        if ($isPlaying) {
             _startMetadataTimer($client, $url);
         } else {
             _stopMetadataTimer($client);
@@ -171,8 +171,8 @@ sub _onMetadataTimer {
     my $clientId = $client->id();
     
     # Verify client is still playing
-    my $mode = $client->playmode();
-    if ($mode ne 'play') {
+    my $isPlaying = $client->isPlaying();
+    if (!$isPlaying) {
         $log->debug("Client $clientId no longer playing, stopping metadata timer");
         _stopMetadataTimer($client);
         return;

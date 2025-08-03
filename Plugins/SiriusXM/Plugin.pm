@@ -14,6 +14,7 @@ use Proc::Background;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
+use Plugins::SiriusXM::ProtocolHandler;
 
 my $prefs = preferences('plugin.siriusxm');
 my $log = Slim::Utils::Log->addLogCategory({
