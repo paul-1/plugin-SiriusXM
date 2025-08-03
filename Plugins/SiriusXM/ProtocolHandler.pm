@@ -85,8 +85,8 @@ sub onPlayerEvent {
     my $song = $client->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
     
-    # Only handle SiriusXM streams
-    return unless $url =~ /^sxm:/;
+    # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
+    return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:\d+/[\w-]+\.m3u8$};
     
     $log->debug("Player event '$command' for client $clientId, URL: $url");
     
@@ -380,10 +380,16 @@ sub sxmToHttpUrl {
 sub getChannelInfoFromUrl {
     my ($class, $url) = @_;
     
-    return unless $url =~ /^sxm:/;
+    # Handle both sxm: URLs and converted HTTP URLs
+    my $channel_id;
     
-    my ($channel_id) = $url =~ /^sxm:(.+)$/;
-    return unless $channel_id;
+    if ($url =~ /^sxm:(.+)$/) {
+        $channel_id = $1;
+    } elsif ($url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+        $channel_id = $1;
+    } else {
+        return;
+    }
     
     # Try to get channel info from cache first
     my $cache = Slim::Utils::Cache->new();
