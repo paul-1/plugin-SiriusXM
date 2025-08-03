@@ -296,6 +296,7 @@ sub processChannelData {
             number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
             description => $channel->{shortDescription} || '',
             logo => $logo_url,
+            icon => $logo_url,
         };
         
         # Add to category group
