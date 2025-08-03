@@ -189,8 +189,9 @@ sub buildCategoryMenu {
         # Create menu items for channels in this category
         my @category_items = ();
         for my $channel (@sorted_channels) {
-            # Build SiriusXM protocol URL instead of direct proxy URL
-            my $stream_url = "siriusxm://" . $channel->{id};
+            # Use the channel name for the protocol URL since the proxy supports it
+            # and it's what we need for the xmplaylist.com API
+            my $stream_url = "siriusxm://" . $channel->{name};
             
             # Format channel name: "Channel Icon - Channel Name (siriusChannelNumber)"
             my $display_name = $channel->{name};
@@ -207,6 +208,7 @@ sub buildCategoryMenu {
                 description => $channel->{description},
                 channel_number => $channel->{number},
                 channel_id => $channel->{id},  # Store channel ID for ProtocolHandler
+                channel_name => $channel->{name}, # Store channel name for metadata API
             };
         }
         
