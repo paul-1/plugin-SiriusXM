@@ -25,6 +25,9 @@ my $log = Slim::Utils::Log->addLogCategory({
 # Global proxy process handle
 my $proxyProcess;
 
+# Track client playing states for metadata updates
+my %clientPlayingStates = ();
+
 # Plugin metadata
 sub getDisplayName { 'PLUGIN_SIRIUSXM' }
 
@@ -58,14 +61,16 @@ sub initPlugin {
     
     # Register protocol handler for SiriusXM streams
     $log->debug("Registering ProtocolHandler for siriusxm://");
+    require Plugins::SiriusXM::ProtocolHandler;
     Slim::Player::ProtocolHandlers->registerHandler(
         siriusxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
     $log->debug("ProtocolHandler registration completed");
     
-    # Subscribe to stop events to clean up timers
+    # Subscribe to events to track player states and clean up timers
     require Slim::Control::Request;
     Slim::Control::Request::subscribe(\&onStopEvent, [['playlist'], ['stop', 'pause', 'newsong']]);
+    Slim::Control::Request::subscribe(\&onPlayerEvent, [['pause'], ['0', '1']]);
     
     # Initialize settings
     Plugins::SiriusXM::Settings->new();
@@ -248,7 +253,56 @@ sub onStopEvent {
         my $client_id = $client->id;
         Slim::Utils::Timers::killTimers($client, qr/^siriusxm_metadata_${client_id}_/);
         $log->debug("Cleaned up metadata timers for client: " . $client->name());
+        
+        # Update playing state
+        if ($command eq 'playlist' && $subcommand eq 'stop') {
+            $clientPlayingStates{$client_id} = 0;
+        } elsif ($command eq 'playlist' && $subcommand eq 'newsong') {
+            # New song started - set to playing
+            $clientPlayingStates{$client_id} = 1;
+        }
     }
+}
+
+sub onPlayerEvent {
+    my $request = shift;
+    my $client = $request->client;
+    return unless $client;
+    
+    my $command = $request->getRequest(0);
+    my $subcommand = $request->getRequest(1);
+    
+    my $client_id = $client->id;
+    
+    if ($command eq 'pause') {
+        if ($subcommand eq '0') {
+            # Unpaused (playing)
+            $clientPlayingStates{$client_id} = 1;
+            $log->debug("Client " . $client->name() . " is now playing");
+        } elsif ($subcommand eq '1') {
+            # Paused
+            $clientPlayingStates{$client_id} = 0;
+            $log->debug("Client " . $client->name() . " is now paused");
+        }
+    }
+}
+
+# Helper function to check if client is playing SiriusXM
+sub isClientPlayingSiriusXM {
+    my $client = shift;
+    return 0 unless $client;
+    
+    my $client_id = $client->id;
+    
+    # Check if client is currently playing (not paused)
+    return 0 unless $clientPlayingStates{$client_id};
+    
+    # Check if current song is SiriusXM
+    my $song = $client->playingSong();
+    return 0 unless $song;
+    
+    my $url = $song->track->url;
+    return $url =~ /^siriusxm:/;
 }
 
 sub trackInfoMenu {

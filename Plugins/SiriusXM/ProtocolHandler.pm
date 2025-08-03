@@ -215,10 +215,12 @@ sub refreshMetadata {
     # Check if client is still playing a SiriusXM stream and is actually playing (not paused)
     my $song = $client->playingSong();
     return unless $song;
-    return unless $client->isPlaying; # Only update metadata when actually playing
     
     my $url = $song->track->url;
     return unless $url =~ /^siriusxm:/;
+    
+    # Check if client is actually playing (not paused) using player event tracking
+    return unless Plugins::SiriusXM::Plugin::isClientPlayingSiriusXM($client);
     
     my $normalized_channel = Plugins::SiriusXM::API->normalizeChannelName($channel_name);
     
