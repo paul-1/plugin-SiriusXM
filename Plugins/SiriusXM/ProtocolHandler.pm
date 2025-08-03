@@ -96,10 +96,17 @@ sub onPlayerEvent {
         _stopMetadataTimer($client);
     } elsif ($command eq 'playlist') {
         # Handle playlist changes - may need to start/stop timers
+        my $clientId = $client->id();
         my $isPlaying = $client->isPlaying();
-        if ($isPlaying) {
+        my $timersRunning = exists $playerStates{$clientId} && $playerStates{$clientId}->{timer};
+        
+        if ($isPlaying && !$timersRunning) {
+            # Start timers if playing and no timers running
             _startMetadataTimer($client, $url);
-        } else {
+        } elsif ($isPlaying && $timersRunning) {
+            # Do nothing - timers already running
+        } elsif (!$isPlaying && $timersRunning) {
+            # Stop timers if not playing but timers are running
             _stopMetadataTimer($client);
         }
     }
@@ -421,7 +428,7 @@ sub getChannelInfoFromUrl {
     return {
         id => $channel_id,
         name => "SiriusXM Channel",
-        xmplaylist_name => $channel_id,
+        xmplaylist_name => _normalizeChannelName("SiriusXM Channel"),
         description => "SiriusXM Channel $channel_id",
     };
 }
