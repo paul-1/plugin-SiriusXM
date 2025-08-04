@@ -398,18 +398,21 @@ sub getChannelInfoFromUrl {
         return;
     }
     
-    # Try to get channel info from cache first
+    # Use the API to get channels, which handles caching internally
+    # Since we need synchronous access, we'll first try the cache directly
+    # and if that fails, trigger an async API call but return fallback for now
     my $cache = Slim::Utils::Cache->new();
     my $cached_channels = $cache->get('siriusxm_channels');
     
     if ($cached_channels) {
-        # Search through cached channel data
+        # Search through cached channel data (using the API's structure)
         for my $category (@$cached_channels) {
             next unless $category->{items};
             
             for my $channel (@{$category->{items}}) {
-                # Extract channel ID from the URL
-                if ($channel->{url} && $channel->{url} =~ /\/$channel_id\.m3u8$/) {
+                # Check if this channel matches our URL
+                if ($channel->{url} && $channel->{url} =~ /^sxm:\Q$channel_id\E$/) {
+                    # Build the channel info using the cached data
                     return {
                         id => $channel_id,
                         name => $channel->{name},
@@ -422,13 +425,19 @@ sub getChannelInfoFromUrl {
                 }
             }
         }
+    } else {
+        # No cache available - trigger async API call to populate cache
+        # But don't wait for it, just return fallback for now
+        Plugins::SiriusXM::API->getChannels(undef, sub {
+            # Cache will be populated for next time
+        });
     }
     
     # Fallback channel info if not found in cache
     return {
         id => $channel_id,
         name => "SiriusXM Channel",
-        xmplaylist_name => _normalizeChannelName("SiriusXM Channel"),
+        xmplaylist_name => undef,
         description => "SiriusXM Channel $channel_id",
     };
 }
