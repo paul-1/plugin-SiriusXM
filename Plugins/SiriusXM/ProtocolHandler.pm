@@ -398,29 +398,27 @@ sub getChannelInfoFromUrl {
         return;
     }
     
-    # Use the API to get channels, which handles caching internally
-    # Since we need synchronous access, we'll first try the cache directly
-    # and if that fails, trigger an async API call but return fallback for now
+    # Use the API's cached channel info (processed data, not menu data)
     my $cache = Slim::Utils::Cache->new();
-    my $cached_channels = $cache->get('siriusxm_channels');
+    my $cached_channel_info = $cache->get('siriusxm_channel_info');
     
-    if ($cached_channels) {
-        # Search through cached channel data (using the API's structure)
-        for my $category (@$cached_channels) {
-            next unless $category->{items};
+    if ($cached_channel_info) {
+        # Search through cached channel info data (categories hash from processChannelData)
+        for my $category_name (keys %$cached_channel_info) {
+            my $channels_in_category = $cached_channel_info->{$category_name};
             
-            for my $channel (@{$category->{items}}) {
-                # Check if this channel matches our URL
-                if ($channel->{url} && $channel->{url} =~ /^sxm:\Q$channel_id\E$/) {
-                    # Build the channel info using the cached data
+            for my $channel (@$channels_in_category) {
+                # Check if this channel matches our channel ID
+                if ($channel->{id} && $channel->{id} eq $channel_id) {
+                    # Return the processed channel info with correct normalized name
                     return {
-                        id => $channel_id,
+                        id => $channel->{id},
                         name => $channel->{name},
-                        xmplaylist_name => _normalizeChannelName($channel->{name}),
+                        xmplaylist_name => $channel->{xmplaylist_name},
                         description => $channel->{description},
-                        channel_number => $channel->{channel_number},
+                        channel_number => $channel->{number},
                         icon => $channel->{icon},
-                        category => $category->{name},
+                        category => $channel->{category},
                     };
                 }
             }
