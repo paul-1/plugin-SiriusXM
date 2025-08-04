@@ -28,6 +28,7 @@ sub cleanup {
     $log->debug("Cleaning up SiriusXM API");
     # Clear any cached data
     $cache->remove('siriusxm_channels');
+    $cache->remove('siriusxm_channel_info');
     $cache->remove('siriusxm_auth_token');
 }
 
@@ -35,6 +36,7 @@ sub invalidateChannelCache {
     my $class = shift;
     $log->info("Invalidating channel cache due to playback failure");
     $cache->remove('siriusxm_channels');
+    $cache->remove('siriusxm_channel_info');
 }
 
 sub getChannels {
@@ -80,8 +82,9 @@ sub getChannels {
             # Build hierarchical menu structure
             my $menu_items = $class->buildCategoryMenu($categories);
             
-            # Cache the processed results
+            # Cache both the menu structure and the processed channel data separately
             $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+            $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
             
             $log->info("Retrieved and processed channels into menu structure");
             $cb->($menu_items);

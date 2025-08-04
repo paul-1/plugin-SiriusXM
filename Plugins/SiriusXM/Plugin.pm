@@ -14,6 +14,7 @@ use Proc::Background;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
+use Plugins::SiriusXM::ProtocolHandler;
 
 my $prefs = preferences('plugin.siriusxm');
 my $log = Slim::Utils::Log->addLogCategory({
@@ -52,6 +53,9 @@ sub initPlugin {
         sxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
     
+    # Initialize player event callbacks for metadata tracking
+    Plugins::SiriusXM::ProtocolHandler->initPlayerEvents();
+    
     # Initialize the API module
     Plugins::SiriusXM::API->init();
     
@@ -79,6 +83,9 @@ sub shutdownPlugin {
     my $class = shift;
     
     $log->info("Shutting down SiriusXM Plugin");
+    
+    # Clean up player event subscriptions and timers
+    Plugins::SiriusXM::ProtocolHandler->cleanupPlayerEvents();
     
     # Stop the proxy process
     $class->stopProxy();
