@@ -132,6 +132,13 @@ sub _startMetadataTimer {
     
     return unless $client && $url;
     
+    # Check if metadata updates are enabled
+    my $prefs = preferences('plugin.siriusxm');
+    unless ($prefs->get('enable_metadata')) {
+        $log->debug("Metadata updates disabled by user preference, skipping timer setup");
+        return;
+    }
+    
     my $clientId = $client->id();
     
     # Stop any existing timer

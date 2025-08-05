@@ -102,3 +102,9 @@ PLUGIN_SIRIUSXM_REGION_US
 
 PLUGIN_SIRIUSXM_REGION_CANADA
 	EN	Canada
+
+PLUGIN_SIRIUSXM_ENABLE_METADATA
+	EN	Enable Metadata Updates
+
+PLUGIN_SIRIUSXM_ENABLE_METADATA_DESC
+	EN	Enable automatic retrieval of song metadata from external sources. When disabled, only basic channel information will be displayed.
