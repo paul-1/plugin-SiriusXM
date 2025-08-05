@@ -12,14 +12,15 @@ use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
+use Data::Dumper;
 
 use Plugins::SiriusXM::API;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 
-# Metadata update interval (30 seconds)
-use constant METADATA_UPDATE_INTERVAL => 30;
+# Metadata update interval (25 seconds)
+use constant METADATA_UPDATE_INTERVAL => 25;
 
 # Global hash to track player metadata timers and states
 my %playerStates = ();
@@ -28,13 +29,26 @@ sub new {
     my $class = shift;
     my $args = shift;
 
+    my $client = $args->{client};
+
     my $song = $args->{'song'};
+    my $streamUrl = $song->streamUrl();
+
+    $log->info( 'PH:new(): ' . $streamUrl );
 
     return $class->SUPER::new({
-        'song' => $song,
-        'url'  => $song->track()->url(),
+        song => $song,
+        url  => $song->track()->url(),
+        client => $client,
     });
 }
+
+sub canSeek { 0 }
+sub canSkip { 0 }
+sub isRemote { 1 }
+sub canDirectStream { 0 }
+sub isRepeatingStream { 0 }
+
 
 # Initialize player event callbacks for metadata tracking
 sub initPlayerEvents {
@@ -69,8 +83,8 @@ sub cleanupPlayerEvents {
         }
     }
     
-    # Clear all player states
-    %playerStates = ();
+    # Clear all player states - Pretty sure we don't want to do this, there may be multiple players.
+    #%playerStates = ();
 }
 
 # Player event callback handler
@@ -329,10 +343,6 @@ sub getFormatForURL {
     return 'mp3';  # Default format, actual format determined by proxy
 }
 
-sub isRemote {
-    return 1;
-}
-
 sub scanUrl {
     my ($class, $url, $args) = @_;
     $args->{'cb'}->($args->{'song'}->currentTrack());
@@ -431,13 +441,14 @@ sub getChannelInfoFromUrl {
         });
     }
     
-    # Fallback channel info if not found in cache
-    return {
-        id => $channel_id,
-        name => "SiriusXM Channel",
-        xmplaylist_name => undef,
-        description => "SiriusXM Channel $channel_id",
-    };
+    # Fallback channel info if not found in cache    ----   May only get here if restarting from playlist.  BUt should not need this.
+#    return {
+#        id => $channel_id,
+#        name => "SiriusXM Channel",
+#        xmplaylist_name => undef,
+#        description => "SiriusXM Channel $channel_id",
+#    };
+    return;
 }
 
 # Normalize channel name for xmplaylist.com API (same logic as API.pm)
@@ -482,8 +493,9 @@ sub getMetadataFor {
         $meta->{icon} = $xmplaylist_meta->{icon} if $xmplaylist_meta->{icon};
         $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
         
-        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
-                   " by " . ($meta->{artist} || 'Unknown Artist'));
+#       Really noisy log message when using a LMS web.
+#        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
+#                  " by " . ($meta->{artist} || 'Unknown Artist'));
     } elsif ($channel_info) {
         # Fall back to basic channel info
         $meta->{artist} ||= $channel_info->{name};
@@ -497,18 +509,6 @@ sub getMetadataFor {
     $meta->{channel_info} = $channel_info if $channel_info;
     
     return $meta;
-}
-
-# Support for seeking (pass through to HTTP handler)
-sub canSeek {
-    my ($class, $client, $song) = @_;
-    return $class->SUPER::canSeek($client, $song);
-}
-
-# Support for direct streaming 
-sub canDirectStream {
-    my ($class, $client, $url) = @_;
-    return $class->SUPER::canDirectStream($client, $url);
 }
 
 # Handle HTTPS support
