@@ -366,9 +366,11 @@ sub getNextTrack {
     my $httpUrl = $class->sxmToHttpUrl($url);
     
     if ($httpUrl) {
-        # Store channel info for metadata access
-        my $channel_info = $class->getChannelInfoFromUrl($url);
-        $song->pluginData('channel_info', $channel_info) if $channel_info;
+        # Store channel info for metadata access only if metadata is enabled
+        if ($prefs->get('enable_metadata')) {
+            my $channel_info = $class->getChannelInfoFromUrl($url);
+            $song->pluginData('channel_info', $channel_info) if $channel_info;
+        }
         
         # Update the track URL to the HTTP proxy URL
         $song->currentTrack()->url($httpUrl);
@@ -479,20 +481,21 @@ sub getMetadataFor {
     my $channel_info;
     my $xmplaylist_meta;
     
-    if ($song) {
+    # Only use external metadata sources if metadata is enabled
+    if ($prefs->get('enable_metadata') && $song) {
         $channel_info = $song->pluginData('channel_info');
         $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
-    }
-    
-    # If no channel info in song data, try to extract from URL
-    if (!$channel_info) {
-        $channel_info = $class->getChannelInfoFromUrl($url);
+        
+        # If no channel info in song data, try to extract from URL
+        if (!$channel_info) {
+            $channel_info = $class->getChannelInfoFromUrl($url);
+        }
     }
     
     my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
     
-    # Use xmplaylist metadata if available, otherwise fall back to channel info
-    if ($xmplaylist_meta && keys %$xmplaylist_meta) {
+    # Use xmplaylist metadata if available and metadata is enabled, otherwise fall back to basic info
+    if ($prefs->get('enable_metadata') && $xmplaylist_meta && keys %$xmplaylist_meta) {
         # Use enhanced metadata from xmplaylist.com
         $meta->{title} = $xmplaylist_meta->{title} if $xmplaylist_meta->{title};
         $meta->{artist} = $xmplaylist_meta->{artist} if $xmplaylist_meta->{artist};
@@ -503,17 +506,24 @@ sub getMetadataFor {
 #       Really noisy log message when using a LMS web.
 #        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
 #                  " by " . ($meta->{artist} || 'Unknown Artist'));
-    } elsif ($channel_info) {
-        # Fall back to basic channel info
+    } elsif ($prefs->get('enable_metadata') && $channel_info) {
+        # Fall back to basic channel info when metadata is enabled
         $meta->{artist} ||= $channel_info->{name};
         $meta->{title} ||= $channel_info->{description} || $channel_info->{name};
         $meta->{icon} ||= $channel_info->{icon};
         $meta->{cover} ||= $channel_info->{icon};
         $meta->{album} ||= 'SiriusXM';
+    } else {
+        # When metadata is disabled, provide minimal basic information
+        $meta->{artist} ||= 'SiriusXM';
+        $meta->{title} ||= 'SiriusXM Radio';
+        $meta->{album} ||= 'SiriusXM';
     }
     
-    # Store channel info for other uses
-    $meta->{channel_info} = $channel_info if $channel_info;
+    # Store channel info for other uses only if metadata is enabled
+    if ($prefs->get('enable_metadata')) {
+        $meta->{channel_info} = $channel_info if $channel_info;
+    }
     
     return $meta;
 }
