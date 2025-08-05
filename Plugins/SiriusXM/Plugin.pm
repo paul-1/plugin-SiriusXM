@@ -327,6 +327,8 @@ sub startProxy {
 sub stopProxy {
     my $class = shift;
     
+    return unless $proxyProcess;
+ 
     $log->info("Stopping proxy process (Proc::Background)");
         
     eval {
