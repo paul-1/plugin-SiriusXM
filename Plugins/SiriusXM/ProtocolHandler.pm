@@ -53,7 +53,7 @@ sub isRepeatingStream { 0 }
 # Initialize player event callbacks for metadata tracking
 sub initPlayerEvents {
     my $class = shift;
-    
+
     $log->debug("Registering player event callbacks for metadata tracking");
     
     # Register callbacks for player state changes
@@ -133,7 +133,6 @@ sub _startMetadataTimer {
     return unless $client && $url;
     
     # Check if metadata updates are enabled
-    my $prefs = preferences('plugin.siriusxm');
     unless ($prefs->get('enable_metadata')) {
         $log->debug("Metadata updates disabled by user preference, skipping timer setup");
         return;
@@ -209,6 +208,13 @@ sub _onMetadataTimer {
     # Fetch metadata update
     _fetchXMPlaylistMetadata($client);
     
+    # Let the meta data refresh one more time, to return player screens to channel artwork.
+    unless ($prefs->get('enable_metadata')) {
+        $log->debug("Metadata updates disabled by user preference, stopping timer");
+        _stopMetadataTimer($client);
+        return;
+    }
+
     # Schedule next update if still playing
     if (exists $playerStates{$clientId}) {
         $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
@@ -289,41 +295,60 @@ sub _processXMPlaylistResponse {
     # Update the last_next value
     $state->{last_next} = $next;
     
-    # Extract track information from latest result
-    my $results = $data->{results};
-    return unless $results && @$results;
-    
-    my $latest_track = $results->[0];
-    my $track_info = $latest_track->{track};
-    my $spotify_info = $latest_track->{spotify};
-    
-    return unless $track_info;
-    
     # Build new metadata
     my $new_meta = {};
     
-    # Track title
-    if ($track_info->{title}) {
-        $new_meta->{title} = $track_info->{title};
-    }
-    
-    # Artists (join multiple if present)
-    if ($track_info->{artists} && ref($track_info->{artists}) eq 'ARRAY') {
-        my @artists = @{$track_info->{artists}};
-        if (@artists) {
-            $new_meta->{artist} = join(', ', @artists);
+    if ($prefs->get('enable_metadata')) {
+
+        # Extract track information from latest result
+        my $results = $data->{results};
+        return unless $results && @$results;
+
+        my $latest_track = $results->[0];
+        my $track_info = $latest_track->{track};
+        my $spotify_info = $latest_track->{spotify};
+
+        return unless $track_info;
+
+        # Track title
+        if ($track_info->{title}) {
+            $new_meta->{title} = $track_info->{title};
+        }
+
+        # Artists (join multiple if present)
+        if ($track_info->{artists} && ref($track_info->{artists}) eq 'ARRAY') {
+            my @artists = @{$track_info->{artists}};
+            if (@artists) {
+                $new_meta->{artist} = join(', ', @artists);
+            }
+        }
+
+        # Album artwork from Spotify
+        if ($spotify_info && $spotify_info->{albumImageLarge}) {
+            $new_meta->{cover} = $spotify_info->{albumImageLarge};
+            $new_meta->{icon} = $spotify_info->{albumImageLarge};
+        }
+
+        # Add channel information
+        $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
+
+    } else {
+        # Metadata is off, return to channel meta.
+        my $state = $playerStates{$clientId};
+
+        my $channel_info = $state->{channel_info} || '';
+
+        if ($channel_info) {
+            $log->debug(Dumper($channel_info));
+            # Fall back to basic channel info when metadata is enabled
+            $new_meta->{artist} = $channel_info->{name};
+            $new_meta->{title} = $channel_info->{description} || $channel_info->{name};
+            $new_meta->{icon} = $channel_info->{icon};
+            $new_meta->{cover} = $channel_info->{icon};
+            $new_meta->{album} = 'SiriusXM';
         }
     }
-    
-    # Album artwork from Spotify
-    if ($spotify_info && $spotify_info->{albumImageLarge}) {
-        $new_meta->{cover} = $spotify_info->{albumImageLarge};
-        $new_meta->{icon} = $spotify_info->{albumImageLarge};
-    }
-    
-    # Add channel information
-    $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
-    
+
     # Update the current song's metadata if we have new information
     if (keys %$new_meta) {
         $log->info("Updating metadata for client $clientId: " . 
@@ -479,17 +504,21 @@ sub getMetadataFor {
     
     my $song = $client->streamingSong() || $client->playingSong();
     my $channel_info;
+
+    if ($song) {
+        $channel_info = $song->pluginData('channel_info');
+    }
+
     my $xmplaylist_meta;
     
     # Only use external metadata sources if metadata is enabled
     if ($prefs->get('enable_metadata') && $song) {
-        $channel_info = $song->pluginData('channel_info');
         $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
-        
-        # If no channel info in song data, try to extract from URL
-        if (!$channel_info) {
-            $channel_info = $class->getChannelInfoFromUrl($url);
-        }
+    }
+
+    # If no channel info in song data, try to extract from URL
+    if (!$channel_info) {
+        $channel_info = $class->getChannelInfoFromUrl($url);
     }
     
     my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
@@ -506,25 +535,17 @@ sub getMetadataFor {
 #       Really noisy log message when using a LMS web.
 #        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
 #                  " by " . ($meta->{artist} || 'Unknown Artist'));
-    } elsif ($prefs->get('enable_metadata') && $channel_info) {
+    } elsif ($channel_info) {
         # Fall back to basic channel info when metadata is enabled
-        $meta->{artist} ||= $channel_info->{name};
-        $meta->{title} ||= $channel_info->{description} || $channel_info->{name};
-        $meta->{icon} ||= $channel_info->{icon};
-        $meta->{cover} ||= $channel_info->{icon};
-        $meta->{album} ||= 'SiriusXM';
-    } else {
-        # When metadata is disabled, provide minimal basic information
-        $meta->{artist} ||= 'SiriusXM';
-        $meta->{title} ||= 'SiriusXM Radio';
-        $meta->{album} ||= 'SiriusXM';
+        $meta->{artist} = $channel_info->{name};
+        $meta->{title} = $channel_info->{description} || $channel_info->{name};
+        $meta->{icon} = $channel_info->{icon};
+        $meta->{cover} = $channel_info->{icon};
+        $meta->{album} = 'SiriusXM';
     }
-    
-    # Store channel info for other uses only if metadata is enabled
-    if ($prefs->get('enable_metadata')) {
-        $meta->{channel_info} = $channel_info if $channel_info;
-    }
-    
+
+    $meta->{channel_info} = $channel_info if $channel_info;
+
     return $meta;
 }
 
