@@ -22,7 +22,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality port region));
+    return ($prefs, qw(username password quality port region enable_metadata));
 }
 
 sub handler {

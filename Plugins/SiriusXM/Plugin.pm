@@ -40,7 +40,8 @@ sub initPlugin {
         password => '',
         quality => 'high',
         port => '9999',
-        region => 'US'
+        region => 'US',
+        enable_metadata => 0
     });
     
 
