@@ -189,6 +189,62 @@ sub _stopMetadataTimer {
     }
 }
 
+# Clear player states for channels different from the specified URL
+sub _clearPlayerStatesForDifferentChannel {
+    my ($class, $newUrl) = @_;
+    
+    return unless $newUrl;
+    
+    # Extract channel ID from the new URL
+    my $newChannelId = $class->_extractChannelIdFromUrl($newUrl);
+    return unless $newChannelId;
+    
+    $log->debug("Checking player states for different channels than: $newChannelId");
+    
+    # Check all existing player states
+    for my $clientId (keys %playerStates) {
+        my $state = $playerStates{$clientId};
+        next unless $state && $state->{url};
+        
+        # Extract channel ID from existing state URL
+        my $existingChannelId = $class->_extractChannelIdFromUrl($state->{url});
+        next unless $existingChannelId;
+        
+        # If the channel ID is different, clear this player state
+        if ($existingChannelId ne $newChannelId) {
+            $log->debug("Clearing player state for client $clientId (old channel: $existingChannelId, new channel: $newChannelId)");
+            
+            # Find the client object to cancel timers properly
+            my $client = Slim::Player::Client::getClient($clientId);
+            if ($client && $state->{timer}) {
+                Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+            }
+            
+            # Remove the player state
+            delete $playerStates{$clientId};
+        }
+    }
+}
+
+# Extract channel ID from URL (supports both sxm: and HTTP URLs)
+sub _extractChannelIdFromUrl {
+    my ($class, $url) = @_;
+    
+    return unless $url;
+    
+    # Handle sxm: URLs
+    if ($url =~ /^sxm:(.+)$/) {
+        return $1;
+    }
+    
+    # Handle converted HTTP URLs
+    if ($url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+        return $1;
+    }
+    
+    return;
+}
+
 # Timer callback for metadata updates
 sub _onMetadataTimer {
     my $client = shift;
@@ -386,6 +442,9 @@ sub getNextTrack {
     my $url = $song->currentTrack()->url;
     
     $log->debug("getNextTrack called for: $url");
+    
+    # Clear player states for different channels to ensure fresh state
+    $class->_clearPlayerStatesForDifferentChannel($url);
     
     # Convert sxm: URL to HTTP proxy URL
     my $httpUrl = $class->sxmToHttpUrl($url);
