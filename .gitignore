@@ -38,3 +38,6 @@ config.local
 
 # Test coverage
 cover_db/
+
+# Test dependencies
+lms-server/

@@ -325,27 +325,41 @@ sub _processXMPlaylistResponse {
 
         return unless $track_info;
 
-        # Track title
-        if ($track_info->{title}) {
-            $new_meta->{title} = $track_info->{title};
-        }
+        # Check timestamp to determine whether to show track metadata or channel info
+        my $should_use_track_metadata = _shouldUseTrackMetadata($latest_track);
+        
+        if ($should_use_track_metadata) {
+            # Track title
+            if ($track_info->{title}) {
+                $new_meta->{title} = $track_info->{title};
+            }
 
-        # Artists (join multiple if present)
-        if ($track_info->{artists} && ref($track_info->{artists}) eq 'ARRAY') {
-            my @artists = @{$track_info->{artists}};
-            if (@artists) {
-                $new_meta->{artist} = join(', ', @artists);
+            # Artists (join multiple if present)
+            if ($track_info->{artists} && ref($track_info->{artists}) eq 'ARRAY') {
+                my @artists = @{$track_info->{artists}};
+                if (@artists) {
+                    $new_meta->{artist} = join(', ', @artists);
+                }
+            }
+
+            # Album artwork from Spotify
+            if ($spotify_info && $spotify_info->{albumImageLarge}) {
+                $new_meta->{cover} = $spotify_info->{albumImageLarge};
+                $new_meta->{icon} = $spotify_info->{albumImageLarge};
+            }
+
+            # Add channel information
+            $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
+        } else {
+            # Timestamp is too old, fall back to channel information
+            my $channel_info = $state->{channel_info};
+            if ($channel_info) {
+                $new_meta->{artist} = $channel_info->{name};
+                $new_meta->{title} = $channel_info->{description} || $channel_info->{name};
+                $new_meta->{cover} = $channel_info->{icon};
+                $new_meta->{album} = 'SiriusXM';
             }
         }
-
-        # Album artwork from Spotify
-        if ($spotify_info && $spotify_info->{albumImageLarge}) {
-            $new_meta->{cover} = $spotify_info->{albumImageLarge};
-            $new_meta->{icon} = $spotify_info->{albumImageLarge};
-        }
-
-        # Add channel information
-        $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
 
     } else {
         # Metadata is off, return to channel meta.
@@ -636,6 +650,46 @@ sub requestString {
     }
     
     return $class->SUPER::requestString($client, $url, $maxRedirects);
+}
+
+# Determine whether to use track metadata based on timestamp
+sub _shouldUseTrackMetadata {
+    my ($track_entry) = @_;
+    
+    return 0 unless $track_entry;
+    
+    # Try different possible timestamp field names in the track entry
+    my $timestamp = $track_entry->{timestamp} || 
+                   $track_entry->{time} || 
+                   $track_entry->{playedAt} ||
+                   $track_entry->{played_at};
+    
+    # Handle edge cases: null or missing timestamp
+    unless (defined $timestamp) {
+        $log->debug("No timestamp found in track metadata, falling back to channel info");
+        return 0;
+    }
+    
+    # Handle invalid timestamp values
+    unless ($timestamp =~ /^\d+$/) {
+        $log->debug("Invalid timestamp format: '$timestamp', falling back to channel info");
+        return 0;
+    }
+    
+    # Calculate time difference in seconds
+    my $current_time = time();
+    my $time_diff = $current_time - $timestamp;
+    
+    # Check if timestamp is within the 3-minute (180 seconds) window
+    my $max_age_seconds = 3 * 60; # 3 minutes
+    
+    if ($time_diff <= $max_age_seconds) {
+        $log->debug("Track metadata is fresh (${time_diff}s old), using track info");
+        return 1;
+    } else {
+        $log->debug("Track metadata is stale (${time_diff}s old), falling back to channel info");
+        return 0;
+    }
 }
 
 1;
