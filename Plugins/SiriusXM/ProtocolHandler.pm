@@ -32,9 +32,8 @@ sub new {
     my $client = $args->{client};
 
     my $song = $args->{'song'};
-    my $streamUrl = $song->streamUrl();
 
-    $log->info( 'PH:new(): ' . $streamUrl );
+    $log->info( 'PH:new(): ' . $song->track()->url() );
 
     return $class->SUPER::new({
         song => $song,
@@ -124,6 +123,22 @@ sub onPlayerEvent {
             _stopMetadataTimer($client);
         }
     }
+
+    # Initialize Player Metatadata
+    my $state = $playerStates{$clientId};
+    if (!$state) {
+        $log->debug("No player state, lets initialize metadata");
+        my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+        # Initialize player state
+        $playerStates{$clientId} = {
+            url => $url,
+            channel_info => $channel_info,
+            last_next => undef,
+            timer => undef,
+        };
+        _fetchXMPlaylistMetadata($client);
+    }
+
 }
 
 # Start metadata update timer for a client
@@ -339,11 +354,10 @@ sub _processXMPlaylistResponse {
         my $channel_info = $state->{channel_info} || '';
 
         if ($channel_info) {
-            $log->debug(Dumper($channel_info));
+#            $log->debug(Dumper($channel_info));
             # Fall back to basic channel info when metadata is enabled
             $new_meta->{artist} = $channel_info->{name};
             $new_meta->{title} = $channel_info->{description} || $channel_info->{name};
-            $new_meta->{icon} = $channel_info->{icon};
             $new_meta->{cover} = $channel_info->{icon};
             $new_meta->{album} = 'SiriusXM';
         }
@@ -383,10 +397,16 @@ sub scanUrl {
 sub getNextTrack {
     my ($class, $song, $successCb, $errorCb) = @_;
     
+    my $client = $song->master();
     my $url = $song->currentTrack()->url;
     
-    $log->debug("getNextTrack called for: $url");
-    
+    my $clientId = $client->id();
+    if ($clientId) {
+        $log->debug("getNextTrack called for: $clientId -> $url");
+        # Clear player state for different channels to ensure fresh state
+        $class->_clearPlayerStatesForDifferentChannel($client, $url);
+    }
+
     # Convert sxm: URL to HTTP proxy URL
     my $httpUrl = $class->sxmToHttpUrl($url);
     
@@ -476,13 +496,12 @@ sub getChannelInfoFromUrl {
     }
     
     # Fallback channel info if not found in cache    ----   May only get here if restarting from playlist.  BUt should not need this.
-#    return {
-#        id => $channel_id,
-#        name => "SiriusXM Channel",
-#        xmplaylist_name => undef,
-#        description => "SiriusXM Channel $channel_id",
-#    };
-    return;
+    return {
+        id => $channel_id,
+        name => "SiriusXM Channel",
+        xmplaylist_name => undef,
+        description => "SiriusXM Channel $channel_id",
+    };
 }
 
 # Normalize channel name for xmplaylist.com API (same logic as API.pm)
@@ -500,11 +519,12 @@ sub _normalizeChannelName {
 
 # Provide metadata for the stream
 sub getMetadataFor {
-    my ($class, $client, $url, $forceCurrent) = @_;
+    my ($class, $client, $url, undef, $song) = @_;
     
-    my $song = $client->streamingSong() || $client->playingSong();
-    my $channel_info;
+    my $song ||= $client->playingSong();
+    return {} unless $song;
 
+    my $channel_info;
     if ($song) {
         $channel_info = $song->pluginData('channel_info');
     }
@@ -521,8 +541,9 @@ sub getMetadataFor {
         $channel_info = $class->getChannelInfoFromUrl($url);
     }
     
-    my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
-    
+#    my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
+    my $meta;    
+
     # Use xmplaylist metadata if available and metadata is enabled, otherwise fall back to basic info
     if ($prefs->get('enable_metadata') && $xmplaylist_meta && keys %$xmplaylist_meta) {
         # Use enhanced metadata from xmplaylist.com
@@ -538,15 +559,69 @@ sub getMetadataFor {
     } elsif ($channel_info) {
         # Fall back to basic channel info when metadata is enabled
         $meta->{artist} = $channel_info->{name};
-        $meta->{title} = $channel_info->{description} || $channel_info->{name};
+        $meta->{title} = $channel_info->{description} || '';
         $meta->{icon} = $channel_info->{icon};
         $meta->{cover} = $channel_info->{icon};
         $meta->{album} = 'SiriusXM';
     }
 
-    $meta->{channel_info} = $channel_info if $channel_info;
-
+#    $meta->{channel_info} = $channel_info if $channel_info;
+#    $log->debug(Dumper($meta));
     return $meta;
+}
+
+# Clear player states for channels different from the specified URL
+sub _clearPlayerStatesForDifferentChannel {
+    my ($class, $client, $newUrl) = @_;
+    my $clientId = $client->id();
+
+    return unless $client, $newUrl, $clientId;
+
+    # Extract channel ID from the new URL
+    my $newChannelId = $class->_extractChannelIdFromUrl($newUrl);
+    return unless $newChannelId;
+
+    $log->debug("Checking player state for $clientId different channels than: $newChannelId");
+
+    # Check existing player state.
+    my $state = $playerStates{$clientId};
+    return unless $state && $state->{url};
+    # Extract channel ID from existing state URL
+    my $existingChannelId = $class->_extractChannelIdFromUrl($state->{url});
+    return unless $existingChannelId;
+
+    # If the channel ID is different, clear this player state
+    if ($existingChannelId ne $newChannelId) {
+        $log->debug("Clearing player state for client $clientId (old channel: $existingChannelId, new channel: $newChannelId)");
+
+        # Find the client object to cancel timers properly
+        my $client = Slim::Player::Client::getClient($clientId);
+        if ($client && $state->{timer}) {
+           Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+        }
+
+        # Remove the player state
+        delete $playerStates{$clientId};
+    }
+}
+
+# Extract channel ID from URL (supports both sxm: and HTTP URLs)
+sub _extractChannelIdFromUrl {
+    my ($class, $url) = @_;
+
+    return unless $url;
+
+    # Handle sxm: URLs
+    if ($url =~ /^sxm:(.+)$/) {
+        return $1;
+    }
+
+    # Handle converted HTTP URLs
+    if ($url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+        return $1;
+    }
+
+    return;
 }
 
 # Handle HTTPS support
