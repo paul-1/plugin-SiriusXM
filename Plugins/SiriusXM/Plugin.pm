@@ -149,6 +149,12 @@ sub toplevelMenu {
             icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
         },
         {
+            name => string('PLUGIN_SIRIUSXM_MENU_FAVORITES'),
+            type => 'opml',
+            url  => \&favoritesMenu,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        },
+        {
             name => string('PLUGIN_SIRIUSXM_MENU_BROWSE_BY_GENRE'),
             type => 'opml',
             url  => \&browseByGenre,
@@ -221,6 +227,31 @@ sub browseByGenre {
         
         $cb->({
             items => $menu_items
+        });
+    });
+}
+
+sub favoritesMenu {
+    my ($client, $cb, $args) = @_;
+    
+    $log->debug("Favorites menu");
+    
+    # Get favorite channels from API
+    Plugins::SiriusXM::API->getFavoriteChannels($client, sub {
+        my $favorite_items = shift;
+        
+        if (!$favorite_items || !@$favorite_items) {
+            $cb->({
+                items => [{
+                    name => "No favorite channels found. Mark channels as favorites in your SiriusXM account to see them here.",
+                    type => 'text',
+                }]
+            });
+            return;
+        }
+        
+        $cb->({
+            items => $favorite_items
         });
     });
 }

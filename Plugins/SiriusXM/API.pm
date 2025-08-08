@@ -300,6 +300,7 @@ sub processChannelData {
             description => $channel->{shortDescription} || '',
             logo => $logo_url,
             icon => $logo_url,
+            isFavorite => $channel->{isFavorite} || 0,
         };
         
         # Add to category group
@@ -353,6 +354,114 @@ sub searchChannels {
         $log->debug("Found " . scalar(@search_results) . " search results");
         $cb->(\@search_results);
     });
+}
+
+sub getFavoriteChannels {
+    my ($class, $client, $cb) = @_;
+    
+    $log->debug("Getting favorite channels");
+    
+    # Check cache first for raw channel data
+    my $cached_channels = $cache->get('siriusxm_channel_info');
+    if ($cached_channels) {
+        $log->debug("Using cached channel data for favorites filtering");
+        my $favorites = $class->buildFavoritesMenu($cached_channels);
+        $cb->($favorites);
+        return;
+    }
+    
+    # If no cached data, fetch fresh channel data
+    my $port = $prefs->get('port') || '9999';
+    my $url = "http://localhost:$port/channel/all";
+    
+    $log->debug("Fetching channel data for favorites from proxy: $url");
+    
+    # Use async HTTP request to avoid blocking
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            my $content = $response->content;
+            
+            $log->debug("Received channel data from proxy for favorites");
+            
+            my $channels_data;
+            eval {
+                $channels_data = decode_json($content);
+            };
+            
+            if ($@) {
+                $log->error("Failed to parse channel data from proxy: $@");
+                $cb->([]);
+                return;
+            }
+            
+            # Process channels data to extract favorites
+            my $categories = $class->processChannelData($channels_data);
+            
+            # Build favorites menu from the processed data
+            my $favorites = $class->buildFavoritesMenu($categories);
+            
+            $log->info("Processed favorite channels");
+            $cb->($favorites);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->error("Failed to fetch channels from proxy for favorites: $error");
+            $cb->([]);
+        },
+        {
+            timeout => 30,
+        }
+    );
+    
+    $http->get($url);
+}
+
+sub buildFavoritesMenu {
+    my ($class, $categories) = @_;
+    
+    my @favorite_items = ();
+    
+    # Process each category to find favorite channels
+    for my $category_name (sort keys %$categories) {
+        my $channels_in_category = $categories->{$category_name};
+        
+        for my $channel (@$channels_in_category) {
+            # Skip channels that are not favorites
+            next unless $channel->{isFavorite};
+            
+            # Build sxm protocol URL
+            my $stream_url = "sxm:" . $channel->{id};
+            
+            # Format channel name consistently with other menus
+            my $display_name = $channel->{name};
+            if ($channel->{number}) {
+                $display_name .= " (" . $channel->{number} . ")";
+            }
+            
+            push @favorite_items, {
+                name => $display_name,
+                type => 'audio',
+                url  => $stream_url,
+                icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+                on_select => 'play',
+                description => $channel->{description},
+                channel_number => $channel->{number},
+                category => $category_name,  # Add category info for context
+            };
+        }
+    }
+    
+    # Sort favorites by channel number for consistent ordering
+    @favorite_items = sort {
+        my $a_num = $a->{channel_number} || 9999;
+        my $b_num = $b->{channel_number} || 9999;
+        $a_num <=> $b_num;
+    } @favorite_items;
+    
+    $log->debug("Built favorites menu with " . scalar(@favorite_items) . " favorite channels");
+    
+    return \@favorite_items;
 }
 
 1;
