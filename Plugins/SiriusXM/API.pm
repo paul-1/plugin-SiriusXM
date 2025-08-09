@@ -39,18 +39,8 @@ sub invalidateChannelCache {
     $cache->remove('siriusxm_channel_info');
 }
 
-sub getChannels {
-    my ($class, $client, $cb) = @_;
-    
-    $log->debug("Getting SiriusXM channels from proxy");
-    
-    # Check cache first
-    my $cached = $cache->get('siriusxm_channels');
-    if ($cached) {
-        $log->debug("Returning cached channels");
-        $cb->($cached);
-        return;
-    }
+sub _fetchRawChannels {
+    my ($class, $cb) = @_;
     
     my $port = $prefs->get('port') || '9999';
     my $url = "http://localhost:$port/channel/all";
@@ -72,31 +62,16 @@ sub getChannels {
             
             if ($@) {
                 $log->error("Failed to parse channel data from proxy: $@");
-                $cb->([]);
+                $cb->(undef);
                 return;
             }
             
-            # Process and organize channels by category
-            my $categories = $class->processChannelData($channels_data);
-            
-            # Build hierarchical menu structure
-            my $menu_items = $class->buildCategoryMenu($categories);
-            
-            # Cache both the menu structure and the processed channel data separately
-            $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
-            $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
-            
-            $log->info("Retrieved and processed channels into menu structure");
-            $cb->($menu_items);
+            $cb->($channels_data);
         },
         sub {
             my ($http, $error) = @_;
             $log->error("Failed to fetch channels from proxy: $error");
-            
-            # Invalidate cache since proxy communication failed
-            $cache->remove('siriusxm_channels');
-            
-            $cb->([]);
+            $cb->(undef);
         },
         {
             timeout => 30,
@@ -106,88 +81,101 @@ sub getChannels {
     $http->get($url);
 }
 
+sub getChannels {
+    my ($class, $client, $cb) = @_;
+    
+    $log->debug("Getting SiriusXM channels from proxy");
+    
+    # Check cache first
+    my $cached = $cache->get('siriusxm_channels');
+    if ($cached) {
+        $log->debug("Returning cached channels");
+        $cb->($cached);
+        return;
+    }
+    
+    # Fetch raw channel data
+    $class->_fetchRawChannels(sub {
+        my $channels_data = shift;
+        
+        unless ($channels_data) {
+            # Invalidate cache since proxy communication failed
+            $cache->remove('siriusxm_channels');
+            $cb->([]);
+            return;
+        }
+        
+        # Process and organize channels by category
+        my $categories = $class->processChannelData($channels_data);
+        
+        # Build hierarchical menu structure
+        my $menu_items = $class->buildCategoryMenu($categories);
+        
+        # Cache both the menu structure and the processed channel data separately
+        $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+        $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
+        
+        $log->info("Retrieved and processed channels into menu structure");
+        $cb->($menu_items);
+    });
+}
+
 sub getFavoriteChannels {
     my ($class, $client, $cb) = @_;
     
     $log->debug("Getting SiriusXM favorite channels");
     
-    my $port = $prefs->get('port') || '9999';
-    my $url = "http://localhost:$port/channel/all";
-    
-    $log->debug("Fetching channels from proxy for favorites: $url");
-    
-    # Use async HTTP request to avoid blocking
-    my $http = Slim::Networking::SimpleAsyncHTTP->new(
-        sub {
-            my $response = shift;
-            my $content = $response->content;
-            
-            $log->debug("Received channel data from proxy for favorites");
-            
-            my $channels_data;
-            eval {
-                $channels_data = decode_json($content);
-            };
-            
-            if ($@) {
-                $log->error("Failed to parse channel data from proxy: $@");
-                $cb->([]);
-                return;
-            }
-            
-            # Filter for favorite channels only
-            my @favorite_channels = ();
-            for my $channel (@$channels_data) {
-                next unless $channel->{channelId} && $channel->{name};
-                next unless $channel->{isFavorite};
-                
-                # Find the best matching logo (closest to 520x520)
-                my $logo_url = '';
-                if ($channel->{images}) {
-                    $logo_url = $class->findBestImage($channel->{images}, 520, 520);
-                }
-                
-                # Build sxm protocol URL
-                my $stream_url = "sxm:" . $channel->{channelId};
-                
-                # Format channel name: "Channel Name (siriusChannelNumber)"
-                my $display_name = $channel->{name};
-                if ($channel->{siriusChannelNumber}) {
-                    $display_name .= " (" . $channel->{siriusChannelNumber} . ")";
-                }
-                
-                push @favorite_channels, {
-                    name => $display_name,
-                    type => 'audio',
-                    url  => $stream_url,
-                    icon => $logo_url || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
-                    on_select => 'play',
-                    description => $channel->{shortDescription} || '',
-                    channel_number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
-                };
-            }
-            
-            # Sort favorite channels by channel number
-            my @sorted_favorites = sort {
-                my $a_num = $a->{channel_number} || 9999;
-                my $b_num = $b->{channel_number} || 9999;
-                $a_num <=> $b_num;
-            } @favorite_channels;
-            
-            $log->info("Retrieved " . scalar(@sorted_favorites) . " favorite channels");
-            $cb->(\@sorted_favorites);
-        },
-        sub {
-            my ($http, $error) = @_;
-            $log->error("Failed to fetch favorite channels from proxy: $error");
+    # Fetch raw channel data using shared function
+    $class->_fetchRawChannels(sub {
+        my $channels_data = shift;
+        
+        unless ($channels_data) {
             $cb->([]);
-        },
-        {
-            timeout => 30,
+            return;
         }
-    );
-    
-    $http->get($url);
+        
+        # Filter for favorite channels only
+        my @favorite_channels = ();
+        for my $channel (@$channels_data) {
+            next unless $channel->{channelId} && $channel->{name};
+            next unless $channel->{isFavorite};
+            
+            # Find the best matching logo (closest to 520x520)
+            my $logo_url = '';
+            if ($channel->{images}) {
+                $logo_url = $class->findBestImage($channel->{images}, 520, 520);
+            }
+            
+            # Build sxm protocol URL
+            my $stream_url = "sxm:" . $channel->{channelId};
+            
+            # Format channel name: "Channel Name (siriusChannelNumber)"
+            my $display_name = $channel->{name};
+            if ($channel->{siriusChannelNumber}) {
+                $display_name .= " (" . $channel->{siriusChannelNumber} . ")";
+            }
+            
+            push @favorite_channels, {
+                name => $display_name,
+                type => 'audio',
+                url  => $stream_url,
+                icon => $logo_url || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+                on_select => 'play',
+                description => $channel->{shortDescription} || '',
+                channel_number => $channel->{siriusChannelNumber} || $channel->{channelNumber} || '',
+            };
+        }
+        
+        # Sort favorite channels by channel number
+        my @sorted_favorites = sort {
+            my $a_num = $a->{channel_number} || 9999;
+            my $b_num = $b->{channel_number} || 9999;
+            $a_num <=> $b_num;
+        } @favorite_channels;
+        
+        $log->info("Retrieved " . scalar(@sorted_favorites) . " favorite channels");
+        $cb->(\@sorted_favorites);
+    });
 }
 
 sub getStreamUrl {
