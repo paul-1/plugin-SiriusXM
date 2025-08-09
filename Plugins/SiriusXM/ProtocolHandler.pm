@@ -13,7 +13,7 @@ use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
 use Data::Dumper;
-use Time::Piece;
+use Date::Parse;
 
 use Plugins::SiriusXM::API;
 
@@ -370,23 +370,11 @@ sub _processXMPlaylistResponse {
     if ($prefs->get('enable_metadata') && $timestamp) {
         # Parse timestamp and check if it's within 3 minutes
         eval {
-            my $track_time;
+            # Use Date::Parse to handle UTC timestamp format: 2025-08-09T15:57:41.586Z
+            my $track_time = str2time($timestamp);
+            die "Failed to parse timestamp" unless defined $track_time;
             
-            # Try different timestamp formats that xmplaylists.com might use
-            if ($timestamp =~ /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?$/) {
-                # ISO 8601 format (with or without Z)
-                my $clean_timestamp = $timestamp;
-                $clean_timestamp =~ s/Z$//; # Remove Z if present
-                $track_time = Time::Piece->strptime($clean_timestamp, "%Y-%m-%dT%H:%M:%S");
-            } elsif ($timestamp =~ /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})[+-]\d{2}:?\d{2}$/) {
-                # ISO 8601 with timezone offset - extract base timestamp
-                my $base_timestamp = $1;
-                $track_time = Time::Piece->strptime($base_timestamp, "%Y-%m-%dT%H:%M:%S");
-            } else {
-                die "Unrecognized timestamp format: $timestamp";
-            }
-            
-            my $current_time = Time::Piece->new();
+            my $current_time = time();
             my $age_seconds = $current_time - $track_time;
             
             $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
