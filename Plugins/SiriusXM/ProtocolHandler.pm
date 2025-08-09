@@ -48,6 +48,20 @@ sub isRemote { 1 }
 sub canDirectStream { 0 }
 sub isRepeatingStream { 0 }
 
+sub canDoAction {
+    my ( $class, $client, $url, $action ) = @_;
+
+    # "stop" seems to be called when a user pressed FWD...
+    $log->debug("Action: $action");
+	 if ( $action eq 'stop' ) {
+        return 0;
+    }
+    elsif ( $action eq 'rew' ) {
+        return 0;
+    }
+
+    return 1;
+}
 
 # Initialize player event callbacks for metadata tracking
 sub initPlayerEvents {
