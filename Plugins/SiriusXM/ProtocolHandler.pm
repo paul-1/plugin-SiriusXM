@@ -341,17 +341,7 @@ sub _processXMPlaylistResponse {
         return;
     }
     
-    # Check if metadata has changed using "next" field
-    my $next = $data->{next};
-    if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
-        $log->debug("No new metadata available (next field unchanged)");
-        return;
-    }
-    
-    # Update the last_next value
-    $state->{last_next} = $next;
-    
-    # Extract track information from latest result
+    # Extract track information from latest result first to check timestamp
     my $results = $data->{results};
     return unless $results && @$results;
 
@@ -365,6 +355,7 @@ sub _processXMPlaylistResponse {
     # Determine whether to use xmplaylists metadata or fallback to channel info
     # based on timestamp (if metadata is 0-3 minutes old, use it; otherwise use channel info)
     my $use_xmplaylists_metadata = 0;
+    my $metadata_is_fresh = 0;
     
     # Only consider xmplaylists metadata if metadata is enabled
     if ($prefs->get('enable_metadata') && $timestamp) {
@@ -382,6 +373,7 @@ sub _processXMPlaylistResponse {
             # Use xmplaylists metadata if timestamp is 3 minutes (180 seconds) or newer
             if ($age_seconds <= 180) {
                 $use_xmplaylists_metadata = 1;
+                $metadata_is_fresh = 1;
                 $log->debug("Using xmplaylists metadata (timestamp is recent: ${age_seconds}s old)");
             } else {
                 $log->debug("Using fallback channel info (timestamp is old: ${age_seconds}s old)");
@@ -392,8 +384,24 @@ sub _processXMPlaylistResponse {
             $log->warn("Failed to parse timestamp '$timestamp': $@");
             # Default to using xmplaylists metadata if we can't parse timestamp
             $use_xmplaylists_metadata = 1;
+            $metadata_is_fresh = 1;
         }
     }
+    
+    # Check if metadata has changed using "next" field
+    my $next = $data->{next};
+    if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
+        # Only skip update if metadata is fresh - if stale, we need to update display
+        if ($metadata_is_fresh) {
+            $log->debug("No new metadata available and current metadata is fresh - skipping update");
+            return;
+        } else {
+            $log->debug("Metadata unchanged but stale - updating display to show channel info");
+        }
+    }
+    
+    # Update the last_next value
+    $state->{last_next} = $next;
     
     # Build new metadata
     my $new_meta = {};
