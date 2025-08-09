@@ -13,6 +13,7 @@ use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
 use Data::Dumper;
+use Date::Parse;
 
 use Plugins::SiriusXM::API;
 
@@ -254,6 +255,46 @@ sub _onMetadataTimer {
     }
 }
 
+# xmplaylists.com API JSON Schema:
+# {
+#   "count": 0,
+#   "next": "string",
+#   "previous": "string",
+#   "results": [
+#     {
+#       "id": "string",
+#       "timestamp": "string",
+#       "track": {
+#         "id": "string",
+#         "title": "string",
+#         "artists": [
+#           "string"
+#         ]
+#       },
+#       "spotify": {
+#         "id": "string",
+#         "albumImageLarge": "string",
+#         "albumImageMedium": "string",
+#         "albumImageSmall": "string",
+#         "previewUrl": "string"
+#       }
+#     }
+#   ],
+#   "channel": {
+#     "id": "string",
+#     "name": "string",
+#     "number": "string",
+#     "deeplink": "string",
+#     "genres": [
+#       "string"
+#     ],
+#     "shortDescription": "string",
+#     "longDescription": "string",
+#     "spotifyPlaylist": "string",
+#     "applePlaylist": "string"
+#   }
+# }
+
 # Fetch metadata from xmplaylist.com API
 sub _fetchXMPlaylistMetadata {
     my $client = shift;
@@ -314,11 +355,63 @@ sub _processXMPlaylistResponse {
         return;
     }
     
+    # Extract track information from latest result first to check timestamp
+    my $results = $data->{results};
+    return unless $results && @$results;
+
+    my $latest_track = $results->[0];
+    my $track_info = $latest_track->{track};
+    my $spotify_info = $latest_track->{spotify};
+    my $timestamp = $latest_track->{timestamp};
+
+    return unless $track_info;
+
+    # Determine whether to use xmplaylists metadata or fallback to channel info
+    # based on timestamp (if metadata is 0-3 minutes old, use it; otherwise use channel info)
+    my $use_xmplaylists_metadata = 0;
+    my $metadata_is_fresh = 0;
+    
+    # Only consider xmplaylists metadata if metadata is enabled
+    if ($prefs->get('enable_metadata') && $timestamp) {
+        # Parse timestamp and check if it's within 3 minutes
+        eval {
+            # Use Date::Parse to handle UTC timestamp format: 2025-08-09T15:57:41.586Z
+            my $track_time = str2time($timestamp);
+            die "Failed to parse timestamp" unless defined $track_time;
+            
+            my $current_time = time();
+            my $age_seconds = $current_time - $track_time;
+            
+            $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
+            
+            # Use xmplaylists metadata if timestamp is 3 minutes (180 seconds) or newer
+            if ($age_seconds <= 180) {
+                $use_xmplaylists_metadata = 1;
+                $metadata_is_fresh = 1;
+                $log->debug("Using xmplaylists metadata (timestamp is recent: ${age_seconds}s old)");
+            } else {
+                $log->debug("Using fallback channel info (timestamp is old: ${age_seconds}s old)");
+            }
+        };
+        
+        if ($@) {
+            $log->warn("Failed to parse timestamp '$timestamp': $@");
+            # Default to using xmplaylists metadata if we can't parse timestamp
+            $use_xmplaylists_metadata = 1;
+            $metadata_is_fresh = 1;
+        }
+    }
+    
     # Check if metadata has changed using "next" field
     my $next = $data->{next};
     if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
-        $log->debug("No new metadata available (next field unchanged)");
-        return;
+        # Only skip update if metadata is fresh - if stale, we need to update display
+        if ($metadata_is_fresh) {
+            $log->debug("No new metadata available and current metadata is fresh - skipping update");
+            return;
+        } else {
+            $log->debug("Metadata unchanged but stale - updating display to show channel info");
+        }
     }
     
     # Update the last_next value
@@ -327,18 +420,9 @@ sub _processXMPlaylistResponse {
     # Build new metadata
     my $new_meta = {};
     
-    if ($prefs->get('enable_metadata')) {
-
-        # Extract track information from latest result
-        my $results = $data->{results};
-        return unless $results && @$results;
-
-        my $latest_track = $results->[0];
-        my $track_info = $latest_track->{track};
-        my $spotify_info = $latest_track->{spotify};
-
-        return unless $track_info;
-
+    if ($use_xmplaylists_metadata) {
+        # Use enhanced metadata from xmplaylist.com
+        
         # Track title
         if ($track_info->{title}) {
             $new_meta->{title} = $track_info->{title};
@@ -362,17 +446,15 @@ sub _processXMPlaylistResponse {
         $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
 
     } else {
-        # Metadata is off, return to channel meta.
-        my $state = $playerStates{$clientId};
-
+        # Fall back to basic channel info when metadata is too old or disabled
         my $channel_info = $state->{channel_info} || '';
 
         if ($channel_info) {
-#            $log->debug(Dumper($channel_info));
-            # Fall back to basic channel info when metadata is enabled
+            # Fall back to basic channel info
             $new_meta->{artist} = $channel_info->{name};
             $new_meta->{title} = $channel_info->{description} || $channel_info->{name};
             $new_meta->{cover} = $channel_info->{icon};
+            $new_meta->{icon} = $channel_info->{icon};
             $new_meta->{album} = 'SiriusXM';
         }
     }
