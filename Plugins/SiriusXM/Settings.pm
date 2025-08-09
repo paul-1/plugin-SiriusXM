@@ -38,6 +38,7 @@ sub handler {
         my $old_password = $prefs->get('password');
         my $old_port = $prefs->get('port');
         my $old_region = $prefs->get('region');
+        my $old_quality = $prefs->get('quality');
         
         # Save the settings first
         my $result = $class->SUPER::handler($client, $params, $callback, @args);
@@ -47,7 +48,8 @@ sub handler {
             ($params->{pref_username} && $params->{pref_username} ne $old_username) ||
             ($params->{pref_password} && $params->{pref_password} ne $old_password) ||
             ($params->{pref_port} && $params->{pref_port} ne $old_port) ||
-            ($params->{pref_region} && $params->{pref_region} ne $old_region)
+            ($params->{pref_region} && $params->{pref_region} ne $old_region) ||
+            ($params->{pref_quality} && $params->{pref_quality} ne $old_quality)
         );
         
         if ($need_restart) {
@@ -57,7 +59,7 @@ sub handler {
             Plugins::SiriusXM::Plugin->stopProxy();
             
             # Give it a moment to shut down
-            sleep(1);
+            sleep(2);
             
             if (Plugins::SiriusXM::Plugin->startProxy()) {
                 $params->{info} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
@@ -100,9 +102,9 @@ sub beforeRender {
     
     # Prepare template variables
     $params->{quality_options} = [
-        { value => 'low',    text => string('PLUGIN_SIRIUSXM_QUALITY_LOW') },
-        { value => 'medium', text => string('PLUGIN_SIRIUSXM_QUALITY_MEDIUM') },
         { value => 'high',   text => string('PLUGIN_SIRIUSXM_QUALITY_HIGH') },
+        { value => 'medium', text => string('PLUGIN_SIRIUSXM_QUALITY_MEDIUM') },
+        { value => 'low',    text => string('PLUGIN_SIRIUSXM_QUALITY_LOW') },
     ];
     
     $params->{region_options} = [

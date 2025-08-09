@@ -107,4 +107,4 @@ PLUGIN_SIRIUSXM_ENABLE_METADATA
 	EN	Enable Metadata Updates
 
 PLUGIN_SIRIUSXM_ENABLE_METADATA_DESC
-	EN	Enable retrieval of song metadata from 3rd party xmplaylists.com. This will lag behind music stream, and is an unofficial metadata source.
+	EN	Enable retrieval of song metadata from 3rd party xmplaylists.com. This will lag behind music stream, and is an unofficial metadata source. You may need to restart stream after enabling.
