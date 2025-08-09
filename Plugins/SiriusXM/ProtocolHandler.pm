@@ -33,12 +33,13 @@ sub new {
     my $client = $args->{client};
 
     my $song = $args->{'song'};
+    my $streamUrl = $song->streamUrl() || return;
 
-    $log->info( 'PH:new(): ' . $song->track()->url() );
+    main::DEBUGLOG && $log->debug( 'PH:new(): ' . $song->track()->url() );
 
     return $class->SUPER::new({
         song => $song,
-        url  => $song->track()->url(),
+        url  => $streamUrl,
         client => $client,
     });
 }
