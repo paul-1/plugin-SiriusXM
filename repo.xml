@@ -4,12 +4,12 @@
         <title lang="EN">SiriusXM Plugin Repository</title>
     </details>
     <plugins>
-        <plugin name="SiriusXM" version="0.0.0" minTarget="8.3" maxTarget="*">
+        <plugin name="SiriusXM" version="0.0.4" minTarget="8.3" maxTarget="*">
             <title lang="EN">SiriusXM</title>
             <desc lang="EN">Stream SiriusXM satellite radio through Logitech Media Server</desc>
             <catagory>musicservices</catagory>
-            <url>https://github.com/paul-1/plugin-SiriusXM/archive/main.zip</url>
-            <sha><!-- SHA will be updated during release --></sha>
+            <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v0.0.4/SiriusXM-0.0.4.zip</url>
+            <sha>008c02516d9f242ae60cba96e457ae6daf19aeb1</sha>
             <link>https://github.com/paul-1/plugin-SiriusXM</link>
             <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/HTML/EN/plugins/Qobuz/html/images/SiriusXMLogo.png</icon>
             <creator>paul-1</creator>
