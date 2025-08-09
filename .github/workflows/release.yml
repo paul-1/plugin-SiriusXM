@@ -8,25 +8,17 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup Perl
-      uses: shogo82148/actions-setup-perl@v1
+    - name: Checkout Repository
+      uses: actions/checkout@v4
       with:
-        perl-version: '5.36'
+         ref: main
 
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y libxml2-utils zip
-
-    - name: Run essential validation
-      run: |
-        # Validate XML files only - other tests are covered in test.yml
-        xmllint --noout Plugins/SiriusXM/install.xml
-        xmllint --noout repo.xml
 
     - name: Extract version from tag
       id: version
@@ -44,10 +36,10 @@ jobs:
 
     - name: Update version in repo.xml
       run: |
-        sed -i "s/version=\"[^\"]*\"/version=\"${{ steps.version.outputs.version }}\"/" repo.xml
+        sed -i "/plugin name/s/version=\"[^\"]*\"/version=\"${{ steps.version.outputs.version }}\"/" repo.xml
 
-        # Verify the change
-        grep -o 'version="[^"]*"' repo.xml
+        # Verify the change (Skip the <?xml line)
+        tail -n+2  repo.xml | grep -o 'version="[^"]*"'
 
     - name: Create plugin package
       run: |
@@ -78,8 +70,22 @@ jobs:
         # Verify changes
         cat repo.xml
 
+    - name: Run essential validation
+      run: |
+        # Validate XML files only - other tests are covered in test.yml
+        xmllint --noout Plugins/SiriusXM/install.xml
+        xmllint --noout repo.xml
+
+    - name: Commit updated files
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add Plugins/SiriusXM/install.xml repo.xml
+        git commit -m "Update version to ${{ steps.version.outputs.version }} for release" || exit 0
+        git push || exit 0
+
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           SiriusXM-${{ steps.version.outputs.version }}.zip
@@ -98,7 +104,7 @@ jobs:
           5. Restart Logitech Media Server
 
           ### Requirements
-          - Logitech Media Server 7.9 or higher
+          - Logitech Media Server 8.3 or higher
           - SiriusXM subscription
           - SiriusXM-Perl helper application
 
@@ -111,10 +117,3 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Commit updated files
-      run: |
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git add Plugins/SiriusXM/install.xml repo.xml
-        git commit -m "Update version to ${{ steps.version.outputs.version }} for release" || exit 0
-        git push || exit 0
