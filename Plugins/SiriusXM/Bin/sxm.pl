@@ -1140,18 +1140,35 @@ use constant HLS_AES_KEY => decode_base64('0Nsco7MAgxowGvkUT8aYag==');
 
 sub start_http_daemon {
     my ($sxm, $port) = @_;
-    
-    my $daemon = HTTP::Daemon->new(
-        LocalPort => $port,
-        LocalAddr => '0.0.0.0',
-        ReuseAddr => 1,
-    );
-    
+
+    my $max_retries = 3;  # Configure maximum number of retry attempts
+    my $retry_delay = 2;  # Delay in seconds between retries
+    my $daemon;
+    my $attempts = 0;
+
+    while (!$daemon && $attempts < $max_retries) {
+        $attempts++;
+
+        $daemon = HTTP::Daemon->new(
+            LocalPort => $port,
+            LocalAddr => '0.0.0.0',
+            ReuseAddr => 1,
+        );
+
+        if (!$daemon) {
+            main::log_error("Attempt $attempts/$max_retries: Could not create HTTP server on port $port: $!");
+
+            if ($attempts < $max_retries) {
+                sleep($retry_delay);
+            }
+        }
+    }
+
     if (!$daemon) {
-        main::log_error("Could not create HTTP server on port $port: $!");
+        main::log_error("Failed to create HTTP server after $max_retries attempts");
         return undef;
     }
-    
+
     main::log_info("HTTP server started on port $port");
     main::log_info("Access channels at: http://127.0.0.1:$port/channel.m3u8");
     
