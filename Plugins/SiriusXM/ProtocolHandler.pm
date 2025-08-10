@@ -54,7 +54,6 @@ sub canDoAction {
     my ( $class, $client, $url, $action ) = @_;
 
     # "stop" seems to be called when a user pressed FWD...
-    $log->debug("Action: $action");
 	 if ( $action eq 'stop' ) {
         return 0;
     }
@@ -143,7 +142,7 @@ sub onPlayerEvent {
     # Initialize Player Metatadata
     my $state = $playerStates{$clientId};
     if (!$state) {
-        $log->debug("No player state, lets initialize metadata");
+        $log->debug("No current player state, configuring");
         my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
         # Initialize player state
         $playerStates{$clientId} = {
@@ -154,7 +153,6 @@ sub onPlayerEvent {
         };
         _fetchXMPlaylistMetadata($client);
     }
-
 }
 
 # Start metadata update timer for a client
@@ -297,6 +295,7 @@ sub _onMetadataTimer {
 # }
 
 # Fetch metadata from xmplaylist.com API
+
 sub _fetchXMPlaylistMetadata {
     my $client = shift;
     
@@ -368,7 +367,7 @@ sub _processXMPlaylistResponse {
     return unless $track_info;
 
     # Determine whether to use xmplaylists metadata or fallback to channel info
-    # based on timestamp (if metadata is 0-3 minutes old, use it; otherwise use channel info)
+    # based on timestamp (if metadata is 0-200 seconds old, use it; otherwise use channel info)
     my $use_xmplaylists_metadata = 0;
     my $metadata_is_fresh = 0;
     
@@ -385,13 +384,11 @@ sub _processXMPlaylistResponse {
             
             $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
             
-            # Use xmplaylists metadata if timestamp is 3 minutes (180 seconds) or newer
-            if ($age_seconds <= 180) {
+            # Use xmplaylists metadata if timestamp is (200 seconds) or newer
+            if ($age_seconds <= 200) {
                 $use_xmplaylists_metadata = 1;
                 $metadata_is_fresh = 1;
-                $log->debug("Using xmplaylists metadata (timestamp is recent: ${age_seconds}s old)");
             } else {
-                $log->debug("Using fallback channel info (timestamp is old: ${age_seconds}s old)");
             }
         };
         
@@ -445,6 +442,7 @@ sub _processXMPlaylistResponse {
 
         # Add channel information
         $new_meta->{album} = $state->{channel_info}->{name} || 'SiriusXM';
+        $new_meta->{bitrate} = '';
 
     } else {
         # Fall back to basic channel info when metadata is too old or disabled
@@ -457,6 +455,7 @@ sub _processXMPlaylistResponse {
             $new_meta->{cover} = $channel_info->{icon};
             $new_meta->{icon} = $channel_info->{icon};
             $new_meta->{album} = 'SiriusXM';
+            $new_meta->{bitrate} = '';
         }
     }
 
@@ -637,7 +636,7 @@ sub getMetadataFor {
     if (!$channel_info) {
         $channel_info = $class->getChannelInfoFromUrl($url);
     }
-    
+
 #    my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
     my $meta;    
 
@@ -649,6 +648,7 @@ sub getMetadataFor {
         $meta->{cover} = $xmplaylist_meta->{cover} if $xmplaylist_meta->{cover};
         $meta->{icon} = $xmplaylist_meta->{icon} if $xmplaylist_meta->{icon};
         $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
+        $meta->{bitrate} = '';
         
 #       Really noisy log message when using a LMS web.
 #        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
@@ -660,6 +660,7 @@ sub getMetadataFor {
         $meta->{icon} = $channel_info->{icon};
         $meta->{cover} = $channel_info->{icon};
         $meta->{album} = 'SiriusXM';
+        $meta->{bitrate} = '';
     }
 
 #    $meta->{channel_info} = $channel_info if $channel_info;

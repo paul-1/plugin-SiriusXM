@@ -32,7 +32,7 @@ sub handler {
     
     # Handle Check Status button
     if ($params->{checkStatus}) {
-        $log->info("Check Status button pressed");
+        $log->debug("Check Status button pressed");
         
         if (Plugins::SiriusXM::Plugin->isProxyRunning()) {
             my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
@@ -51,7 +51,7 @@ sub handler {
     
     # Handle Restart Proxy button
     if ($params->{restartProxy}) {
-        $log->info("Restart Proxy button pressed");
+        $log->debug("Restart Proxy button pressed");
         
         # Stop current proxy if running
         Plugins::SiriusXM::Plugin->stopProxy();
