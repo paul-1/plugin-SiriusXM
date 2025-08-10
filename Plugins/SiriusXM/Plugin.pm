@@ -471,4 +471,16 @@ sub isProxyRunning {
     return $proxyProcess && $proxyProcess->alive();
 }
 
+sub getProxyPid {
+    my $class = shift;
+    
+    return unless $proxyProcess;
+    
+    eval {
+        return $proxyProcess->pid();
+    };
+    
+    return undef;
+}
+
 1;
