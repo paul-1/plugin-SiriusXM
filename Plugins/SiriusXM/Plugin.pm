@@ -45,8 +45,7 @@ sub initPlugin {
         proxy_log_level => 'OFF'
     });
     
-
-    
+ 
     # Start the proxy process
     $class->startProxy();
     
@@ -475,10 +474,13 @@ sub getProxyPid {
     my $class = shift;
     
     return unless $proxyProcess;
-    
-    eval {
-        return $proxyProcess->pid();
-    };
+
+    my $pid = $proxyProcess->pid();
+    $log->debug($pid);
+
+    if($pid) {
+        return $pid;
+    }
     
     return undef;
 }
