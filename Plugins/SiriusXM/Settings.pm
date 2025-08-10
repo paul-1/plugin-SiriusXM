@@ -30,6 +30,54 @@ sub handler {
     
     $log->debug("Handling settings request");
     
+    # Handle Check Status button
+    if ($params->{checkStatus}) {
+        $log->info("Check Status button pressed");
+        
+        if (Plugins::SiriusXM::Plugin->isProxyRunning()) {
+            my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+            $log->info("(PID: $pid)");
+            if ($pid) {
+                $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_STATUS_CHECKED') . " (PID: $pid)";
+            } else {
+                $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_STATUS_CHECKED');
+            }
+        } else {
+            $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_NOT_RUNNING');
+        }
+        
+        return $class->SUPER::handler($client, $params, $callback, @args);
+    }
+    
+    # Handle Restart Proxy button
+    if ($params->{restartProxy}) {
+        $log->info("Restart Proxy button pressed");
+        
+        # Stop current proxy if running
+        Plugins::SiriusXM::Plugin->stopProxy();
+        
+        # Give it a moment to shut down
+        sleep(2);
+        
+        # Start proxy if credentials are available
+        if ($prefs->get('username') && $prefs->get('password')) {
+            if (Plugins::SiriusXM::Plugin->startProxy()) {
+                my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+                if ($pid) {
+                    $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_SUCCESS') . " (PID: $pid)";
+                } else {
+                    $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_SUCCESS');
+                }
+            } else {
+                $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_FAILED');
+            }
+        } else {
+            $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_NO_CREDENTIALS');
+        }
+        
+        return $class->SUPER::handler($client, $params, $callback, @args);
+    }
+    
     # Handle form submission
     if ($params->{saveSettings}) {
         
@@ -63,11 +111,10 @@ sub handler {
             # Give it a moment to shut down
             sleep(2);
             
-            if (Plugins::SiriusXM::Plugin->startProxy()) {
-                $params->{info} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
-                
-                # Test authentication right after starting proxy if credentials are provided
-                if ($params->{pref_username} && $params->{pref_password}) {
+            if ($params->{pref_username} && $params->{pref_password}) {
+                if (Plugins::SiriusXM::Plugin->startProxy()) {
+                    $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
+                    # Test authentication right after starting proxy if credentials are provided
                     Plugins::SiriusXM::API->authenticate(sub {
                         my $success = shift;
                         
@@ -79,9 +126,11 @@ sub handler {
                             $log->warn("Authentication test failed");
                         }
                     });
+                } else {
+                    $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_FAILED');
                 }
             } else {
-                $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_FAILED');
+                $params->{warning} = string('PLUGIN_SIRIUSXM_ERROR_NO_CREDENTIALS');
             }
             
             # Clear cached channels since proxy settings changed
@@ -98,9 +147,16 @@ sub beforeRender {
     my ($class, $params) = @_;
     
     # Add proxy status information
-    $params->{proxy_status} = Plugins::SiriusXM::Plugin->isProxyRunning() ? 
+    my $is_running = Plugins::SiriusXM::Plugin->isProxyRunning();
+    $params->{proxy_status} = $is_running ? 
         string('PLUGIN_SIRIUSXM_PROXY_RUNNING') : 
         string('PLUGIN_SIRIUSXM_PROXY_STOPPED');
+    
+    # Add process ID if proxy is running
+    if ($is_running) {
+        my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+        $params->{proxy_pid} = $pid if $pid;
+    }
     
     # Prepare template variables
     $params->{quality_options} = [
@@ -123,9 +179,6 @@ sub beforeRender {
         { value => 'TRACE', text => string('PLUGIN_SIRIUSXM_PROXY_LOG_TRACE') },
     ];
 
-    # Add any additional template processing here
-    $params->{plugin_version} = $Plugins::SiriusXM::Plugin::VERSION || '0.1.0';
-    
     return $class->SUPER::beforeRender($params);
 }
 

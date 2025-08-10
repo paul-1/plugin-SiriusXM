@@ -5,7 +5,15 @@
 			<div class="prefDesc"><p>[% "PLUGIN_SIRIUSXM_DESC" | string %]</p></div>
 			<div class="prefDesc">
 				<p><strong>[% "PLUGIN_SIRIUSXM_PROXY_STATUS" | string %]:</strong> 
-				<span style="color: [% proxy_status.match('Running') ? 'green' : 'red' %]">[% proxy_status %]</span></p>
+				<span style="color: [% proxy_status.match('Running') ? 'green' : 'red' %]">[% proxy_status %]</span>
+				[% IF proxy_pid %]
+					<br><strong>[% "PLUGIN_SIRIUSXM_PROXY_PID" | string %]:</strong> [% proxy_pid %]
+				[% END %]
+				</p>
+				<div style="margin-top: 10px;">
+					<input type="submit" name="checkStatus" value="[% 'PLUGIN_SIRIUSXM_CHECK_STATUS' | string %]" class="stdclick" style="margin-right: 10px;">
+					<input type="submit" name="restartProxy" value="[% 'PLUGIN_SIRIUSXM_RESTART_PROXY' | string %]" class="stdclick">
+				</div>
 			</div>
 		[% END %]
 	[% END %]
