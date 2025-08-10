@@ -41,7 +41,8 @@ sub initPlugin {
         quality => 'high',
         port => '9999',
         region => 'US',
-        enable_metadata => 0
+        enable_metadata => 0,
+        proxy_log_level => 'OFF'
     });
     
 
@@ -251,6 +252,66 @@ sub playerMenu {
     shift->can('nonSNApps') ? undef : 'RADIO';
 }
 
+sub getLogFilePath {
+    my $class = shift;
+
+    # Get LMS log directory path
+    my $log_dir;
+    eval {
+        # Try to get log directory from server preferences
+        require Slim::Utils::OSDetect;
+        $log_dir = Slim::Utils::OSDetect::dirsFor('log');
+    };
+    if ($@ || !$log_dir) {
+        # If $log_dir is not set, use the operating system's TMPDIR
+        $log_dir = $ENV{TMPDIR} || '/tmp';
+        $log->warn("Could not determine LMS log directory, using TMPDIR: $log_dir");
+    }
+
+    my $log_file = File::Spec->catfile($log_dir, 'sxm-proxy.log');
+    $log->debug("Proxy log file path: $log_file");
+
+    return $log_file;
+}
+
+sub rotateLogFile {
+    my ($class, $log_file) = @_;
+
+    return unless -f $log_file;
+
+    my $max_size = 10 * 1024 * 1024; # 10MB
+    my $max_files = 3;
+
+    my @stat = stat($log_file);
+    my $size = $stat[7] || 0;
+
+    if ($size > $max_size) {
+        $log->info("Rotating proxy log file (size: $size bytes)");
+
+        # Rotate existing log files
+        for my $i (reverse(1..$max_files-1)) {
+            my $old_file = "$log_file.$i";
+            my $new_file = "$log_file." . ($i + 1);
+
+            if (-f $old_file) {
+                if ($i == $max_files-1) {
+                    # Delete the oldest file
+                    unlink($old_file);
+                    $log->debug("Deleted oldest log file: $old_file");
+                } else {
+                    # Rename to next number
+                    rename($old_file, $new_file);
+                    $log->debug("Rotated $old_file -> $new_file");
+                }
+            }
+        }
+
+        # Move current log to .1
+        rename($log_file, "$log_file.1");
+        $log->debug("Rotated current log file to $log_file.1");
+    }
+}
+
 sub startProxy {
     my $class = shift;
     
@@ -285,8 +346,36 @@ sub startProxy {
     # Get the perl executable path and @INC from the server process
     my $perl_exe = $^X;
     my $inc_path = join(':', @INC);
-    
-    # Build proxy command using --env flag and server's perl
+
+
+    # Get log level for proxy from preferences
+    my $proxy_log_level = $prefs->get('proxy_log_level') || 'INFO';
+
+    # Get log file path and ensure log rotation
+    my $log_file = $class->getLogFilePath();
+
+    # Ensure log directory exists and is writable
+    my $log_dir = dirname($log_file);
+    unless (-d $log_dir) {
+        eval { 
+            require File::Path;
+            File::Path::make_path($log_dir);
+        };
+        if ($@) {
+            $log->warn("Could not create log directory $log_dir: $@");
+            $log_file = File::Spec->catfile('/tmp', 'sxm-proxy.log');
+            $log->warn("Using fallback log file: $log_file");
+        }
+    }
+
+    unless (-w $log_dir) {
+        $log->warn("Log directory $log_dir is not writable, using fallback");
+        $log_file = File::Spec->catfile('/tmp', 'sxm-proxy.log');
+    }
+
+    $class->rotateLogFile($log_file);
+
+    # Build proxy command using
     my @proxy_cmd = (
         $perl_exe,
         "-I$inc_path",
@@ -305,8 +394,15 @@ sub startProxy {
     if ($region eq 'Canada') {
         push @proxy_cmd, '-ca';
     }
+
+    # Only add verbosity flag if log level is not OFF
+    if ($proxy_log_level ne 'OFF') {
+        push @proxy_cmd, '-v', $proxy_log_level;
+        push @proxy_cmd, '--logfile', $log_file;
+    }
     
     $log->info("Starting proxy: " . join(' ', @proxy_cmd));
+    $log->info("Proxy output will be logged to: $log_file");
     
     # Start proxy as background process
     eval {

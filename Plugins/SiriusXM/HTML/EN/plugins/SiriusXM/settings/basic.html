@@ -42,6 +42,14 @@
 		<input type="checkbox" class="stdedit" name="pref_enable_metadata" id="enable_metadata" value="1" [% IF prefs.pref_enable_metadata %]checked[% END %]>
 	[% END %]
 
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_PROXY_LOG_LEVEL" desc="PLUGIN_SIRIUSXM_PROXY_LOG_LEVEL_DESC" %]
+		<select name="pref_proxy_log_level" class="stdedit">
+			[% FOREACH option = proxy_log_level_options %]
+				<option value="[% option.value %]" [% IF prefs.pref_proxy_log_level == option.value %]selected[% END %]>[% option.text %]</option>
+			[% END %]
+		</select>
+	[% END %]
+
 	<div class="prefDesc">
 		<input type="submit" name="saveSettings" value="[% 'PLUGIN_SIRIUSXM_SAVE_SETTINGS' | string %]" class="stdclick">
 	</div>
