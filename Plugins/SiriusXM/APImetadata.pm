@@ -13,6 +13,8 @@ use Time::HiRes;
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 
+use constant METADATA_STALE_TIME => 230;
+
 # xmplaylists.com API JSON Schema:
 # {
 #   "count": 0,
@@ -118,13 +120,12 @@ sub _processResponse {
     return unless $track_info;
 
     # Determine whether to use xmplaylists metadata or fallback to channel info
-    # based on timestamp (if metadata is 0-200 seconds old, use it; otherwise use channel info)
+    # based on timestamp (if metadata is 0-230 seconds old, use it; otherwise use channel info)
     my $use_xmplaylists_metadata = 0;
     my $metadata_is_fresh = 0;
     
     # Only consider xmplaylists metadata if metadata is enabled
     if ($prefs->get('enable_metadata') && $timestamp) {
-        # Parse timestamp and check if it's within 3 minutes
         eval {
             # Use Date::Parse to handle UTC timestamp format: 2025-08-09T15:57:41.586Z
             my $track_time = str2time($timestamp);
@@ -136,7 +137,7 @@ sub _processResponse {
             $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
             
             # Use xmplaylists metadata if timestamp is (200 seconds) or newer
-            if ($age_seconds <= 200) {
+            if ($age_seconds <= METADATA_STALE_TIME) {
                 $use_xmplaylists_metadata = 1;
                 $metadata_is_fresh = 1;
             }
