@@ -37,4 +37,4 @@ config.local
 *.conf.local
 
 # Test coverage
-cover_db/
+cover_db/lms-server/
