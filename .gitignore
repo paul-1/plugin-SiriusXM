@@ -37,4 +37,7 @@ config.local
 *.conf.local
 
 # Test coverage
-cover_db/lms-server/
+cover_db/
+
+# Development dependencies
+lms-server/
