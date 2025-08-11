@@ -121,6 +121,30 @@ ls -la /tmp/plugin-package/SiriusXM-*.zip
 - Test plugin packaging after significant changes
 - Verify all required files exist in correct locations
 
+### JSON::XS and Module Testing
+The PERL5LIB environment setup works correctly for structural validation, but has known limitations:
+
+**Expected JSON::XS Version Conflict**
+```bash
+# Test JSON::XS functionality - version conflict is expected
+export PERL5LIB=$(pwd)/lms-server/CPAN/arch:$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB
+perl -e "use JSON::XS; print 'Version: ' . $JSON::XS::VERSION"
+# Error: version 4.03 does not match bootstrap parameter 2.3
+# This is expected in test environments and doesn't affect plugin functionality
+```
+
+**Alternative JSON Testing**
+```bash 
+# Use JSON::PP for JSON functionality testing in development
+perl -e "use JSON::PP; my $json = JSON::PP->new(); print 'JSON::PP works: ' . $json->encode({test => 'OK'})"
+```
+
+**Module Validation Limitations**
+- Individual plugin modules cannot be syntax-checked due to missing runtime dependencies
+- Use the validation suite for structural checking instead of `perl -c` 
+- Log::Log4perl::Logger and Audio::Scan modules are only available in full LMS runtime
+- Focus on package declaration and pragma validation rather than syntax compilation
+
 ### Plugin Structure Validation  
 - All .pm files must have proper `package Plugins::SiriusXM::ClassName;` declarations
 - All modules must include `use strict;` and `use warnings;` pragmas
@@ -162,10 +186,11 @@ ls -la /tmp/plugin-package/SiriusXM-*.zip
 - **`basic.html`**: Settings page template with user preferences form
 
 ### Working with Plugin Code
-- **With LMS repo cloned and library configuration**: Syntax checks on .pm files should work with proper PERL5LIB setup
-- **Plugin modules cannot be executed standalone**: They depend on Lyrion Music Server runtime
-- **Proxy server (sxm.pl) has module conflicts**: JSON::XS version mismatch in test environment is expected
-- **Use the validation suite instead of individual syntax checks**: It provides comprehensive testing without runtime dependencies
+- **PERL5LIB environment setup works correctly**: The configured paths provide access to LMS modules for structural validation
+- **JSON::XS version conflicts are expected**: System version (4.03) conflicts with LMS bundled version (2.3) in test environments - this is normal and doesn't affect plugin functionality in LMS runtime
+- **Plugin modules require LMS runtime dependencies**: Individual syntax checking fails due to missing Log::Log4perl::Logger, Audio::Scan, etc. - use the validation suite instead
+- **Proxy server (sxm.pl) has module conflicts**: Expected JSON::XS version mismatch in test environment
+- **Validation suite provides comprehensive testing**: Focuses on structural validation (package declarations, pragmas, file structure) rather than runtime dependencies
 
 ### Making Changes
 - **ALWAYS backup important files before major changes**
@@ -179,6 +204,8 @@ ls -la /tmp/plugin-package/SiriusXM-*.zip
 - **Plugin structure issues**: Run the structure validation to identify missing package declarations
 - **Missing files**: Use directory structure validation to ensure all required files exist
 - **HTML template problems**: Check that all preference elements (`pref_username`, `pref_password`, etc.) exist
+- **JSON::XS version conflicts**: Expected in test environments - use JSON::PP for development testing
+- **Module syntax check failures**: Individual plugin modules require full LMS runtime - use validation suite instead
 - **Packaging issues**: Test with the packaging commands to identify missing or extra files
 
 ### Development Workflow
@@ -198,7 +225,9 @@ ls -la /tmp/plugin-package/SiriusXM-*.zip
 ### Network and Dependency Notes
 - **cpanm network access is blocked**: Use pre-installed system packages instead
 - **LMS server modules required for testing**: Clone LMS repository as shown in setup
-- **JSON::XS version conflicts exist**: This is expected in the test environment and does not affect plugin functionality
+- **JSON::XS version conflicts exist**: System version 4.03 vs LMS version 2.3 - use JSON::PP for testing
+- **Runtime dependencies unavailable**: Log::Log4perl::Logger, Audio::Scan only available in full LMS installation
 - **Some Perl modules are bundled**: Check `Plugins/SiriusXM/Bin/lib/` for included dependencies
+- **Validation focuses on structure**: Package declarations, pragmas, file structure rather than runtime compilation
 
 Always prioritize the validation commands shown above over ad-hoc testing, as they provide comprehensive coverage without requiring a full LMS installation.
