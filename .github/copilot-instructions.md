@@ -1,8 +1,8 @@
-# SiriusXM Plugin for Logitech Media Server
+# SiriusXM Plugin for Lyrion Music Server
 
 Always reference these instructions first and fallback to search or bash commands only when you encounter unexpected information that does not match the info here.
 
-This is a Logitech Media Server (LMS) plugin for streaming SiriusXM satellite radio, written in Perl with a proxy server component. The plugin integrates with LMS to provide SiriusXM channel browsing and streaming capabilities.
+This is a Lyrion Music Server (LMS) plugin for streaming SiriusXM satellite radio, written in Perl with a proxy server component. The plugin integrates with LMS to provide SiriusXM channel browsing and streaming capabilities.
 
 ## Working Effectively
 
@@ -18,7 +18,7 @@ sudo apt-get install -y libxml2-utils libwww-perl libjson-xs-perl libhttp-messag
 git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server  # NEVER CANCEL: Takes 15 seconds
 
 # Set up Perl environment for validation
-export PERL5LIB=$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB
+export PERL5LIB=$(pwd)/lms-server/CPAN/arch:$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB
 ```
 
 ### Validation Suite - Run Before Any Changes
@@ -155,15 +155,15 @@ ls -la /tmp/plugin-package/SiriusXM-*.zip
 - **`Plugins/SiriusXM/Plugin.pm`**: Main plugin class, contains menu system (`toplevelMenu`, `searchMenu`, `browseByGenre`), HLS validation (`validateHLSSupport`)
 - **`Plugins/SiriusXM/API.pm`**: SiriusXM service API integration and channel data handling
 - **`Plugins/SiriusXM/Settings.pm`**: Plugin preferences and configuration management  
-- **`Plugins/SiriusXM/ProtocolHandler.pm`**: Handles SiriusXM stream URLs and protocol
+- **`Plugins/SiriusXM/ProtocolHandler.pm`**: Handles SiriusXM stream URLs and protocol, also handles metadata for music
 - **`Plugins/SiriusXM/Bin/sxm.pl`**: Standalone proxy server for SiriusXM streams (has JSON::XS version conflicts in test environment)
 - **`install.xml`**: Plugin metadata - version, description, LMS compatibility  
 - **`repo.xml`**: Repository configuration for plugin distribution
 - **`basic.html`**: Settings page template with user preferences form
 
 ### Working with Plugin Code
-- **DO NOT run syntax checks on .pm files**: They require LMS base classes not available in development environment
-- **Plugin modules cannot be executed standalone**: They depend on Logitech Media Server runtime
+- **With LMS repo cloned and library configuration**: Syntax checks on .pm files should work with proper PERL5LIB setup
+- **Plugin modules cannot be executed standalone**: They depend on Lyrion Music Server runtime
 - **Proxy server (sxm.pl) has module conflicts**: JSON::XS version mismatch in test environment is expected
 - **Use the validation suite instead of individual syntax checks**: It provides comprehensive testing without runtime dependencies
 
