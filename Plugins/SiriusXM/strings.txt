@@ -5,7 +5,7 @@ PLUGIN_SIRIUSXM
 	EN	SiriusXM
 
 PLUGIN_SIRIUSXM_DESC
-	EN	Stream SiriusXM satellite radio through Logitech Media Server
+	EN	Stream SiriusXM satellite radio through Lyrion Music Server
 
 PLUGIN_SIRIUSXM_SETTINGS
 	EN	SiriusXM Settings

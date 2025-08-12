@@ -6,12 +6,12 @@
     <plugins>
         <plugin name="SiriusXM" version="0.5.0" minTarget="8.3" maxTarget="*">
             <title lang="EN">SiriusXM</title>
-            <desc lang="EN">Stream SiriusXM satellite radio through Logitech Media Server</desc>
+            <desc lang="EN">Stream SiriusXM satellite radio through Lyrion Music Server</desc>
             <catagory>musicservices</catagory>
             <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v0.5.0/SiriusXM-0.5.0.zip</url>
             <sha>ab5fa44b40b7aebc725c8e2540f8506732c73249</sha>
             <link>https://github.com/paul-1/plugin-SiriusXM</link>
-            <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/HTML/EN/plugins/Qobuz/html/images/SiriusXMLogo.png</icon>
+            <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/html/images/SiriusXMLogo.png</icon>
             <creator>paul-1</creator>
             <email>your-email@example.com</email>
         </plugin>

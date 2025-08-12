@@ -1,26 +1,24 @@
-# SiriusXM Plugin for Logitech Media Server
+# SiriusXM Plugin for Lyrion Media Server
 
-A plugin for streaming SiriusXM satellite radio through Logitech Media Server using the SiriusXM-Perl helper application.
+A plugin for streaming SiriusXM satellite radio through Lyrion Media Server using the SiriusXM-Perl helper application.
 
 ## Requirements
 
-- Logitech Media Server 8.3 or higher
+- Lyrion Media Server 8.3 or higher
 - SiriusXM subscription
-- PlayHLS v1.1 (With ffmpeg)
+- PlayHLS v1.1 (With ffmpeg install in the OS)
 - SiriusXM Proxy Server (Included from https://github.com/paul-1/SiriusXM-Perl)
 
 ## Installation
 
-1. Download the plugin from the Logitech Media Server plugin repository or install manually
-2. Install and configure the SiriusXM-Perl helper application
+1. Download the plugin from the Lyrion Media Server plugin repository or install manually
+2. Add https://github.com/paul-1/plugin-SiriusXM/releases/latest/download/repo.xml at the bottom of the plugin manager.
 3. Configure your SiriusXM credentials in the plugin settings
-
-## Configuration
 
 ### Plugin Settings
 
 Access the plugin settings through:
-1. Logitech Media Server web interface
+1. Lyrion Media Server web interface
 2. Settings → Plugins → SiriusXM
 
 Configure the following:
@@ -29,6 +27,7 @@ Configure the following:
 - **Port**: The system port to use for the Proxy (default:9999)
 - **Audio Quality**: Select preferred streaming quality (Low/Medium/High)
 - **Region**: United States or Canada (Default:US)
+- **Metadata**: This is polled from a 3rd party un-official SXM track information site. Data often lags playback.
 
 ## Usage
 
@@ -41,8 +40,7 @@ Once configured:
 
 - Stream live SiriusXM channels
 - Browse channel categories and favorites
-- Multiple audio quality options
-- Integration with Logitech Media Server interface
+- Integration with Lyrion Media Server interface
 
 ## Troubleshooting
 
@@ -54,16 +52,20 @@ Once configured:
 - Ensure the helper application can connect to SiriusXM servers
 
 **"No channels available"**
-- Restart the plugin or Logitech Media Server
+- Restart the plugin or Lyrion Media Server
 - Check network connectivity
 - Verify SiriusXM subscription includes streaming access
+- Check <lyrion log directory>/sxmproxy.log (You may need to increase the log level of the proxy on the plugin settings page.
+
+**"No Audio"**
 - Verify PlayHLS v1.1 is properly installed
+- Verify FFMpeg is installed in the host os.
 
 ## Support
 
 For issues and support:
 - Check the [GitHub Issues](https://github.com/paul-1/plugin-SiriusXM/issues)
-- Review the plugin logs in Logitech Media Server
+- Review the plugin logs in Lyrion Media Server
 - Verify the SiriusXM-Perl helper application is working independently
 
 ## License

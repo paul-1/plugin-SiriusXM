@@ -96,22 +96,20 @@ jobs:
           ### Changes
           - See commit history for detailed changes
 
-          ### Installation
+          ### Manual Installation
           1. Download the SiriusXM-${{ steps.version.outputs.version }}.zip file
-          2. Extract to your Logitech Media Server Plugins directory
-          3. Install the SiriusXM-Perl helper application
-          4. Configure your SiriusXM credentials in plugin settings
-          5. Restart Logitech Media Server
+          2. Extract to your Lyrion Media Server Plugins directory
+          3. Configure your SiriusXM credentials in plugin settings
+          4. Restart Lyrion Media Server
 
-          ### Requirements
-          - Logitech Media Server 8.3 or higher
-          - SiriusXM subscription
-          - SiriusXM-Perl helper application
-
-          ### Repository Update
-          To add this plugin repository to your Logitech Media Server:
+          ### Automatic Repository Update
           1. Go to Settings → Plugins → Add Repository
           2. Enter: `https://github.com/paul-1/plugin-SiriusXM/releases/latest/download/repo.xml`
+          3. Install Plugin.
+
+          ### Requirements
+          - Lyrion Media Server 8.3 or higher
+          - SiriusXM subscription
         draft: false
         prerelease: false
       env:
