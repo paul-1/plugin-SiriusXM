@@ -13,10 +13,9 @@ sxm.pl - SiriusXM proxy server
         -p, --port PORT         Server port (default: 9999)
         -ca, --canada           Use Canadian region
         -e, --env               Use SXM_USER and SXM_PASS environment variables
-        -v, --verbose LEVEL     Set Log4perl logging level (ERROR, WARN, INFO, DEBUG, TRACE)
+        -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
         --logfile FILE          Log file location (default: <lyrion log folder>/sxmproxy.log)
-                                Supports automatic rotation with Log::Dispatch::FileRotate
         -h, --help              Show this help message
 
 =head1 DESCRIPTION
@@ -67,7 +66,8 @@ use MIME::Base64;
 use sigtrap 'handler' => \&signal_handler, qw(INT QUIT TERM);
 
 # Setup Logging using LMS logging system
-use Slim::Utils::Log;
+use Slim::Utils::Log qw(logger);
+use File::Path qw(make_path);
 
 #=============================================================================
 # Global variables and constants
@@ -115,23 +115,44 @@ my $LOGGER;
 sub init_logging {
     my ($verbose_level, $logfile) = @_;
     
-    # Create or get the logger using LMS logging system
-    $LOGGER = Slim::Utils::Log->addLogCategory({
-        'category' => 'plugin.siriusxm.proxy',
-        'defaultLevel' => 'INFO',
-        'description' => 'SiriusXM Proxy Server',
+    # Map our verbose level to LMS debug level
+    my @level_mapping = qw(ERROR WARN INFO DEBUG TRACE);
+    my $lms_debug = $level_mapping[$verbose_level] || 'INFO';
+    
+    # Parse logfile to extract directory and filename
+    my $logdir = undef;
+    my $logfilename = undef;
+    
+    if ($logfile) {
+        $logdir = dirname($logfile);
+        $logfilename = basename($logfile);
+        
+        # Create log directory if it doesn't exist
+        if (!-d $logdir) {
+            eval {
+                make_path($logdir, { mode => 0755 });
+            };
+            if ($@) {
+                warn "Warning: Could not create log directory $logdir: $@\n";
+                $logfile = undef;  # Disable file logging
+            }
+        }
+    }
+    
+    # Initialize LMS logging system for this standalone process
+    Slim::Utils::Log->init({
+        'logdir'  => $logdir,
+        'logfile' => $logfilename, 
+        'logtype' => 'sxmproxy',
+        'debug'   => $lms_debug,
     });
     
-    # Map verbose level to LMS log level
-    my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);  # TRACE maps to DEBUG
-    my $lms_level = $level_mapping[$verbose_level] || 'INFO';
+    # Get logger instance for this process
+    $LOGGER = logger('plugin.siriusxm.proxy');
     
-    # Set the log level for our category
-    Slim::Utils::Log->setLogLevelForCategory('plugin.siriusxm.proxy', $lms_level);
-    
-    $LOGGER->info("SiriusXM Proxy logging initialized with level: $lms_level");
+    $LOGGER->info("SiriusXM Proxy logging initialized with level: $lms_debug");
     if ($logfile) {
-        $LOGGER->info("Log output directed to LMS logging system (file: $logfile)");
+        $LOGGER->info("Log output configured for file: $logfile");
     }
 }
 
@@ -1414,7 +1435,7 @@ sub start_server {
 sub main {
     parse_arguments();
     
-    # Initialize logging with Log4perl
+    # Initialize logging using LMS logging system
     init_logging($CONFIG{verbose}, $CONFIG{logfile});
     
     log_info("Starting SiriusXM Perl proxy v$VERSION");
