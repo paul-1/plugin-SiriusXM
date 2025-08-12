@@ -66,34 +66,8 @@ use MIME::Base64;
 # Signal handling
 use sigtrap 'handler' => \&signal_handler, qw(INT QUIT TERM);
 
-# Setup Logging
-use Cwd qw(abs_path);
-use File::Basename qw(dirname);
-my $script_full_path = abs_path($0);
-my $script_directory = dirname($script_full_path);
-
-print $script_directory;
-unshift @INC, "$script_directory/lib";
-
-my $HAS_LOG4PERL = 0;
-eval {
-    require Log::Log4perl;
-    require Log::Log4perl::Level;
-    $HAS_LOG4PERL = 1;
-};
-if ($HAS_LOG4PERL) {
-    Log::Log4perl->import();
-}
-
-# Try to load Log::Dispatch::FileRotate for log rotation support
-my $HAS_FILE_ROTATE = 0;
-eval {
-    require Log::Dispatch::FileRotate;
-    $HAS_FILE_ROTATE = 1;
-};
-if ($HAS_FILE_ROTATE) {
-    Log::Dispatch::FileRotate->import();
-}
+# Setup Logging using LMS logging system
+use Slim::Utils::Log;
 
 #=============================================================================
 # Global variables and constants
@@ -134,122 +108,37 @@ my $LOGGER;
 # Logging functions
 #=============================================================================
 
+#=============================================================================
+# Logging functions
+#=============================================================================
+
 sub init_logging {
     my ($verbose_level, $logfile) = @_;
     
-    # Check Log4perl version for TRACE level compatibility
-    # TRACE was introduced in Log4perl 1.26, so fallback to DEBUG for older versions
-    my $log4perl_version = $Log::Log4perl::VERSION || '0.00';
-    my $has_trace = ($log4perl_version >= 1.26);
+    # Create or get the logger using LMS logging system
+    $LOGGER = Slim::Utils::Log->addLogCategory({
+        'category' => 'plugin.siriusxm.proxy',
+        'defaultLevel' => 'INFO',
+        'description' => 'SiriusXM Proxy Server',
+    });
     
-    # Map our log levels to Log4perl levels
-    my @level_mapping = qw(ERROR WARN INFO DEBUG);
-    push @level_mapping, ($has_trace ? 'TRACE' : 'DEBUG');  # Use DEBUG as fallback for TRACE
-    my $log4perl_level = $level_mapping[$verbose_level] || 'INFO';
+    # Map verbose level to LMS log level
+    my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);  # TRACE maps to DEBUG
+    my $lms_level = $level_mapping[$verbose_level] || 'INFO';
     
-    # Create log directory if it doesn't exist
-    my $log_dir = dirname($logfile);
-    if (!-d $log_dir) {
-        eval {
-            make_path($log_dir, { mode => 0755 });
-        };
-        if ($@) {
-            warn "Warning: Could not create log directory $log_dir: $@\n";
-            warn "Falling back to console-only logging\n";
-            $logfile = undef;  # Disable file logging
-        }
-    }
+    # Set the log level for our category
+    Slim::Utils::Log->setLogLevelForCategory('plugin.siriusxm.proxy', $lms_level);
     
-    # Check if we can write to the log file
+    $LOGGER->info("SiriusXM Proxy logging initialized with level: $lms_level");
     if ($logfile) {
-        my $can_write = 0;
-        if (-f $logfile) {
-            $can_write = -w $logfile;
-        } else {
-            # Try to create and write to the file
-            if (open(my $test_fh, '>', $logfile)) {
-                close($test_fh);
-                $can_write = 1;
-            }
-        }
-        
-        if (!$can_write) {
-            warn "Warning: Cannot write to log file $logfile\n";
-            warn "Falling back to console-only logging\n";
-            $logfile = undef;  # Disable file logging
-        }
-    }
-    
-    # Configure Log4perl
-    my $log4perl_conf = "
-        log4perl.rootLogger = $log4perl_level, console" . ($logfile ? ", logfile" : "") . "
-    
-        # Console appender
-        log4perl.appender.console = Log::Log4perl::Appender::Screen
-        log4perl.appender.console.stderr = 0
-        log4perl.appender.console.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.console.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p>: %m%n
-    ";
-    
-    # Add file appender if logfile is available
-    if ($logfile) {
-        if ($HAS_FILE_ROTATE) {
-            # Use Log::Dispatch::FileRotate for automatic log rotation
-            $log4perl_conf .= "
-        # File appender with automatic rotation support
-        log4perl.appender.logfile = Log::Dispatch::FileRotate
-        log4perl.appender.logfile.filename = $logfile
-        log4perl.appender.logfile.mode = append
-        log4perl.appender.logfile.size = 10*1024*1024
-        log4perl.appender.logfile.max = 3
-        log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p> [%c]: %m%n
-        ";
-        } else {
-            # Fallback to basic file appender when Log::Dispatch::FileRotate is not available
-            $log4perl_conf .= "
-        # File appender (basic - Log::Dispatch::FileRotate not available)
-        log4perl.appender.logfile = Log::Log4perl::Appender::File
-        log4perl.appender.logfile.filename = $logfile
-        log4perl.appender.logfile.mode = append
-        log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p> [%c]: %m%n
-        ";
-        }
-    }
-    
-    # Initialize Log4perl
-    Log::Log4perl->init(\$log4perl_conf);
-    
-    # Get logger instance
-    $LOGGER = Log::Log4perl->get_logger('SiriusXM');
-    
-    # Log initialization message with version compatibility info
-    my $version_info = "Log4perl v$log4perl_version";
-    if (!$has_trace) {
-        $version_info .= " (TRACE level using DEBUG fallback for v1.23 compatibility)";
-    }
-    
-    my $rotation_info = "";
-    if ($logfile) {
-        if ($HAS_FILE_ROTATE) {
-            $rotation_info = " with automatic rotation (10MB max, 7 files)";
-        } else {
-            $rotation_info = " (install Log::Dispatch::FileRotate for automatic rotation)";
-        }
-    }
-    
-    if ($logfile && -w $logfile) {
-        $LOGGER->info("$version_info - console and file logging to $logfile$rotation_info");
-    } else {
-        $LOGGER->info("$version_info - console logging only");
+        $LOGGER->info("Log output directed to LMS logging system (file: $logfile)");
     }
 }
 
 sub log_message {
     my ($level, $message) = @_;
     
-    # If Log4perl is not initialized, fall back to original method
+    # If LMS logger is not initialized, fall back to simple print
     if (!$LOGGER) {
         return if $level > $CONFIG{verbose};
         my $timestamp = strftime('%d.%b %Y %H:%M:%S', gmtime);
@@ -258,11 +147,7 @@ sub log_message {
         return;
     }
     
-    # Check Log4perl version for TRACE compatibility
-    my $log4perl_version = $Log::Log4perl::VERSION || '0.00';
-    my $has_trace = ($log4perl_version >= 1.26);
-    
-    # Use Log4perl with version compatibility
+    # Use LMS logging system with level mapping
     if ($level == LOG_ERROR) {
         $LOGGER->error($message);
     } elsif ($level == LOG_WARN) {
@@ -272,12 +157,8 @@ sub log_message {
     } elsif ($level == LOG_DEBUG) {
         $LOGGER->debug($message);
     } elsif ($level == LOG_TRACE) {
-        if ($has_trace && $LOGGER->can('trace')) {
-            $LOGGER->trace($message);
-        } else {
-            # Fallback to DEBUG level for Log4perl 1.23 and earlier
-            $LOGGER->debug("[TRACE] $message");
-        }
+        # Map TRACE to DEBUG since LMS only supports up to DEBUG level
+        $LOGGER->debug("[TRACE] $message");
     }
 }
 
