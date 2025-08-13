@@ -35,9 +35,113 @@ channel name, ID, or Sirius channel number.
 
 =cut
 
+require 5.010;
 use strict;
 use warnings;
-use v5.14;
+
+use FindBin qw($Bin);
+use File::Spec::Functions qw(catdir catfile updir);
+use Config;
+
+# LMS service constants (similar to scanner.pl)
+use constant SLIM_SERVICE => 0;
+use constant SCANNER      => 1;  # Set as scanner to avoid loading full modules.conf
+use constant SXMPROXY     => 1;
+use constant RESIZER      => 0;
+use constant TRANSCODING  => 0;
+use constant PERFMON      => 0;
+use constant ISWINDOWS    => ( $^O =~ /^m?s?win/i ) ? 1 : 0;
+use constant ISACTIVEPERL => ( $Config{cf_email} =~ /ActiveState/i ) ? 1 : 0;
+use constant ISMAC        => ( $^O =~ /darwin/i ) ? 1 : 0;
+use constant DEBUGLOG     => 1;
+use constant INFOLOG      => 1;
+use constant STATISTICS   => 0;
+use constant SB1SLIMP3SYNC=> 0;
+use constant WEBUI        => 0;
+use constant HAS_AIO      => 0;
+use constant LOCALFILE    => 0;
+use constant NOMYSB       => 1;
+
+our $VERSION = '1.0.0';
+our $REVISION    = undef;
+our $BUILDDATE   = undef;
+
+BEGIN {
+    # Find LMS root directory by searching up from the plugin location
+    # sxm.pl is typically at: <LMS_ROOT>/Plugins/SiriusXM/Bin/sxm.pl
+    # So we need to go up 3 levels to reach LMS root
+    my $lms_root = $Bin;
+    
+    # Go up from Bin -> SiriusXM -> Plugins -> LMS_ROOT
+    for (1..3) {
+        $lms_root = catdir($lms_root, updir);
+    }
+    
+    # Normalize the path to handle relative path references
+    $lms_root = File::Spec->rel2abs($lms_root);
+    
+    # Verify we found the LMS root by checking for slimserver.pl
+    my $slimserver_path = catfile($lms_root, 'slimserver.pl');
+    unless (-f $slimserver_path) {
+        # If not found in standard location, try to find it by searching parent directories
+        my $current_dir = File::Spec->rel2abs($Bin);
+        my $search_attempts = 0;
+        
+        while ($search_attempts < 10) {  # Prevent infinite loop
+            $current_dir = catdir($current_dir, updir);
+            $current_dir = File::Spec->rel2abs($current_dir);
+            
+            my $test_slimserver = catfile($current_dir, 'slimserver.pl');
+            if (-f $test_slimserver) {
+                $lms_root = $current_dir;
+                $slimserver_path = $test_slimserver;
+                last;
+            }
+            
+            $search_attempts++;
+            # Stop if we've reached the root directory
+            my $parent = catdir($current_dir, updir);
+            $parent = File::Spec->rel2abs($parent);
+            last if $parent eq $current_dir;
+        }
+    }
+    
+    # For development/testing environments, check if we have our test LMS
+    if (!-f $slimserver_path) {
+        my $test_lms_path = catfile(File::Spec->rel2abs('.'), 'lms-server', 'slimserver.pl');
+        if (-f $test_lms_path) {
+            $lms_root = catdir(File::Spec->rel2abs('.'), 'lms-server');
+            $slimserver_path = $test_lms_path;
+        }
+    }
+    
+    # Final check - if still not found, provide helpful error message
+    unless (-f $slimserver_path) {
+        die "Cannot find LMS root directory. Searched for slimserver.pl at: $slimserver_path\n" .
+            "Please ensure this script is run from within an LMS installation or with LMS available.\n";
+    }
+    
+    # Add LMS root to library path - must use unshift to add to @INC at compile time
+    unshift @INC, $lms_root;
+    
+    # hack a Strawberry Perl specific path into the environment variable - XML::Parser::Expat needs it!
+    if (ISWINDOWS) {
+        my $path = File::Basename::dirname($^X);
+        $path =~ s/perl(?=.bin)/c/i;
+        $ENV{PATH} = "$path;" . $ENV{PATH} if -d $path;
+    }
+}
+
+# Now that @INC is set up, we can use LMS modules
+use Slim::bootstrap;
+use Slim::Utils::OSDetect;
+
+# Bootstrap must be in a separate BEGIN block after the modules are useable
+BEGIN {
+    # Load essential modules for logging system to work
+    # Note: Log4perl modules are needed for Slim::Utils::Log to work
+    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl)], []);
+};
 
 # Core modules
 use Getopt::Long qw(:config bundling);
@@ -46,6 +150,7 @@ use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use File::Basename;
 use File::Path qw(make_path);
+use File::Spec;
 use Encode qw(decode encode);
 
 # Network and HTTP modules  
@@ -65,15 +170,13 @@ use MIME::Base64;
 # Signal handling
 use sigtrap 'handler' => \&signal_handler, qw(INT QUIT TERM);
 
-# Setup Logging using LMS logging system
+# LMS logging system
 use Slim::Utils::Log qw(logger);
-use File::Path qw(make_path);
+use Slim::Utils::Prefs;
 
 #=============================================================================
 # Global variables and constants
 #=============================================================================
-
-our $VERSION = '1.0.0';
 
 # Logging levels
 use constant {
@@ -115,42 +218,64 @@ my $LOGGER;
 sub init_logging {
     my ($verbose_level, $logfile) = @_;
     
-    # Map our verbose level to LMS debug level
+    # Map our verbose level to Log4Perl levels
     my @level_mapping = qw(ERROR WARN INFO DEBUG TRACE);
-    my $lms_debug = $level_mapping[$verbose_level] || 'INFO';
+    my $log_level = $level_mapping[$verbose_level] || 'INFO';
+    
+    # Determine log file location
+    if (!$logfile || $logfile eq '/var/log/sxmproxy.log') {
+        # Use LMS default log directory
+        my $log_dir = Slim::Utils::OSDetect::dirsFor('log');
+        $logfile = File::Spec->catfile($log_dir, 'sxmproxy.log');
+    }
     
     # Parse logfile to extract directory and filename
-    my $logdir = undef;
-    my $logfilename = undef;
+    my $logdir = dirname($logfile);
+    my $logfilename = basename($logfile);
     
-    if ($logfile) {
-        $logdir = dirname($logfile);
-        $logfilename = basename($logfile);
-        
-        # Create log directory if it doesn't exist
-        if (!-d $logdir) {
-            eval {
-                make_path($logdir, { mode => 0755 });
-            };
-            if ($@) {
-                warn "Warning: Could not create log directory $logdir: $@\n";
-                $logfile = undef;  # Disable file logging
-            }
+    # Create log directory if it doesn't exist
+    if (!-d $logdir) {
+        eval {
+            make_path($logdir, { mode => 0755 });
+        };
+        if ($@) {
+            warn "Warning: Could not create log directory $logdir: $@\n";
+            $logfile = undef;  # Disable file logging
         }
     }
     
-    # Initialize LMS logging system for this standalone process
+    # Create Log4Perl configuration compatible with v1.23
+    my $log4perl_config = qq{
+        log4perl.logger.plugin.siriusxm.proxy = $log_level, screen
+        
+        log4perl.appender.screen = Log::Log4perl::Appender::Screen
+        log4perl.appender.screen.stderr = 1
+        log4perl.appender.screen.layout = Log::Log4perl::Layout::PatternLayout
+        log4perl.appender.screen.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+    };
+    
+    # Add file appender if logfile is specified
+    if ($logfile) {
+        $log4perl_config .= qq{
+        log4perl.logger.plugin.siriusxm.proxy = $log_level, screen, logfile
+        
+        log4perl.appender.logfile = Log::Log4perl::Appender::File
+        log4perl.appender.logfile.filename = $logfile
+        log4perl.appender.logfile.mode = append
+        log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+        };
+    }
+    
+    # Initialize LMS logging system with Log4Perl configuration
     Slim::Utils::Log->init({
-        'logdir'  => $logdir,
-        'logfile' => $logfilename, 
-        'logtype' => 'sxmproxy',
-        'debug'   => $lms_debug,
+        'config' => \$log4perl_config,
     });
     
     # Get logger instance for this process
     $LOGGER = logger('plugin.siriusxm.proxy');
     
-    $LOGGER->info("SiriusXM Proxy logging initialized with level: $lms_debug");
+    $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
     if ($logfile) {
         $LOGGER->info("Log output configured for file: $logfile");
     }
