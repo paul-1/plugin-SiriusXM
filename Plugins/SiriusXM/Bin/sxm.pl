@@ -16,6 +16,7 @@ sxm.pl - SiriusXM proxy server
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
         --logfile FILE          Log file location (default: <lyrion log folder>/sxmproxy.log)
+        --lmsroot DIR           Specify LMS root directory (auto-detected if not provided)
         -h, --help              Show this help message
 
 =head1 DESCRIPTION
@@ -28,6 +29,7 @@ Usage examples:
     perl sxm.pl myuser mypass -p 8888
     perl sxm.pl myuser mypass -l
     perl sxm.pl user pass -e -p 8888 --verbose DEBUG
+    perl sxm.pl user pass --lmsroot /opt/lms -p 8888
 
 In a player that supports HLS (QuickTime, VLC, ffmpeg, etc) you can access
 a channel at http://127.0.0.1:8888/channel.m3u8 where "channel" is the
@@ -69,58 +71,93 @@ our $BUILDDATE   = undef;
 my $libpath;  #This gets set to the LMS root directory for bootstrap.
 
 BEGIN {
-    # Find LMS root directory by searching up from the plugin location
-    # sxm.pl is minimally at: <LMS_ROOT>/Plugins/SiriusXM/Bin/sxm.pl
-    # So we need to go up 3 levels.
-    my $lms_root = $Bin;
+    # Early parsing for bootstrap-critical arguments like --lmsroot
+    # We need to parse this before LMS bootstrap to set up @INC properly
+    my $early_lmsroot;
     
-    # Go up from Bin -> SiriusXM -> Plugins -> LMS_ROOT
-    for (1..3) {
-        $lms_root = catdir($lms_root, updir);
-    }
-    
-    # Normalize the path to handle relative path references
-    $lms_root = File::Spec->rel2abs($lms_root);
-    
-    # Verify we found the LMS root by checking for slimserver.pl
-    my $slimserver_path = catfile($lms_root, 'slimserver.pl');
-    unless (-f $slimserver_path) {
-        # If not found in standard location, try to find it by searching parent directories
-        my $current_dir = File::Spec->rel2abs($Bin);
-        my $search_attempts = 0;
-        
-        while ($search_attempts < 10) {  # Prevent infinite loop
-            $current_dir = catdir($current_dir, updir);
-            $current_dir = File::Spec->rel2abs($current_dir);
-            
-            my $test_slimserver = catfile($current_dir, 'slimserver.pl');
-            if (-f $test_slimserver) {
-                $lms_root = $current_dir;
-                $slimserver_path = $test_slimserver;
-                last;
-            }
-            
-            $search_attempts++;
-            # Stop if we've reached the root directory
-            my $parent = catdir($current_dir, updir);
-            $parent = File::Spec->rel2abs($parent);
-            last if $parent eq $current_dir;
+    # Simple early parsing just for --lmsroot (before full GetOptions)
+    for my $i (0..$#ARGV) {
+        if ($ARGV[$i] eq '--lmsroot' && $i < $#ARGV) {
+            $early_lmsroot = $ARGV[$i + 1];
+            last;
+        } elsif ($ARGV[$i] =~ /^--lmsroot=(.+)$/) {
+            $early_lmsroot = $1;
+            last;
         }
     }
     
-    # For development/testing environments, check if we have our test LMS
-    if (!-f $slimserver_path) {
-        my $test_lms_path = catfile(File::Spec->rel2abs('.'), 'lms-server', 'slimserver.pl');
-        if (-f $test_lms_path) {
-            $lms_root = catdir(File::Spec->rel2abs('.'), 'lms-server');
-            $slimserver_path = $test_lms_path;
+    my $lms_root;
+    my $slimserver_path;
+    
+    # If lmsroot was provided, use it directly
+    if ($early_lmsroot) {
+        $lms_root = File::Spec->rel2abs($early_lmsroot);
+        $slimserver_path = catfile($lms_root, 'slimserver.pl');
+        
+        unless (-f $slimserver_path) {
+            die "Specified LMS root directory does not contain slimserver.pl: $lms_root\n" .
+                "Please verify the path provided with --lmsroot is correct.\n";
+        }
+    } else {
+        # Fall back to the original logic: Find LMS root directory by searching up from the plugin location
+        # sxm.pl is minimally at: <LMS_ROOT>/Plugins/SiriusXM/Bin/sxm.pl
+        # So we need to go up 3 levels.
+        $lms_root = $Bin;
+        
+        # Go up from Bin -> SiriusXM -> Plugins -> LMS_ROOT
+        for (1..3) {
+            $lms_root = catdir($lms_root, updir);
+        }
+        
+        # Normalize the path to handle relative path references
+        $lms_root = File::Spec->rel2abs($lms_root);
+        
+        # Verify we found the LMS root by checking for slimserver.pl
+        $slimserver_path = catfile($lms_root, 'slimserver.pl');
+        unless (-f $slimserver_path) {
+            # If not found in standard location, try to find it by searching parent directories
+            my $current_dir = File::Spec->rel2abs($Bin);
+            my $search_attempts = 0;
+            
+            while ($search_attempts < 10) {  # Prevent infinite loop
+                $current_dir = catdir($current_dir, updir);
+                $current_dir = File::Spec->rel2abs($current_dir);
+                
+                my $test_slimserver = catfile($current_dir, 'slimserver.pl');
+                if (-f $test_slimserver) {
+                    $lms_root = $current_dir;
+                    $slimserver_path = $test_slimserver;
+                    last;
+                }
+                
+                $search_attempts++;
+                # Stop if we've reached the root directory
+                my $parent = catdir($current_dir, updir);
+                $parent = File::Spec->rel2abs($parent);
+                last if $parent eq $current_dir;
+            }
+        }
+        
+        # For development/testing environments, check if we have our test LMS
+        if (!-f $slimserver_path) {
+            my $test_lms_path = catfile(File::Spec->rel2abs('.'), 'lms-server', 'slimserver.pl');
+            if (-f $test_lms_path) {
+                $lms_root = catdir(File::Spec->rel2abs('.'), 'lms-server');
+                $slimserver_path = $test_lms_path;
+            }
         }
     }
     
     # Final check - if still not found, provide helpful error message
     unless (-f $slimserver_path) {
-        die "Cannot find LMS root directory. Searched for slimserver.pl at: $slimserver_path\n" .
-            "Please ensure this script is run from within an LMS installation or with LMS available.\n";
+        if ($early_lmsroot) {
+            die "Specified LMS root directory does not contain slimserver.pl: $lms_root\n" .
+                "Please verify the path provided with --lmsroot is correct.\n";
+        } else {
+            die "Cannot find LMS root directory. Searched for slimserver.pl at: $slimserver_path\n" .
+                "Please ensure this script is run from within an LMS installation, with LMS available,\n" .
+                "or specify the LMS root directory with --lmsroot.\n";
+        }
     }
     
     # Add LMS root to library path - must use unshift to add to @INC at compile time
@@ -1425,6 +1462,7 @@ sub parse_arguments {
             }
         },
         'logfile=s'     => \$CONFIG{logfile},
+        'lmsroot=s'     => \$CONFIG{lmsroot},
         'help|h'        => \$help_text,
     ) or pod2usage(2);
     
