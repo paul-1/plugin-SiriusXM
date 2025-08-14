@@ -326,9 +326,11 @@ sub init_logging {
 sub log_message {
     my ($level, $message) = @_;
     
+    # Always check if the level should be logged based on CONFIG{verbose}
+    return if $level > $CONFIG{verbose};
+    
     # If LMS logger is not initialized, fall back to simple print
     if (!$LOGGER) {
-        return if $level > $CONFIG{verbose};
         my $timestamp = strftime('%d.%b %Y %H:%M:%S', gmtime);
         my $level_name = qw(ERROR WARN INFO DEBUG TRACE)[$level];
         printf "%s <%s>: %s\n", $timestamp, $level_name, $message;
