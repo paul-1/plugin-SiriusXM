@@ -13,10 +13,9 @@ sxm.pl - SiriusXM proxy server
         -p, --port PORT         Server port (default: 9999)
         -ca, --canada           Use Canadian region
         -e, --env               Use SXM_USER and SXM_PASS environment variables
-        -v, --verbose LEVEL     Set Log4perl logging level (ERROR, WARN, INFO, DEBUG, TRACE)
+        -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
         --logfile FILE          Log file location (default: <lyrion log folder>/sxmproxy.log)
-                                Supports automatic rotation with Log::Dispatch::FileRotate
         -h, --help              Show this help message
 
 =head1 DESCRIPTION
@@ -36,9 +35,119 @@ channel name, ID, or Sirius channel number.
 
 =cut
 
+require 5.010;
 use strict;
 use warnings;
-use v5.14;
+
+use FindBin qw($Bin);
+use File::Spec::Functions qw(catdir catfile updir);
+use Config;
+
+# LMS service constants (similar to scanner.pl)
+use constant SLIM_SERVICE => 0;
+use constant SCANNER      => 1;  # Set as scanner to avoid loading full modules.conf
+use constant SXMPROXY     => 1;
+use constant RESIZER      => 0;
+use constant TRANSCODING  => 0;
+use constant PERFMON      => 0;
+use constant ISWINDOWS    => ( $^O =~ /^m?s?win/i ) ? 1 : 0;
+use constant ISACTIVEPERL => ( $Config{cf_email} =~ /ActiveState/i ) ? 1 : 0;
+use constant ISMAC        => ( $^O =~ /darwin/i ) ? 1 : 0;
+use constant DEBUGLOG     => 1;
+use constant INFOLOG      => 1;
+use constant STATISTICS   => 0;
+use constant SB1SLIMP3SYNC=> 0;
+use constant WEBUI        => 0;
+use constant HAS_AIO      => 0;
+use constant LOCALFILE    => 0;
+use constant NOMYSB       => 1;
+
+our $VERSION = '1.0.0';
+our $REVISION    = undef;
+our $BUILDDATE   = undef;
+
+my $libpath;  #This gets set to the LMS root directory for bootstrap.
+
+BEGIN {
+    # Find LMS root directory by searching up from the plugin location
+    # sxm.pl is minimally at: <LMS_ROOT>/Plugins/SiriusXM/Bin/sxm.pl
+    # So we need to go up 3 levels.
+    my $lms_root = $Bin;
+    
+    # Go up from Bin -> SiriusXM -> Plugins -> LMS_ROOT
+    for (1..3) {
+        $lms_root = catdir($lms_root, updir);
+    }
+    
+    # Normalize the path to handle relative path references
+    $lms_root = File::Spec->rel2abs($lms_root);
+    
+    # Verify we found the LMS root by checking for slimserver.pl
+    my $slimserver_path = catfile($lms_root, 'slimserver.pl');
+    unless (-f $slimserver_path) {
+        # If not found in standard location, try to find it by searching parent directories
+        my $current_dir = File::Spec->rel2abs($Bin);
+        my $search_attempts = 0;
+        
+        while ($search_attempts < 10) {  # Prevent infinite loop
+            $current_dir = catdir($current_dir, updir);
+            $current_dir = File::Spec->rel2abs($current_dir);
+            
+            my $test_slimserver = catfile($current_dir, 'slimserver.pl');
+            if (-f $test_slimserver) {
+                $lms_root = $current_dir;
+                $slimserver_path = $test_slimserver;
+                last;
+            }
+            
+            $search_attempts++;
+            # Stop if we've reached the root directory
+            my $parent = catdir($current_dir, updir);
+            $parent = File::Spec->rel2abs($parent);
+            last if $parent eq $current_dir;
+        }
+    }
+    
+    # For development/testing environments, check if we have our test LMS
+    if (!-f $slimserver_path) {
+        my $test_lms_path = catfile(File::Spec->rel2abs('.'), 'lms-server', 'slimserver.pl');
+        if (-f $test_lms_path) {
+            $lms_root = catdir(File::Spec->rel2abs('.'), 'lms-server');
+            $slimserver_path = $test_lms_path;
+        }
+    }
+    
+    # Final check - if still not found, provide helpful error message
+    unless (-f $slimserver_path) {
+        die "Cannot find LMS root directory. Searched for slimserver.pl at: $slimserver_path\n" .
+            "Please ensure this script is run from within an LMS installation or with LMS available.\n";
+    }
+    
+    # Add LMS root to library path - must use unshift to add to @INC at compile time
+    unshift @INC, $lms_root;
+    unshift @INC, "$lms_root/lib";
+    $libpath = $lms_root;    
+
+    # hack a Strawberry Perl specific path into the environment variable - XML::Parser::Expat needs it!
+    if (ISWINDOWS) {
+        my $path = File::Basename::dirname($^X);
+        $path =~ s/perl(?=.bin)/c/i;
+        $ENV{PATH} = "$path;" . $ENV{PATH} if -d $path;
+    }
+}
+
+# Now that @INC is set up, we can use LMS modules
+use Slim::bootstrap;
+use Slim::Utils::OSDetect;
+
+# Bootstrap must be in a separate BEGIN block after the modules are useable
+BEGIN {
+    # Load essential modules for logging system to work, but more importantly, set the @INC.
+    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl JSON::XS)], [], $libpath);
+};
+
+
+# End of LMS Bootstrap code.
 
 # Core modules
 use Getopt::Long qw(:config bundling);
@@ -47,6 +156,7 @@ use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use File::Basename;
 use File::Path qw(make_path);
+use File::Spec;
 use Encode qw(decode encode);
 
 # Network and HTTP modules  
@@ -66,40 +176,13 @@ use MIME::Base64;
 # Signal handling
 use sigtrap 'handler' => \&signal_handler, qw(INT QUIT TERM);
 
-# Setup Logging
-use Cwd qw(abs_path);
-use File::Basename qw(dirname);
-my $script_full_path = abs_path($0);
-my $script_directory = dirname($script_full_path);
-
-print $script_directory;
-unshift @INC, "$script_directory/lib";
-
-my $HAS_LOG4PERL = 0;
-eval {
-    require Log::Log4perl;
-    require Log::Log4perl::Level;
-    $HAS_LOG4PERL = 1;
-};
-if ($HAS_LOG4PERL) {
-    Log::Log4perl->import();
-}
-
-# Try to load Log::Dispatch::FileRotate for log rotation support
-my $HAS_FILE_ROTATE = 0;
-eval {
-    require Log::Dispatch::FileRotate;
-    $HAS_FILE_ROTATE = 1;
-};
-if ($HAS_FILE_ROTATE) {
-    Log::Dispatch::FileRotate->import();
-}
+# LMS logging system
+use Log::Log4perl qw(get_logger);
+use Slim::Utils::Prefs;
 
 #=============================================================================
 # Global variables and constants
 #=============================================================================
-
-our $VERSION = '1.0.0';
 
 # Logging levels
 use constant {
@@ -134,122 +217,79 @@ my $LOGGER;
 # Logging functions
 #=============================================================================
 
+#=============================================================================
+# Logging functions
+#=============================================================================
+
 sub init_logging {
     my ($verbose_level, $logfile) = @_;
     
-    # Check Log4perl version for TRACE level compatibility
-    # TRACE was introduced in Log4perl 1.26, so fallback to DEBUG for older versions
-    my $log4perl_version = $Log::Log4perl::VERSION || '0.00';
-    my $has_trace = ($log4perl_version >= 1.26);
+    # Map our verbose level to Log4Perl levels
+    my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);
+    my $log_level = $level_mapping[$verbose_level] || 'INFO';
     
-    # Map our log levels to Log4perl levels
-    my @level_mapping = qw(ERROR WARN INFO DEBUG);
-    push @level_mapping, ($has_trace ? 'TRACE' : 'DEBUG');  # Use DEBUG as fallback for TRACE
-    my $log4perl_level = $level_mapping[$verbose_level] || 'INFO';
+    # Determine log file location
+    if (!$logfile || $logfile eq '/var/log/sxmproxy.log') {
+        # Use LMS default log directory
+        my $log_dir = Slim::Utils::OSDetect::dirsFor('log');
+        $logfile = File::Spec->catfile($log_dir, 'sxmproxy.log');
+    }
+    
+    # Parse logfile to extract directory and filename
+    my $logdir = dirname($logfile);
+    my $logfilename = basename($logfile);
     
     # Create log directory if it doesn't exist
-    my $log_dir = dirname($logfile);
-    if (!-d $log_dir) {
+    if (!-d $logdir) {
         eval {
-            make_path($log_dir, { mode => 0755 });
+            make_path($logdir, { mode => 0755 });
         };
         if ($@) {
-            warn "Warning: Could not create log directory $log_dir: $@\n";
-            warn "Falling back to console-only logging\n";
+            warn "Warning: Could not create log directory $logdir: $@\n";
             $logfile = undef;  # Disable file logging
         }
     }
     
-    # Check if we can write to the log file
-    if ($logfile) {
-        my $can_write = 0;
-        if (-f $logfile) {
-            $can_write = -w $logfile;
-        } else {
-            # Try to create and write to the file
-            if (open(my $test_fh, '>', $logfile)) {
-                close($test_fh);
-                $can_write = 1;
-            }
-        }
-        
-        if (!$can_write) {
-            warn "Warning: Cannot write to log file $logfile\n";
-            warn "Falling back to console-only logging\n";
-            $logfile = undef;  # Disable file logging
-        }
-    }
+    my $appenders = "screen";
+    # Create Log4Perl configuration compatible with v1.23
+    my $log4perl_config = qq{
+        log4perl.appender.screen = Log::Log4perl::Appender::Screen
+        log4perl.appender.screen.stderr = 1
+        log4perl.appender.screen.layout = Log::Log4perl::Layout::PatternLayout
+        log4perl.appender.screen.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+    };
     
-    # Configure Log4perl
-    my $log4perl_conf = "
-        log4perl.rootLogger = $log4perl_level, console" . ($logfile ? ", logfile" : "") . "
-    
-        # Console appender
-        log4perl.appender.console = Log::Log4perl::Appender::Screen
-        log4perl.appender.console.stderr = 0
-        log4perl.appender.console.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.console.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p>: %m%n
-    ";
-    
-    # Add file appender if logfile is available
-    if ($logfile) {
-        if ($HAS_FILE_ROTATE) {
-            # Use Log::Dispatch::FileRotate for automatic log rotation
-            $log4perl_conf .= "
-        # File appender with automatic rotation support
-        log4perl.appender.logfile = Log::Dispatch::FileRotate
-        log4perl.appender.logfile.filename = $logfile
-        log4perl.appender.logfile.mode = append
-        log4perl.appender.logfile.size = 10*1024*1024
-        log4perl.appender.logfile.max = 3
-        log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p> [%c]: %m%n
-        ";
-        } else {
-            # Fallback to basic file appender when Log::Dispatch::FileRotate is not available
-            $log4perl_conf .= "
-        # File appender (basic - Log::Dispatch::FileRotate not available)
+    # Add file appender if logfile is specified
+    if ($logfile && -w $logdir) {
+        $appenders .= ", logfile";
+        $log4perl_config .= qq{
         log4perl.appender.logfile = Log::Log4perl::Appender::File
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = %d{dd.MMM yyyy HH:mm:ss} <%p> [%c]: %m%n
-        ";
-        }
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+        };
     }
+
+    # Set the logger with all appenders in one line
+    $log4perl_config = "log4perl.logger.siriusxm.proxy = $log_level, $appenders\n" . $log4perl_config;
+
+    # Initialize Log4Perl directly (not through LMS wrapper)
+    Log::Log4perl->init(\$log4perl_config);    
     
-    # Initialize Log4perl
-    Log::Log4perl->init(\$log4perl_conf);
+    # Get logger instance for this process
+    $LOGGER = get_logger('siriusxm.proxy');
     
-    # Get logger instance
-    $LOGGER = Log::Log4perl->get_logger('SiriusXM');
-    
-    # Log initialization message with version compatibility info
-    my $version_info = "Log4perl v$log4perl_version";
-    if (!$has_trace) {
-        $version_info .= " (TRACE level using DEBUG fallback for v1.23 compatibility)";
-    }
-    
-    my $rotation_info = "";
-    if ($logfile) {
-        if ($HAS_FILE_ROTATE) {
-            $rotation_info = " with automatic rotation (10MB max, 7 files)";
-        } else {
-            $rotation_info = " (install Log::Dispatch::FileRotate for automatic rotation)";
-        }
-    }
-    
-    if ($logfile && -w $logfile) {
-        $LOGGER->info("$version_info - console and file logging to $logfile$rotation_info");
-    } else {
-        $LOGGER->info("$version_info - console logging only");
+    $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
+    if ($logfile && -w $logdir) {
+        $LOGGER->warn("File Logging disabled, using console output only");
     }
 }
 
 sub log_message {
     my ($level, $message) = @_;
     
-    # If Log4perl is not initialized, fall back to original method
+    # If LMS logger is not initialized, fall back to simple print
     if (!$LOGGER) {
         return if $level > $CONFIG{verbose};
         my $timestamp = strftime('%d.%b %Y %H:%M:%S', gmtime);
@@ -258,11 +298,7 @@ sub log_message {
         return;
     }
     
-    # Check Log4perl version for TRACE compatibility
-    my $log4perl_version = $Log::Log4perl::VERSION || '0.00';
-    my $has_trace = ($log4perl_version >= 1.26);
-    
-    # Use Log4perl with version compatibility
+    # Use LMS logging system with level mapping
     if ($level == LOG_ERROR) {
         $LOGGER->error($message);
     } elsif ($level == LOG_WARN) {
@@ -272,12 +308,8 @@ sub log_message {
     } elsif ($level == LOG_DEBUG) {
         $LOGGER->debug($message);
     } elsif ($level == LOG_TRACE) {
-        if ($has_trace && $LOGGER->can('trace')) {
-            $LOGGER->trace($message);
-        } else {
-            # Fallback to DEBUG level for Log4perl 1.23 and earlier
-            $LOGGER->debug("[TRACE] $message");
-        }
+        # Map TRACE to DEBUG since LMS only supports up to DEBUG level
+        $LOGGER->debug("[TRACE] $message");
     }
 }
 
@@ -1533,7 +1565,7 @@ sub start_server {
 sub main {
     parse_arguments();
     
-    # Initialize logging with Log4perl
+    # Initialize logging using LMS logging system
     init_logging($CONFIG{verbose}, $CONFIG{logfile});
     
     log_info("Starting SiriusXM Perl proxy v$VERSION");

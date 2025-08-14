@@ -180,7 +180,7 @@ perl -e "use JSON::PP; my $json = JSON::PP->new(); print 'JSON::PP works: ' . $j
 - **`Plugins/SiriusXM/API.pm`**: SiriusXM service API integration and channel data handling
 - **`Plugins/SiriusXM/Settings.pm`**: Plugin preferences and configuration management  
 - **`Plugins/SiriusXM/ProtocolHandler.pm`**: Handles SiriusXM stream URLs and protocol, also handles metadata for music
-- **`Plugins/SiriusXM/Bin/sxm.pl`**: Standalone proxy server for SiriusXM streams (has JSON::XS version conflicts in test environment)
+- **`Plugins/SiriusXM/Bin/sxm.pl`**: Standalone proxy server for SiriusXM streams (uses LMS logging system via Slim::Utils::Log)
 - **`install.xml`**: Plugin metadata - version, description, LMS compatibility  
 - **`repo.xml`**: Repository configuration for plugin distribution
 - **`basic.html`**: Settings page template with user preferences form
@@ -189,7 +189,8 @@ perl -e "use JSON::PP; my $json = JSON::PP->new(); print 'JSON::PP works: ' . $j
 - **PERL5LIB environment setup works correctly**: The configured paths provide access to LMS modules for structural validation
 - **JSON::XS version conflicts are expected**: System version (4.03) conflicts with LMS bundled version (2.3) in test environments - this is normal and doesn't affect plugin functionality in LMS runtime
 - **Plugin modules require LMS runtime dependencies**: Individual syntax checking fails due to missing Log::Log4perl::Logger, Audio::Scan, etc. - use the validation suite instead
-- **Proxy server (sxm.pl) has module conflicts**: Expected JSON::XS version mismatch in test environment
+- **Proxy server (sxm.pl) uses LMS logging**: Now uses Slim::Utils::Log with 'plugin.siriusxm.proxy' category instead of bundled Log4perl
+- **No bundled modules**: lib directory removed - all dependencies provided by LMS runtime
 - **Validation suite provides comprehensive testing**: Focuses on structural validation (package declarations, pragmas, file structure) rather than runtime dependencies
 
 ### Making Changes
@@ -206,6 +207,7 @@ perl -e "use JSON::PP; my $json = JSON::PP->new(); print 'JSON::PP works: ' . $j
 - **HTML template problems**: Check that all preference elements (`pref_username`, `pref_password`, etc.) exist
 - **JSON::XS version conflicts**: Expected in test environments - use JSON::PP for development testing
 - **Module syntax check failures**: Individual plugin modules require full LMS runtime - use validation suite instead
+- **Proxy logging issues**: sxm.pl now uses LMS logging system - ensure PERL5LIB includes LMS paths
 - **Packaging issues**: Test with the packaging commands to identify missing or extra files
 
 ### Development Workflow
@@ -227,7 +229,8 @@ perl -e "use JSON::PP; my $json = JSON::PP->new(); print 'JSON::PP works: ' . $j
 - **LMS server modules required for testing**: Clone LMS repository as shown in setup
 - **JSON::XS version conflicts exist**: System version 4.03 vs LMS version 2.3 - use JSON::PP for testing
 - **Runtime dependencies unavailable**: Log::Log4perl::Logger, Audio::Scan only available in full LMS installation
-- **Some Perl modules are bundled**: Check `Plugins/SiriusXM/Bin/lib/` for included dependencies
+- **Proxy server now uses LMS logging**: sxm.pl uses Slim::Utils::Log instead of bundled Log4perl modules
+- **No bundled Perl modules**: lib directory removed - LMS provides all needed modules
 - **Validation focuses on structure**: Package declarations, pragmas, file structure rather than runtime compilation
 
 Always prioritize the validation commands shown above over ad-hoc testing, as they provide comprehensive coverage without requiring a full LMS installation.
