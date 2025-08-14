@@ -362,7 +362,7 @@ sub startProxy {
     if (!$lms_server_dir) {
         # Look in the directory containing the current Perl executable's parent directories
         my $search_base = File::Spec->rel2abs(dirname($^X));
-        for my $levels (0..3) {
+        for my $levels (0..5) {
             my $test_dir = $search_base;
             for (1..$levels) {
                 $test_dir = File::Spec->catdir($test_dir, File::Spec->updir());
@@ -413,7 +413,7 @@ sub startProxy {
     # Build proxy command using
     my @proxy_cmd = (
         $perl_exe,
-        "-I$inc_path",
+#        "-I$inc_path",
         $proxy_path,
         '-e',  # Use environment variables
         '-p', $port
