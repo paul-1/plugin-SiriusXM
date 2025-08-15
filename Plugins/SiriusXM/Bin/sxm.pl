@@ -41,8 +41,6 @@ require 5.010;
 use strict;
 use warnings;
 
-use FindBin qw($Bin);
-use File::Spec::Functions qw(catdir catfile updir);
 use Config;
 
 # LMS service constants (similar to scanner.pl)
@@ -68,121 +66,16 @@ our $VERSION = '1.0.0';
 our $REVISION    = undef;
 our $BUILDDATE   = undef;
 
-my $libpath;  #This gets set to the LMS root directory for bootstrap.
-
-BEGIN {
-    # Early parsing for bootstrap-critical arguments like --lmsroot
-    # We need to parse this before LMS bootstrap to set up @INC properly
-    my $early_lmsroot;
-    
-    # Simple early parsing just for --lmsroot (before full GetOptions)
-    for my $i (0..$#ARGV) {
-        if ($ARGV[$i] eq '--lmsroot' && $i < $#ARGV) {
-            $early_lmsroot = $ARGV[$i + 1];
-            last;
-        } elsif ($ARGV[$i] =~ /^--lmsroot=(.+)$/) {
-            $early_lmsroot = $1;
-            last;
-        }
-    }
-    
-    my $lms_root;
-    my $slimserver_path;
-    
-    # If lmsroot was provided, use it directly
-    if ($early_lmsroot) {
-        $lms_root = File::Spec->rel2abs($early_lmsroot);
-        $slimserver_path = catfile($lms_root, 'slimserver.pl');
-        
-        unless (-f $slimserver_path) {
-            die "Specified LMS root directory does not contain slimserver.pl: $lms_root\n" .
-                "Please verify the path provided with --lmsroot is correct.\n";
-        }
-    } else {
-        # Fall back to the original logic: Find LMS root directory by searching up from the plugin location
-        # sxm.pl is minimally at: <LMS_ROOT>/Plugins/SiriusXM/Bin/sxm.pl
-        # So we need to go up 3 levels.
-        $lms_root = $Bin;
-        
-        # Go up from Bin -> SiriusXM -> Plugins -> LMS_ROOT
-        for (1..3) {
-            $lms_root = catdir($lms_root, updir);
-        }
-        
-        # Normalize the path to handle relative path references
-        $lms_root = File::Spec->rel2abs($lms_root);
-        
-        # Verify we found the LMS root by checking for slimserver.pl
-        $slimserver_path = catfile($lms_root, 'slimserver.pl');
-        unless (-f $slimserver_path) {
-            # If not found in standard location, try to find it by searching parent directories
-            my $current_dir = File::Spec->rel2abs($Bin);
-            my $search_attempts = 0;
-            
-            while ($search_attempts < 10) {  # Prevent infinite loop
-                $current_dir = catdir($current_dir, updir);
-                $current_dir = File::Spec->rel2abs($current_dir);
-                
-                my $test_slimserver = catfile($current_dir, 'slimserver.pl');
-                if (-f $test_slimserver) {
-                    $lms_root = $current_dir;
-                    $slimserver_path = $test_slimserver;
-                    last;
-                }
-                
-                $search_attempts++;
-                # Stop if we've reached the root directory
-                my $parent = catdir($current_dir, updir);
-                $parent = File::Spec->rel2abs($parent);
-                last if $parent eq $current_dir;
-            }
-        }
-        
-        # For development/testing environments, check if we have our test LMS
-        if (!-f $slimserver_path) {
-            my $test_lms_path = catfile(File::Spec->rel2abs('.'), 'lms-server', 'slimserver.pl');
-            if (-f $test_lms_path) {
-                $lms_root = catdir(File::Spec->rel2abs('.'), 'lms-server');
-                $slimserver_path = $test_lms_path;
-            }
-        }
-    }
-    
-    # Final check - if still not found, provide helpful error message
-    unless (-f $slimserver_path) {
-        if ($early_lmsroot) {
-            die "Specified LMS root directory does not contain slimserver.pl: $lms_root\n" .
-                "Please verify the path provided with --lmsroot is correct.\n";
-        } else {
-            die "Cannot find LMS root directory. Searched for slimserver.pl at: $slimserver_path\n" .
-                "Please ensure this script is run from within an LMS installation, with LMS available,\n" .
-                "or specify the LMS root directory with --lmsroot.\n";
-        }
-    }
-    
-    # Add LMS root to library path - must use unshift to add to @INC at compile time
-    unshift @INC, $lms_root;
-    unshift @INC, "$lms_root/lib";
-    $libpath = $lms_root;    
-
-    # hack a Strawberry Perl specific path into the environment variable - XML::Parser::Expat needs it!
-    if (ISWINDOWS) {
-        my $path = File::Basename::dirname($^X);
-        $path =~ s/perl(?=.bin)/c/i;
-        $ENV{PATH} = "$path;" . $ENV{PATH} if -d $path;
-    }
-}
-
-# Now that @INC is set up, we can use LMS modules
+# @INC is set on Commandline from the LMS server @INC
 use Slim::bootstrap;
 use Slim::Utils::OSDetect;
 
 # Bootstrap must be in a separate BEGIN block after the modules are useable
 BEGIN {
-    # Load essential modules for logging system to work, but more importantly, set the @INC.
-    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl JSON::XS)], [], $libpath);
-};
 
+    # Load essential modules for logging system to work, but more importantly, set the @INC.
+    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl JSON::XS)], []);
+};
 
 # End of LMS Bootstrap code.
 

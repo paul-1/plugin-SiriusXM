@@ -344,44 +344,7 @@ sub startProxy {
     
     # Get the perl executable path and @INC from the server process
     my $perl_exe = $^X;
-    my $inc_path = join(':', @INC);
-
-    # Determine LMS server directory to pass to proxy
-    my $lms_server_dir;
-    # Look for slimserver.pl in likely locations based on @INC
-    for my $inc_dir (@INC) {
-        next unless defined $inc_dir && -d $inc_dir;
-        my $potential_slimserver = File::Spec->catfile($inc_dir, 'slimserver.pl');
-        if (-f $potential_slimserver) {
-            $lms_server_dir = File::Spec->rel2abs($inc_dir);
-            last;
-        }
-    }
-    
-    # If not found in @INC, try to find it relative to the current process
-    if (!$lms_server_dir) {
-        # Look in the directory containing the current Perl executable's parent directories
-        my $search_base = File::Spec->rel2abs(dirname($^X));
-        for my $levels (0..5) {
-            my $test_dir = $search_base;
-            for (1..$levels) {
-                $test_dir = File::Spec->catdir($test_dir, File::Spec->updir());
-            }
-            $test_dir = File::Spec->rel2abs($test_dir);
-            my $potential_slimserver = File::Spec->catfile($test_dir, 'slimserver.pl');
-            if (-f $potential_slimserver) {
-                $lms_server_dir = $test_dir;
-                last;
-            }
-        }
-    }
-    
-    if ($lms_server_dir) {
-        $log->debug("Detected LMS server directory: $lms_server_dir");
-    } else {
-        $log->warn("Could not auto-detect LMS server directory - proxy will use fallback detection");
-    }
-
+    my $inc_path = join(' -I ', @INC);
 
     # Get log level for proxy from preferences
     my $proxy_log_level = $prefs->get('proxy_log_level') || 'INFO';
@@ -413,16 +376,11 @@ sub startProxy {
     # Build proxy command using
     my @proxy_cmd = (
         $perl_exe,
-#        "-I$inc_path",
+        "-I $inc_path",
         $proxy_path,
         '-e',  # Use environment variables
         '-p', $port
     );
-    
-    # Add LMS root directory if detected
-    if ($lms_server_dir) {
-        push @proxy_cmd, '--lmsroot', $lms_server_dir;
-    }
     
     if ($quality eq 'medium' ) {
         push @proxy_cmd, '--quality', 'Med';
