@@ -212,7 +212,9 @@ sub init_logging {
     
     $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
     if ($logfile && -w $logdir) {
-        $LOGGER->warn("File Logging disabled, using console output only");
+        $LOGGER->info("File logging enabled: $logfile");
+    } else {
+        $LOGGER->warn("File logging disabled, using console output only");
     }
 }
 
