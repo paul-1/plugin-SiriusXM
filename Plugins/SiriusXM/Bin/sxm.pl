@@ -306,6 +306,7 @@ sub new {
         playlists => {},
         channels  => undef,
         channel_base_paths => {},
+        channel_cookies => {},  # Store per-channel cookie jars
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
     };
@@ -324,9 +325,35 @@ sub new {
     return $self;
 }
 
+# Get or create cookie jar for a specific channel
+sub get_channel_cookie_jar {
+    my ($self, $channel_id) = @_;
+    
+    # If no channel_id specified, use global cookie jar for backward compatibility
+    return $self->{ua}->cookie_jar unless $channel_id;
+    
+    # Create channel-specific cookie jar if it doesn't exist
+    if (!exists $self->{channel_cookies}->{$channel_id}) {
+        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
+        main::log_debug("Created new cookie jar for channel: $channel_id");
+    }
+    
+    return $self->{channel_cookies}->{$channel_id};
+}
+
+# Set the user agent to use a specific channel's cookie jar
+sub set_channel_context {
+    my ($self, $channel_id) = @_;
+    
+    my $cookie_jar = $self->get_channel_cookie_jar($channel_id);
+    $self->{ua}->cookie_jar($cookie_jar);
+    
+    main::log_trace("Set cookie context for channel: " . ($channel_id || 'global'));
+}
+
 sub is_logged_in {
-    my $self = shift;
-    my $cookies = $self->{ua}->cookie_jar;
+    my ($self, $channel_id) = @_;
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
     
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
@@ -339,15 +366,16 @@ sub is_logged_in {
         $has_sxmdata = 1 if $key eq 'SXMDATA';
     });
     
-    main::log_trace("is_logged_in() check - found cookies: " . join(", ", @cookie_names));
-    main::log_trace("is_logged_in() result: " . ($has_sxmdata ? "true" : "false"));
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_trace("is_logged_in() check for $context - found cookies: " . join(", ", @cookie_names));
+    main::log_trace("is_logged_in() result for $context: " . ($has_sxmdata ? "true" : "false"));
     
     return $has_sxmdata;
 }
 
 sub is_session_authenticated {
-    my $self = shift;
-    my $cookies = $self->{ua}->cookie_jar;
+    my ($self, $channel_id) = @_;
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
     
     # Check for AWSALB and JSESSIONID cookies
     my ($has_awsalb, $has_jsessionid) = (0, 0);
@@ -360,19 +388,25 @@ sub is_session_authenticated {
         $has_jsessionid = 1 if $key eq 'JSESSIONID';
     });
     
-    main::log_trace("is_session_authenticated() check - found cookies: " . join(", ", @cookie_names));
-    main::log_trace("is_session_authenticated() result: " . (($has_awsalb && $has_jsessionid) ? "true" : "false"));
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_trace("is_session_authenticated() check for $context - found cookies: " . join(", ", @cookie_names));
+    main::log_trace("is_session_authenticated() result for $context: " . (($has_awsalb && $has_jsessionid) ? "true" : "false"));
     
     return $has_awsalb && $has_jsessionid;
 }
 
 sub get_request {
-    my ($self, $method, $params, $authenticate) = @_;
+    my ($self, $method, $params, $authenticate, $channel_id) = @_;
     $authenticate //= 1;
     
-    if ($authenticate && !$self->is_session_authenticated() && !$self->authenticate()) {
-        main::log_error('Unable to authenticate');
-        return undef;
+    if ($authenticate) {
+        # Set channel context for authentication
+        $self->set_channel_context($channel_id);
+        
+        if (!$self->is_session_authenticated($channel_id) && !$self->authenticate($channel_id)) {
+            main::log_error('Unable to authenticate');
+            return undef;
+        }
     }
     
     my $url = sprintf(REST_FORMAT, $method);
@@ -402,12 +436,17 @@ sub get_request {
 }
 
 sub post_request {
-    my ($self, $method, $postdata, $authenticate) = @_;
+    my ($self, $method, $postdata, $authenticate, $channel_id) = @_;
     $authenticate //= 1;
     
-    if ($authenticate && !$self->is_session_authenticated() && !$self->authenticate()) {
-        main::log_error('Unable to authenticate');
-        return undef;
+    if ($authenticate) {
+        # Set channel context for authentication
+        $self->set_channel_context($channel_id);
+        
+        if (!$self->is_session_authenticated($channel_id) && !$self->authenticate($channel_id)) {
+            main::log_error('Unable to authenticate');
+            return undef;
+        }
     }
     
     my $url = sprintf(REST_FORMAT, $method);
@@ -451,9 +490,13 @@ sub post_request {
 }
 
 sub login {
-    my $self = shift;
+    my ($self, $channel_id) = @_;
     
-    main::log_debug("Attempting to login user: $self->{username}");
+    # Set channel context before login
+    $self->set_channel_context($channel_id);
+    
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_debug("Attempting to login user: $self->{username} for $context");
     
     my $postdata = {
         moduleList => {
@@ -481,45 +524,49 @@ sub login {
         },
     };
     
-    my $data = $self->post_request('modify/authentication', $postdata, 0);
+    my $data = $self->post_request('modify/authentication', $postdata, 0, $channel_id);
     return 0 unless $data;
     
-    main::log_trace("Login response received, checking status");
+    main::log_trace("Login response received for $context, checking status");
     
     my $success = 0;
     eval {
         my $status = $data->{ModuleListResponse}->{status};
-        main::log_trace("Login response status: $status");
+        main::log_trace("Login response status for $context: $status");
         
-        if ($status == 1 && $self->is_logged_in()) {
-            main::log_info("Login successful for user: $self->{username}");
-            main::log_trace("Session cookies after login: " . ($self->{ua}->cookie_jar ? "present" : "none"));
+        if ($status == 1 && $self->is_logged_in($channel_id)) {
+            main::log_info("Login successful for user: $self->{username} ($context)");
+            main::log_trace("Session cookies after login for $context: " . ($self->{ua}->cookie_jar ? "present" : "none"));
             $success = 1;
         } else {
-            main::log_trace("Login failed - status: $status, is_logged_in: " . ($self->is_logged_in() ? "true" : "false"));
+            main::log_trace("Login failed for $context - status: $status, is_logged_in: " . ($self->is_logged_in($channel_id) ? "true" : "false"));
         }
     };
     if ($@) {
-        main::log_error("Error decoding JSON response for login: $@");
+        main::log_error("Error decoding JSON response for login ($context): $@");
     }
     
     if ($success) {
         return 1;
     }
     
-    main::log_error("Login failed for user: $self->{username}");
+    main::log_error("Login failed for user: $self->{username} ($context)");
     return 0;
 }
 
 sub authenticate {
-    my $self = shift;
+    my ($self, $channel_id) = @_;
     
-    if (!$self->is_logged_in() && !$self->login()) {
+    if (!$self->is_logged_in($channel_id) && !$self->login($channel_id)) {
         main::log_error('Unable to authenticate because login failed');
         return 0;
     }
     
-    main::log_debug("Attempting to authenticate session");
+    # Set channel context for authentication
+    $self->set_channel_context($channel_id);
+    
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_debug("Attempting to authenticate session for $context");
     
     my $postdata = {
         moduleList => {
@@ -543,41 +590,42 @@ sub authenticate {
         }
     };
     
-    my $data = $self->post_request('resume?OAtrial=false', $postdata, 0);
+    my $data = $self->post_request('resume?OAtrial=false', $postdata, 0, $channel_id);
     return 0 unless $data;
     
-    main::log_trace("Authentication response received, checking status");
+    main::log_trace("Authentication response received for $context, checking status");
     
     my $success = 0;
     eval {
         my $status = $data->{ModuleListResponse}->{status};
-        main::log_trace("Authentication response status: $status");
+        main::log_trace("Authentication response status for $context: $status");
         
-        if ($status == 1 && $self->is_session_authenticated()) {
-            main::log_info("Session authentication successful");
-            main::log_trace("Session authenticated, cookies available");
+        if ($status == 1 && $self->is_session_authenticated($channel_id)) {
+            main::log_info("Session authentication successful for $context");
+            main::log_trace("Session authenticated for $context, cookies available");
             $success = 1;
         } else {
-            main::log_trace("Authentication failed - status: $status, is_session_authenticated: " . ($self->is_session_authenticated() ? "true" : "false"));
+            main::log_trace("Authentication failed for $context - status: $status, is_session_authenticated: " . ($self->is_session_authenticated($channel_id) ? "true" : "false"));
         }
     };
     if ($@) {
-        main::log_error("Error parsing JSON response for authentication: $@");
+        main::log_error("Error parsing JSON response for authentication ($context): $@");
     }
     
     if ($success) {
         return 1;
     }
     
-    main::log_error("Session authentication failed");
+    main::log_error("Session authentication failed for $context");
     return 0;
 }
 
 sub get_sxmak_token {
-    my $self = shift;
+    my ($self, $channel_id) = @_;
     
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
     my $token;
-    $self->{ua}->cookie_jar->scan(sub {
+    $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         if ($key eq 'SXMAKTOKEN') {
             # Parse token value: token=value,other_data
@@ -587,15 +635,17 @@ sub get_sxmak_token {
         }
     });
     
-    main::log_trace("SXMAK token: " . ($token || 'not found'));
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_trace("SXMAK token for $context: " . ($token || 'not found'));
     return $token;
 }
 
 sub get_gup_id {
-    my $self = shift;
+    my ($self, $channel_id) = @_;
     
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
     my $gup_id;
-    $self->{ua}->cookie_jar->scan(sub {
+    $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         if ($key eq 'SXMDATA') {
             eval {
@@ -609,7 +659,8 @@ sub get_gup_id {
         }
     });
     
-    main::log_trace("GUP ID: " . ($gup_id || 'not found'));
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_trace("GUP ID for $context: " . ($gup_id || 'not found'));
     return $gup_id;
 }
 
@@ -639,7 +690,7 @@ sub get_playlist_url {
     
     main::log_debug("Getting playlist URL for channel: $channel_id");
     
-    my $data = $self->get_request('tune/now-playing-live', $params);
+    my $data = $self->get_request('tune/now-playing-live', $params, 1, $channel_id);
     return undef unless $data;
     
     # Get status
@@ -657,12 +708,12 @@ sub get_playlist_url {
     # Handle session expiration
     if ($message_code == 201 || $message_code == 208) {
         if ($max_attempts > 0) {
-            main::log_warn("Session expired (code: $message_code), re-authenticating");
-            if ($self->authenticate()) {
-                main::log_info("Successfully re-authenticated");
+            main::log_warn("Session expired (code: $message_code), re-authenticating for channel: $channel_id");
+            if ($self->authenticate($channel_id)) {
+                main::log_info("Successfully re-authenticated for channel: $channel_id");
                 return $self->get_playlist_url($guid, $channel_id, $use_cache, $max_attempts - 1);
             } else {
-                main::log_error("Failed to re-authenticate");
+                main::log_error("Failed to re-authenticate for channel: $channel_id");
                 return undef;
             }
         } else {
@@ -689,7 +740,7 @@ sub get_playlist_url {
             my $playlist_url = $playlist_info->{url};
             $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
             
-            my $variant_url = $self->get_playlist_variant_url($playlist_url);
+            my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
                 $self->{playlists}->{$channel_id} = $variant_url;
                 main::log_debug("Cached playlist URL for channel: $channel_id");
@@ -703,10 +754,13 @@ sub get_playlist_url {
 }
 
 sub get_playlist_variant_url {
-    my ($self, $url) = @_;
+    my ($self, $url, $channel_id) = @_;
     
-    my $token = $self->get_sxmak_token();
-    my $gup_id = $self->get_gup_id();
+    # Set channel context for token retrieval
+    $self->set_channel_context($channel_id);
+    
+    my $token = $self->get_sxmak_token($channel_id);
+    my $gup_id = $self->get_gup_id($channel_id);
     
     return undef unless $token && $gup_id;
     
@@ -735,7 +789,7 @@ sub get_playlist_variant_url {
     # Check if this is a master playlist with quality variants
     if ($content =~ /#EXT-X-STREAM-INF/) {
         main::log_debug("Master playlist detected in variant URL, selecting quality variant");
-        my $variant_url = $self->select_quality_variant($content, $url, $CONFIG{quality});
+        my $variant_url = $self->select_quality_variant($content, $url, $CONFIG{quality}, $channel_id);
         if ($variant_url) {
             main::log_info("Selected quality variant: $variant_url");
             return $variant_url;
@@ -779,8 +833,11 @@ sub get_playlist {
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
     return undef unless $url;
     
-    my $token = $self->get_sxmak_token();
-    my $gup_id = $self->get_gup_id();
+    # Set channel context for token retrieval
+    $self->set_channel_context($channel_id);
+    
+    my $token = $self->get_sxmak_token($channel_id);
+    my $gup_id = $self->get_gup_id($channel_id);
     
     return undef unless $token && $gup_id;
     
@@ -797,8 +854,14 @@ sub get_playlist {
     my $response = $self->{ua}->get($uri);
     
     if ($response->code == 403) {
-        main::log_warn("Received status code 403 on playlist, renewing session");
-        return $self->get_playlist($name, 0);
+        main::log_warn("Received status code 403 on playlist for channel: $channel_id, renewing session");
+        # Re-authenticate for this specific channel and retry
+        if ($self->authenticate($channel_id)) {
+            return $self->get_playlist($name, 0);
+        } else {
+            main::log_error("Failed to re-authenticate for channel: $channel_id");
+            return undef;
+        }
     }
     
     if (!$response->is_success) {
@@ -839,7 +902,7 @@ sub get_playlist {
 }
 
 sub select_quality_variant {
-    my ($self, $master_playlist, $base_url, $quality) = @_;
+    my ($self, $master_playlist, $base_url, $quality, $channel_id) = @_;
     
     # Define bandwidth mappings for quality levels
     my %quality_bandwidths = (
@@ -944,8 +1007,12 @@ sub get_segment {
     
     # Construct full segment URL with base path
     my $url = LIVE_PRIMARY_HLS . "/$base_path/$path";
-    my $token = $self->get_sxmak_token();
-    my $gup_id = $self->get_gup_id();
+    
+    # Set channel context for token retrieval
+    $self->set_channel_context($channel_id);
+    
+    my $token = $self->get_sxmak_token($channel_id);
+    my $gup_id = $self->get_gup_id($channel_id);
     
     return undef unless $token && $gup_id;
     
@@ -963,17 +1030,17 @@ sub get_segment {
     
     if ($response->code == 403) {
         if ($max_attempts > 0) {
-            main::log_warn("Received status code 403 on segment, renewing session");
-            main::log_trace("Attempting to authenticate to get new session tokens");
-            if ($self->authenticate()) {
-                main::log_trace("Session renewed successfully, retrying segment request");
+            main::log_warn("Received status code 403 on segment for channel: $channel_id, renewing session");
+            main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
+            if ($self->authenticate($channel_id)) {
+                main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                main::log_error("Session renewal failed");
+                main::log_error("Session renewal failed for channel: $channel_id");
                 return undef;
             }
         } else {
-            main::log_error("Received status code 403 on segment, max attempts exceeded");
+            main::log_error("Received status code 403 on segment for channel: $channel_id, max attempts exceeded");
             return undef;
         }
     }
@@ -1008,7 +1075,7 @@ sub get_channels {
             }
         };
         
-        my $data = $self->post_request('get', $postdata);
+        my $data = $self->post_request('get', $postdata, 1, undef);  # Use global authentication for channel listing
         if (!$data) {
             main::log_error('Unable to get channel list');
             return [];
@@ -1411,7 +1478,7 @@ sub list_channels {
     
     log_info("Fetching channel list...");
     
-    # Ensure we're authenticated first
+    # Ensure we're authenticated first (use global authentication for channel listing)
     if (!$sxm->authenticate()) {
         log_error("Authentication failed - cannot fetch channels");
         return;
@@ -1477,7 +1544,7 @@ sub start_server {
     
     log_info("Starting HTTP server on port $CONFIG{port}");
     
-    # Test authentication before starting server
+    # Test authentication before starting server (use global authentication for server startup)
     if (!$sxm->authenticate()) {
         log_error("Authentication failed - cannot start server");
         exit(1);
