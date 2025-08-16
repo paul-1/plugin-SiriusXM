@@ -22,21 +22,9 @@ jobs:
       run: |
         # Clone LMS server repository to get actual modules
         git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server
-        
+
         # Set up PERL5LIB to include LMS modules
         echo "PERL5LIB=$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB" >> $GITHUB_ENV
-
-    - name: Install Perl dependencies
-      run: |
-        # Install system packages for Perl modules
-        sudo apt-get update
-        sudo apt-get install -y libwww-perl libjson-xs-perl libhttp-message-perl
-
-        # Install cpanm
-        curl -L https://cpanmin.us | perl - --sudo App::cpanminus || true
-
-        # Install additional modules required by LMS
-        which cpanm && cpanm --notest JSON::XS LWP::UserAgent HTTP::Request::Common DBI DBD::SQLite || true
 
     - name: Validate XML files
       run: |
@@ -60,8 +48,9 @@ jobs:
         use warnings;
 
         # Add LMS modules to path
-        use lib "lms-server";
-        use lib "lms-server/CPAN";
+        unshift @INC, "lms-server";
+        unshift @INC, "lms-server/CPAN";
+        unshift @INC, "lms-server/lib";
 
         # Check that all Perl modules have proper package declarations
         my @modules = glob("Plugins/SiriusXM/*.pm");
@@ -87,6 +76,11 @@ jobs:
 
         print "All modules passed structure validation\n";
         '
+
+    - name: Test SXM Proxy
+      run: |
+        perl -I "lms-server" -I "lms-server/CPAN" -I "lms-server/lib" Plugins/SiriusXM/Bin/sxm.pl --help
+        echo "✓ sxm.pl starts"
 
     - name: Validate directory structure
       run: |
@@ -125,7 +119,7 @@ jobs:
       run: |
         # Test that the new simplified menu structure is implemented
         echo "Checking for simplified menu structure..."
-        
+
         # Check that handleFeed is replaced with toplevelMenu
         if grep -q "toplevelMenu" Plugins/SiriusXM/Plugin.pm; then
           echo "✓ toplevelMenu function found"
@@ -133,7 +127,7 @@ jobs:
           echo "✗ toplevelMenu function missing"
           exit 1
         fi
-        
+
         # Check that HLS validation is present
         if grep -q "validateHLSSupport" Plugins/SiriusXM/Plugin.pm; then
           echo "✓ HLS validation function found"
@@ -141,7 +135,7 @@ jobs:
           echo "✗ HLS validation function missing"
           exit 1
         fi
-        
+
         # Check that search functionality is present
         if grep -q "searchMenu" Plugins/SiriusXM/Plugin.pm; then
           echo "✓ Search menu function found"
@@ -149,7 +143,7 @@ jobs:
           echo "✗ Search menu function missing"
           exit 1
         fi
-        
+
         # Check that browse by genre is present
         if grep -q "browseByGenre" Plugins/SiriusXM/Plugin.pm; then
           echo "✓ Browse by genre function found"
@@ -157,5 +151,5 @@ jobs:
           echo "✗ Browse by genre function missing"
           exit 1
         fi
-        
+
         echo "Menu system validation passed"
