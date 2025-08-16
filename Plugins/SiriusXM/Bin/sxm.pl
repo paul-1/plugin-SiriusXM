@@ -15,8 +15,8 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
-        --logfile FILE          Log file location (default: <lyrion log folder>/sxmproxy.log)
-        --lmsroot DIR           Specify LMS root directory (auto-detected if not provided)
+        --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
+        --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
         -h, --help              Show this help message
 
 =head1 DESCRIPTION
@@ -70,11 +70,33 @@ our $BUILDDATE   = undef;
 use Slim::bootstrap;
 use Slim::Utils::OSDetect;
 
+# This should only be needed in testing environment, since LMS normally calls with full @INC.
+my $libpath;  #This gets set to the LMS root directory for bootstrap.
+
+BEGIN {
+    # Early parsing for bootstrap-critical arguments like --lmsroot
+    # We need to parse this before LMS bootstrap to set up @INC properly
+    my $early_lmsroot;
+    
+    # Simple early parsing just for --lmsroot (before full GetOptions)
+    for my $i (0..$#ARGV) {
+        if ($ARGV[$i] eq '--lmsroot' && $i < $#ARGV) {
+            $early_lmsroot = $ARGV[$i + 1];
+            last;
+        } elsif ($ARGV[$i] =~ /^--lmsroot=(.+)$/) {
+            $early_lmsroot = $1;
+            last;
+        }
+    }
+    $libpath = $early_lmsroot;
+}    
+
 # Bootstrap must be in a separate BEGIN block after the modules are useable
 BEGIN {
 
     # Load essential modules for logging system to work, but more importantly, set the @INC.
-    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl JSON::XS)], []);
+    Slim::bootstrap->loadModules([qw(version Time::HiRes Log::Log4perl JSON::XS)], [], $libpath);
+
 };
 
 # End of LMS Bootstrap code.
@@ -134,7 +156,7 @@ my %CONFIG = (
     verbose      => LOG_INFO,
     help         => 0,
     quality      => 'High',
-    logfile      => '/var/log/sxmproxy.log',
+    logfile      => '/var/log/sxm-proxy.log',
 );
 
 # Global state

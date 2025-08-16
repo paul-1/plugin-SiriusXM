@@ -12,13 +12,12 @@ Run these commands in sequence - NEVER CANCEL any of them:
 ```bash
 # Install system dependencies - takes 8-15 seconds
 sudo apt-get update  # NEVER CANCEL: Takes 8-15 seconds
-sudo apt-get install -y libxml2-utils libwww-perl libjson-xs-perl libhttp-message-perl cpanminus  # NEVER CANCEL: Takes 12-15 seconds
+sudo apt-get install -y libxml2-utils perl # NEVER CANCEL: Takes 12-15 seconds
 
 # Clone LMS server for testing - takes 15 seconds  
-git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server  # NEVER CANCEL: Takes 15 seconds
+export LMSROOT="$(pwd)/lms-server"
+git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git $LMSROOT  # NEVER CANCEL: Takes 15 seconds
 
-# Set up Perl environment for validation
-export PERL5LIB=$(pwd)/lms-server/CPAN/arch:$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB
 ```
 
 ### Validation Suite - Run Before Any Changes
@@ -89,6 +88,12 @@ echo "✓ Menu system validation passed"
 
 echo "=== ALL VALIDATION COMPLETE ==="
 '
+
+# 7. Test SXM Proxy
+perl -I$LMSROOT Plugins/SiriusXM/Bin/sxm.pl --lmsroot $LMSROOT d_startup --help 2>&1 | tee output.txt
+grep -q "Show this help message" || exit 1
+echo "✓ SXM Proxy start validation passed"
+
 ```
 
 ### Plugin Packaging
