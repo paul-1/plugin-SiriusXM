@@ -23,9 +23,6 @@ jobs:
         # Clone LMS server repository to get actual modules
         git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server
 
-        # Set up PERL5LIB to include LMS modules
-        echo "PERL5LIB=$(pwd)/lms-server:$(pwd)/lms-server/CPAN:$PERL5LIB" >> $GITHUB_ENV
-
     - name: Validate XML files
       run: |
         # Install xmllint for validation
@@ -79,8 +76,13 @@ jobs:
 
     - name: Test SXM Proxy
       run: |
-        perl -I "lms-server" -I "lms-server/CPAN" -I "lms-server/lib" Plugins/SiriusXM/Bin/sxm.pl --help
-        echo "✓ sxm.pl starts"
+        perl -I "lms-server" -I "lms-server/CPAN" -I "lms-server/lib" Plugins/SiriusXM/Bin/sxm.pl --lmsroot lms-server --help
+        if [ $? -eq 0 ] then
+          echo "✓ sxm.pl starts"
+        else
+          echo "✗ sxm.pl fails to start"
+          exit 1
+        fi
 
     - name: Validate directory structure
       run: |
