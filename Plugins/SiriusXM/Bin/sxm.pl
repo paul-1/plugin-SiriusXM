@@ -350,7 +350,6 @@ sub set_channel_context {
     
     main::log_trace("Set cookie context for channel: " . ($channel_id || 'global'));
 }
-}
 
 sub is_logged_in {
     my ($self, $channel_id) = @_;
