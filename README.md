@@ -2,24 +2,27 @@
 
 A plugin for streaming SiriusXM satellite radio through Lyrion Media Server using the SiriusXM-Perl helper application.
 
+**Note:** This uses an unofficial API.  SiriusXM does not publish API information.  It may stop working at anytime.  Please do not abuse the service.
+
 ## Requirements
 
 - Lyrion Media Server 8.3 or higher
 - SiriusXM subscription
-- PlayHLS v1.1 (With ffmpeg install in the OS)
+- PlayHLS v1.1 (With ffmpeg installed in the OS)
 - SiriusXM Proxy Server (Included from https://github.com/paul-1/SiriusXM-Perl)
 
 ## Installation
 
 1. Download the plugin from the Lyrion Media Server plugin repository or install manually
 2. Add https://github.com/paul-1/plugin-SiriusXM/releases/latest/download/repo.xml at the bottom of the plugin manager.
-3. Configure your SiriusXM credentials in the plugin settings
+3. Configure your SiriusXM credentials in the plugin settings.
+4. Adjust configuration settings as desired.
 
 ### Plugin Settings
 
 Access the plugin settings through:
 1. Lyrion Media Server web interface
-2. Settings → Plugins → SiriusXM
+2. Settings → Advanced → SiriusXM Settings
 
 Configure the following:
 - **Username**: Your SiriusXM username or email address
@@ -50,6 +53,7 @@ Once configured:
 - Check your SiriusXM username and password
 - Verify your SiriusXM subscription is active
 - Ensure the helper application can connect to SiriusXM servers
+- Check log <Lyrion Log Folder>sxm-proxy.log
 
 **"No channels available"**
 - Restart the plugin or Lyrion Media Server
