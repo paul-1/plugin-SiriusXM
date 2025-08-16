@@ -21,7 +21,7 @@ jobs:
     - name: Clone LMS Server Repository for Testing
       run: |
         # Clone LMS server repository to get actual modules
-        git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git lms-server
+        git clone --depth 1 --branch public/9.0 https://github.com/LMS-Community/slimserver.git /home/runner/lms-server
 
     - name: Validate XML files
       run: |
@@ -45,9 +45,9 @@ jobs:
         use warnings;
 
         # Add LMS modules to path
-        unshift @INC, "lms-server";
-        unshift @INC, "lms-server/CPAN";
-        unshift @INC, "lms-server/lib";
+        unshift @INC, "/home/runner/lms-server";
+        unshift @INC, "/home/runner/lms-server/CPAN";
+        unshift @INC, "/home/runner/lms-server/lib";
 
         # Check that all Perl modules have proper package declarations
         my @modules = glob("Plugins/SiriusXM/*.pm");
@@ -75,12 +75,14 @@ jobs:
         '
 
     - name: Test SXM Proxy
+      id: sxmproxy
       run: |
-        perl -I "lms-server" -I "lms-server/CPAN" -I "lms-server/lib" Plugins/SiriusXM/Bin/sxm.pl --lmsroot lms-server --help
-        if [ $? -eq 0 ] then
-          echo "✓ sxm.pl starts"
+        unset PERL5LIB; perl -I/home/runner/lms-server Plugins/SiriusXM/Bin/sxm.pl --lmsroot /home/runner/lms-server d_startup --help 2>&1 | tee output.txt
+
+        if grep -q "Show this help message" output.txt; then
+          echo "✓ sxm proxy started ok"
         else
-          echo "✗ sxm.pl fails to start"
+          echo "✗ sxm Proxy Error"
           exit 1
         fi
 
