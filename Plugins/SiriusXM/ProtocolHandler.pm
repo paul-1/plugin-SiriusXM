@@ -25,8 +25,6 @@ my $prefs = preferences('plugin.siriusxm');
 
 # Metadata update intervals
 use constant METADATA_UPDATE_INTERVAL => 25;      # Default interval when no track timing
-use constant TRACK_TRANSITION_INTERVAL => 15;    # Faster polling when waiting for new track
-use constant MIN_UPDATE_INTERVAL => 5;           # Minimum time between updates
 
 # Global hash to track player metadata timers and states
 my %playerStates = ();
@@ -299,10 +297,8 @@ sub _updateClientMetadata {
     my $metadata_is_fresh = $result->{is_fresh};
     
     # Check if we should show channel metadata instead of track metadata
-    my $should_show_channel_info = __PACKAGE__->_shouldShowChannelInfo($client);
-    
-    if ($should_show_channel_info && (!$new_meta || !keys %$new_meta)) {
-        $log->debug("Track is past duration, showing channel info for client $clientId");
+    if (!$new_meta || !keys %$new_meta) {
+        $log->debug("No track metadata available, showing channel info for client $clientId");
         
         # Use channel info as metadata
         if ($state->{channel_info}) {
@@ -357,31 +353,7 @@ sub _updateClientMetadata {
     }
 }
 
-# Determine if we should show channel info instead of track info
-sub _shouldShowChannelInfo {
-    my ($class, $client) = @_;
-    
-    return 0 unless $client;
-    
-    my $song = $client->playingSong();
-    return 0 unless $song;
-    
-    my $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
-    return 0 unless $xmplaylist_meta;
-    
-    # Check if we have duration and timing info
-    my $duration = $xmplaylist_meta->{duration};
-    return 0 unless defined $duration && $duration > 0;
-    
-    my $blockData = __PACKAGE__->getBlockData($song);
-    return 0 unless $blockData && $blockData->{track_start_time};
-    
-    # Calculate elapsed time
-    my $elapsed = time() - $blockData->{track_start_time};
-    
-    # Show channel info if track elapsed > duration
-    return $elapsed > $duration;
-}
+
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs
 sub getFormatForURL {
@@ -547,9 +519,9 @@ sub getMetadataFor {
             Slim::Music::Info::setDuration($song->track, $meta->{duration}) if $song;
         }
         
-        # Handle track timing using RadioParadise pattern
+        # Store track timing info for metadata refresh calculations only
         if ($xmplaylist_meta->{track_timestamp}) {
-            # Store track start time info in block data like RadioParadise
+            # Store track start time info in block data for timer calculations
             my $blockData = __PACKAGE__->getBlockData($song) || {};
             
             # Parse timestamp and set start time
@@ -557,16 +529,9 @@ sub getMetadataFor {
                 my $track_start_time = str2time($xmplaylist_meta->{track_timestamp});
                 if (defined $track_start_time) {
                     $blockData->{track_start_time} = $track_start_time;
-                    $blockData->{startPlaybackTime} = time(); # When we started displaying this track
                     $blockData->{xmplaylist_id} = $xmplaylist_meta->{xmplaylist_id} if $xmplaylist_meta->{xmplaylist_id};
                     
                     __PACKAGE__->setBlockData($song, $blockData);
-                    
-                    my $elapsed = time() - $track_start_time;
-                    if ($elapsed >= 0) {
-                        $log->debug("Track elapsed time: ${elapsed}s" . 
-                                  (defined $meta->{duration} ? " of " . $meta->{duration} . "s" : ""));
-                    }
                 }
             };
             
@@ -710,6 +675,7 @@ sub _calculateTrackElapsed {
 }
 
 # Calculate next update interval based on track timing
+# Formula: MusicBrainz Duration - Current Time - xmplaylist Start time - 30 or 15s whichever is greater
 sub _calculateNextUpdateInterval {
     my ($class, $client) = @_;
     
@@ -726,42 +692,24 @@ sub _calculateNextUpdateInterval {
     my $blockData = __PACKAGE__->getBlockData($song);
     return METADATA_UPDATE_INTERVAL unless $blockData && $blockData->{track_start_time};
     
-    # Calculate current elapsed time
-    my $current_time = time();
-    my $elapsed = $current_time - $blockData->{track_start_time};
-    
     # Get track duration if available
     my $duration = $xmplaylist_meta->{duration};
+    return METADATA_UPDATE_INTERVAL unless defined $duration && $duration > 0;
     
-    if (defined $duration && $duration > 0) {
-        # When track elapsed time > track duration, poll frequently for new track
-        if ($elapsed > $duration) {
-            $log->debug("Track elapsed (${elapsed}s) > duration (${duration}s), using fast polling for new track");
-            return TRACK_TRANSITION_INTERVAL;
-        }
-        
-        # Calculate time remaining in track
-        my $remaining = $duration - $elapsed;
-        
-        # If track is almost over (less than 30 seconds), poll more frequently
-        if ($remaining <= 30 && $remaining > 0) {
-            my $nextInterval = int($remaining / 2); # Poll at half the remaining time
-            $nextInterval = MIN_UPDATE_INTERVAL if $nextInterval < MIN_UPDATE_INTERVAL;
-            $log->debug("Track ending soon (${remaining}s remaining), using interval: ${nextInterval}s");
-            return $nextInterval;
-        }
-        
-        # Normal case: use standard interval but don't exceed time to track end
-        my $nextInterval = METADATA_UPDATE_INTERVAL;
-        if ($remaining < $nextInterval) {
-            $nextInterval = int($remaining) if $remaining > MIN_UPDATE_INTERVAL;
-        }
-        
-        return $nextInterval;
+    # Calculate using formula: Duration - (Current Time - Start Time) - 30
+    my $current_time = time();
+    my $elapsed = $current_time - $blockData->{track_start_time};
+    my $remaining = $duration - $elapsed;
+    my $nextInterval = $remaining - 30;
+    
+    # Use 15s as minimum interval
+    if ($nextInterval < 15) {
+        $nextInterval = 15;
     }
     
-    # No duration info, use default interval
-    return METADATA_UPDATE_INTERVAL;
+    $log->debug("Timer calculation: duration=${duration}s, elapsed=${elapsed}s, remaining=${remaining}s, interval=${nextInterval}s");
+    
+    return $nextInterval;
 }
 
 1;
