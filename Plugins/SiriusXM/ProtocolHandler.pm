@@ -681,4 +681,33 @@ sub _calculateNextUpdateInterval {
     return $nextInterval;
 }
 
+# Reschedule metadata timer when duration becomes available
+sub _rescheduleMetadataTimer {
+    my ($class, $client) = @_;
+    
+    return unless $client;
+    
+    my $clientId = $client->id();
+    
+    # Only reschedule if we have an active player state
+    if (exists $playerStates{$clientId}) {
+        # Cancel existing timer
+        if ($playerStates{$clientId}->{timer}) {
+            Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+        }
+        
+        # Calculate new interval with fresh duration data
+        my $nextInterval = $class->_calculateNextUpdateInterval($client);
+        
+        # Schedule new timer
+        $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
+            $client,
+            time() + $nextInterval,
+            \&_onMetadataTimer
+        );
+        
+        $log->debug("Rescheduled metadata timer with duration data in ${nextInterval}s for client $clientId");
+    }
+}
+
 1;

@@ -16,6 +16,9 @@ use Plugins::SiriusXM::MusicBrainzAPI;
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 
+# Track ongoing duration lookups to prevent duplicates
+my %lookupInProgress = ();
+
 use constant METADATA_STALE_TIME => 230;
 
 # xmplaylists.com API JSON Schema:
@@ -224,6 +227,21 @@ sub _processResponse {
             $new_meta->{icon} = $channel_info->{icon};
             $new_meta->{album} = 'SiriusXM';
             $new_meta->{bitrate} = '';
+            
+            # Preserve timing information from previous track for timer calculation
+            # This ensures we can continue to use optimal timer intervals
+            if ($client) {
+                my $song = $client->playingSong();
+                if ($song) {
+                    my $prev_meta = $song->pluginData('xmplaylist_meta');
+                    if ($prev_meta && $prev_meta->{track_timestamp} && $prev_meta->{duration}) {
+                        $new_meta->{track_timestamp} = $prev_meta->{track_timestamp};
+                        $new_meta->{duration} = $prev_meta->{duration};
+                        $new_meta->{xmplaylist_id} = $prev_meta->{xmplaylist_id};
+                        $log->debug("Preserved timing info for channel display: duration=" . $prev_meta->{duration} . "s");
+                    }
+                }
+            }
         }
     }
 
@@ -242,6 +260,15 @@ sub _lookupTrackDuration {
     my ($class, $xmplaylist_id, $title, $artist, $client, $callback) = @_;
     
     return unless $xmplaylist_id && $title && $artist;
+    
+    # Create lookup key to prevent duplicates
+    my $lookup_key = "$xmplaylist_id:$title:$artist";
+    
+    # Check if lookup is already in progress
+    if ($lookupInProgress{$lookup_key}) {
+        $log->debug("Duration lookup already in progress for: $title by $artist (ID: $xmplaylist_id)");
+        return;
+    }
     
     # First check database cache by ID
     my $cached_duration = Plugins::SiriusXM::TrackDurationDB->getDuration($xmplaylist_id);
@@ -265,11 +292,17 @@ sub _lookupTrackDuration {
         return;
     }
     
+    # Mark lookup as in progress
+    $lookupInProgress{$lookup_key} = 1;
+    
     # Fallback to MusicBrainz API search only if not in database
     $log->debug("Looking up duration for: $title by $artist (ID: $xmplaylist_id)");
     
     Plugins::SiriusXM::MusicBrainzAPI->searchTrackDuration($title, $artist, sub {
         my ($duration, $score) = @_;
+        
+        # Clear lookup progress flag
+        delete $lookupInProgress{$lookup_key};
         
         if (defined $duration && $score) {
             # Store in database for future use
@@ -303,6 +336,12 @@ sub _updateCurrentSongDuration {
         $current_meta->{secs} = $duration;
         $song->pluginData('xmplaylist_meta', $current_meta);
         $log->debug("Updated current song metadata with duration: ${duration}s");
+        
+        # Recalculate and reschedule timer with new duration information
+        # Import ProtocolHandler to call timer recalculation
+        require Plugins::SiriusXM::ProtocolHandler;
+        Plugins::SiriusXM::ProtocolHandler->_rescheduleMetadataTimer($client);
     }
+}
 
 1;
