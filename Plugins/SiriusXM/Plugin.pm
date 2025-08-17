@@ -143,15 +143,21 @@ sub toplevelMenu {
     # Build simplified top-level menu structure
     my @menu_items = (
         {
-            name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
-            type => 'search',
-            url  => \&searchMenu,
+            name => string('PLUGIN_SIRIUSXM_MENU_BROWSE_BY_CHANNEL'),
+            type => 'opml',
+            url  => \&browseByChannel,
             icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
         },
         {
             name => string('PLUGIN_SIRIUSXM_MENU_BROWSE_BY_GENRE'),
             type => 'opml',
             url  => \&browseByGenre,
+            icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+        },
+        {
+            name => string('PLUGIN_SIRIUSXM_MENU_SEARCH'),
+            type => 'search',
+            url  => \&searchMenu,
             icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
         }
     );
@@ -196,6 +202,31 @@ sub searchMenu {
         
         $cb->({
             items => $results
+        });
+    });
+}
+
+sub browseByChannel {
+    my ($client, $cb, $args) = @_;
+    
+    $log->debug("Browse by channel number menu");
+    
+    # Get channels sorted by channel number from API
+    Plugins::SiriusXM::API->getChannelsSortedByNumber($client, sub {
+        my $channel_items = shift;
+        
+        if (!$channel_items || !@$channel_items) {
+            $cb->({
+                items => [{
+                    name => string('PLUGIN_SIRIUSXM_ERROR_LOGIN_FAILED'),
+                    type => 'text',
+                }]
+            });
+            return;
+        }
+        
+        $cb->({
+            items => $channel_items
         });
     });
 }
