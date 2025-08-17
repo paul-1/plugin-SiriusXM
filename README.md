@@ -30,7 +30,10 @@ Configure the following:
 - **Port**: The system port to use for the Proxy (default:9999)
 - **Audio Quality**: Select preferred streaming quality (Low/Medium/High)
 - **Region**: United States or Canada (Default:US)
-- **Metadata**: This is polled from a 3rd party un-official SXM track information site. Data often lags playback.
+- **Metadata**: Enable enhanced track information from unofficial sources
+  - Shows track titles, artists, and album artwork
+  - Includes track duration and progress timing when available
+  - Data may lag behind live playback by a few seconds
 
 ## Usage
 
@@ -44,6 +47,10 @@ Once configured:
 - Stream live SiriusXM channels
 - Browse channel categories and favorites
 - Integration with Lyrion Media Server interface
+- **Track duration metadata**: Automatically fetches and displays track durations using MusicBrainz database
+  - Caches duration information for improved performance
+  - Shows track progress and remaining time
+  - Only uses high-confidence matches (75%+ score from MusicBrainz)
 
 ## Troubleshooting
 
