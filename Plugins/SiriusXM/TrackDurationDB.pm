@@ -18,9 +18,9 @@ my $dbh;
 sub init {
     my $class = shift;
     
-    # Get the LMS preferences directory for database storage
-    my $prefsDir = Slim::Utils::OSDetect::dirsFor('prefs');
-    my $dbFile = catdir($prefsDir, 'plugin', 'siriusxm_durations.db');
+    # Get the LMS cache directory for database storage
+    my $cacheDir = Slim::Utils::OSDetect::dirsFor('cache');
+    my $dbFile = catdir($cacheDir, 'siriusxm_durations.db');
     
     # Ensure directory exists
     my $dbDir = (File::Spec->splitpath($dbFile))[1];
@@ -30,7 +30,7 @@ sub init {
             File::Path::make_path($dbDir);
         };
         if ($@) {
-            $log->error("Failed to create database directory $dbDir: $@");
+            $log->error("Failed to create cache directory $dbDir: $@");
             return;
         }
     }

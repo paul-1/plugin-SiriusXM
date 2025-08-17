@@ -244,15 +244,26 @@ sub _lookupTrackDuration {
     
     return unless $xmplaylist_id && $title && $artist;
     
-    # First check database cache
+    # First check database cache by ID
     my $cached_duration = Plugins::SiriusXM::TrackDurationDB->getDuration($xmplaylist_id);
     if (defined $cached_duration) {
         $callback->($cached_duration) if $callback;
         return;
     }
     
-    # Fallback to MusicBrainz API search
-    $log->debug("Looking up duration for: $title by $artist");
+    # Also check by title/artist to avoid duplicate API calls for same track with different IDs
+    $cached_duration = Plugins::SiriusXM::TrackDurationDB->findDurationByTrack($title, $artist);
+    if (defined $cached_duration) {
+        # Store this ID mapping for future use
+        Plugins::SiriusXM::TrackDurationDB->storeDuration(
+            $xmplaylist_id, $title, $artist, $cached_duration, 0  # Score 0 indicates from cache
+        );
+        $callback->($cached_duration) if $callback;
+        return;
+    }
+    
+    # Fallback to MusicBrainz API search only if not in database
+    $log->debug("Looking up duration for: $title by $artist (ID: $xmplaylist_id)");
     
     Plugins::SiriusXM::MusicBrainzAPI->searchTrackDuration($title, $artist, sub {
         my ($duration, $score) = @_;

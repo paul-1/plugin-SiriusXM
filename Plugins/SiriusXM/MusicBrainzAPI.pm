@@ -76,9 +76,10 @@ sub _processResponse {
         return;
     }
     
-    # Find the best match based on score
+    # Find the best match based on score and release date
     my $best_match;
     my $best_score = 0;
+    my $best_release_date;
     
     foreach my $recording (@$recordings) {
         my $score = $recording->{score} || 0;
@@ -94,14 +95,26 @@ sub _processResponse {
         my $duration_seconds = int($length / 1000);
         next if $duration_seconds <= 0;
         
-        # Update best match if score is higher
-        if ($score > $best_score) {
+        # Get earliest release date
+        my $release_date = _getEarliestReleaseDate($recording);
+        
+        # Update best match if score is higher, or if score is equal and this has an older release date
+        my $is_better = ($score > $best_score);
+        if ($score == $best_score && defined $release_date && defined $best_release_date) {
+            $is_better = ($release_date lt $best_release_date);
+        } elsif ($score == $best_score && defined $release_date && !defined $best_release_date) {
+            $is_better = 1;
+        }
+        
+        if ($is_better) {
             $best_score = $score;
+            $best_release_date = $release_date;
             $best_match = {
                 duration => $duration_seconds,
                 score => $score,
                 title => $recording->{title},
                 length_ms => $length,
+                release_date => $release_date,
             };
         }
     }
@@ -131,6 +144,33 @@ sub _cleanSearchTerm {
     $term =~ s/\s+/ /g;             # Normalize whitespace
     
     return $term;
+}
+
+# Get the earliest release date from a recording's releases
+sub _getEarliestReleaseDate {
+    my $recording = shift;
+    
+    my $releases = $recording->{releases};
+    return unless $releases && @$releases;
+    
+    my $earliest_date;
+    
+    foreach my $release (@$releases) {
+        my $date = $release->{'first-release-date'} || $release->{date};
+        next unless $date;
+        
+        # Normalize date format (handle partial dates like "1975" or "1975-06")
+        if ($date =~ /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/) {
+            my ($year, $month, $day) = ($1, $2 || '01', $3 || '01');
+            $date = sprintf("%04d-%02d-%02d", $year, $month, $day);
+        }
+        
+        if (!defined $earliest_date || $date lt $earliest_date) {
+            $earliest_date = $date;
+        }
+    }
+    
+    return $earliest_date;
 }
 
 1;

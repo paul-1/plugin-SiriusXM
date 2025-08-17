@@ -491,10 +491,14 @@ sub getMetadataFor {
         # Handle track timing if we have timestamp information
         if ($xmplaylist_meta->{track_timestamp}) {
             my $elapsed = $class->_calculateTrackElapsed($xmplaylist_meta->{track_timestamp});
-            if (defined $elapsed && $elapsed >= 0 && defined $meta->{duration}) {
-                # Store elapsed time in metadata for potential use by clients
-                # Don't force current position as this might interfere with LMS streaming
-                $meta->{track_elapsed} = $elapsed;
+            if (defined $elapsed && $elapsed >= 0 && defined $meta->{duration} && $song) {
+                # Use LMS block data to store track timing information properly
+                # This integrates with LMS's internal timing system
+                my $blockData = $song->getBlockData() || {};
+                $blockData->{track_start_time} = $xmplaylist_meta->{track_timestamp};
+                $blockData->{track_elapsed} = $elapsed;
+                $song->setBlockData($blockData);
+                
                 $log->debug("Track elapsed time: ${elapsed}s of " . $meta->{duration} . "s");
             }
         }
