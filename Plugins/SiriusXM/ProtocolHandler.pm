@@ -519,26 +519,7 @@ sub getMetadataFor {
             Slim::Music::Info::setDuration($song->track, $meta->{duration}) if $song;
         }
         
-        # Store track timing info for metadata refresh calculations only
-        if ($xmplaylist_meta->{track_timestamp}) {
-            # Store track start time info in block data for timer calculations
-            my $blockData = __PACKAGE__->getBlockData($song) || {};
-            
-            # Parse timestamp and set start time
-            eval {
-                my $track_start_time = str2time($xmplaylist_meta->{track_timestamp});
-                if (defined $track_start_time) {
-                    $blockData->{track_start_time} = $track_start_time;
-                    $blockData->{xmplaylist_id} = $xmplaylist_meta->{xmplaylist_id} if $xmplaylist_meta->{xmplaylist_id};
-                    
-                    __PACKAGE__->setBlockData($song, $blockData);
-                }
-            };
-            
-            if ($@) {
-                $log->warn("Failed to parse track timestamp: $@");
-            }
-        }
+
         
         #       Really noisy log message when using a LMS web.
         #        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
@@ -626,28 +607,7 @@ sub requestString {
     return $class->SUPER::requestString($client, $url, $maxRedirects);
 }
 
-# Block data management (following RadioParadise pattern)
-sub getBlockData {
-    my ($class, $song) = @_;
-    return unless $song;
-    
-    my $url = $song->streamUrl() || return;
-    return $playerStates{_cleanupBlockURL($url)};
-}
 
-sub setBlockData {
-    my ($class, $song, $data) = @_;
-    return unless $song && $data;
-    
-    my $url = $song->streamUrl() || return;
-    $playerStates{_cleanupBlockURL($url)} = $data;
-}
-
-sub _cleanupBlockURL {
-    my $url = shift || '';
-    $url =~ s/\?.*//;
-    return $url;
-}
 
 # Calculate elapsed time for a track based on its start timestamp
 sub _calculateTrackElapsed {
@@ -688,17 +648,26 @@ sub _calculateNextUpdateInterval {
     my $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
     return METADATA_UPDATE_INTERVAL unless $xmplaylist_meta;
     
-    # Get block data to check track timing
-    my $blockData = __PACKAGE__->getBlockData($song);
-    return METADATA_UPDATE_INTERVAL unless $blockData && $blockData->{track_start_time};
-    
-    # Get track duration if available
+    # Get track duration and timestamp if available
     my $duration = $xmplaylist_meta->{duration};
-    return METADATA_UPDATE_INTERVAL unless defined $duration && $duration > 0;
+    my $timestamp = $xmplaylist_meta->{track_timestamp};
+    
+    return METADATA_UPDATE_INTERVAL unless defined $duration && $duration > 0 && $timestamp;
+    
+    # Parse the track start time from xmplaylist timestamp
+    my $track_start_time;
+    eval {
+        $track_start_time = str2time($timestamp);
+    };
+    
+    if ($@ || !defined $track_start_time) {
+        $log->debug("Failed to parse track timestamp '$timestamp', using default interval");
+        return METADATA_UPDATE_INTERVAL;
+    }
     
     # Calculate using formula: Duration - (Current Time - Start Time) - 30
     my $current_time = time();
-    my $elapsed = $current_time - $blockData->{track_start_time};
+    my $elapsed = $current_time - $track_start_time;
     my $remaining = $duration - $elapsed;
     my $nextInterval = $remaining - 30;
     
