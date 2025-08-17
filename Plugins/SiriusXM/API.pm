@@ -39,6 +39,162 @@ sub invalidateChannelCache {
     $cache->remove('siriusxm_channel_info');
 }
 
+=begin comment
+
+Schema for json returned from getChannels
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Channel",
+  "type": "object",
+  "properties": {
+    "adBreakDuration": {
+      "type": "string"
+    },
+    "adRepEnabled": {
+      "type": "boolean"
+    },
+    "aodShowCount": {
+      "type": "integer"
+    },
+    "categories": {
+      "type": "object",
+      "properties": {
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "categoryGuid": { "type": "string" },
+              "isPrimary": { "type": "boolean" },
+              "key": { "type": "string" },
+              "name": { "type": "string" },
+              "order": { "type": "integer" },
+              "shortName": { "type": "string" }
+            },
+            "required": [
+              "categoryGuid",
+              "isPrimary",
+              "key",
+              "name",
+              "order",
+              "shortName"
+            ]
+          }
+        }
+      },
+      "required": ["categories"]
+    },
+    "channelContentType": { "type": "string" },
+    "channelGuid": { "type": "string" },
+    "channelId": { "type": "string" },
+    "channelNumber": { "type": "string" },
+    "clientBufferDuration": { "type": "integer" },
+    "darkBackgroundColor": { "type": "string" },
+    "disableRecommendations": { "type": "boolean" },
+    "esid": { "type": "string" },
+    "fastEnabled": { "type": "boolean" },
+    "geoRestrictions": { "type": "string" },
+    "images": {
+      "type": "object",
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "height": { "type": "integer" },
+              "name": { "type": "string" },
+              "relativeUrl": { "type": "string" },
+              "url": { "type": "string" },
+              "width": { "type": "integer" },
+              "satId": { "type": "integer" },
+              "satVersion": { "type": "integer" }
+            },
+            "required": [
+              "height",
+              "name",
+              "relativeUrl",
+              "url",
+              "width"
+            ]
+          }
+        }
+      },
+      "required": ["images"]
+    },
+    "inactivityTimeout": { "type": "integer" },
+    "ipOnly": { "type": "boolean" },
+    "isAvailable": { "type": "boolean" },
+    "isBizMature": { "type": "boolean" },
+    "isFavorite": { "type": "boolean" },
+    "isMature": { "type": "boolean" },
+    "isMySxm": { "type": "boolean" },
+    "isPersonalized": { "type": "boolean" },
+    "isPlayByPlay": { "type": "boolean" },
+    "lightBackgroundColor": { "type": "string" },
+    "liveVideoEligible": { "type": "boolean" },
+    "mediumDescription": { "type": "string" },
+    "name": { "type": "string" },
+    "pivotEnabled": { "type": "boolean" },
+    "satOnly": { "type": "boolean" },
+    "shortDescription": { "type": "string" },
+    "shortName": { "type": "string" },
+    "siriusChannelNumber": { "type": "string" },
+    "sortOrder": { "type": "integer" },
+    "spanishContent": { "type": "boolean" },
+    "streamingName": { "type": "string" },
+    "subscribed": { "type": "boolean" },
+    "url": { "type": "string" },
+    "xmChannelNumber": { "type": "string" },
+    "xmServiceId": { "type": "string" }
+  },
+  "required": [
+    "adBreakDuration",
+    "adRepEnabled",
+    "aodShowCount",
+    "categories",
+    "channelContentType",
+    "channelGuid",
+    "channelId",
+    "channelNumber",
+    "clientBufferDuration",
+    "darkBackgroundColor",
+    "disableRecommendations",
+    "esid",
+    "fastEnabled",
+    "geoRestrictions",
+    "images",
+    "inactivityTimeout",
+    "ipOnly",
+    "isAvailable",
+    "isBizMature",
+    "isFavorite",
+    "isMature",
+    "isMySxm",
+    "isPersonalized",
+    "isPlayByPlay",
+    "lightBackgroundColor",
+    "liveVideoEligible",
+    "mediumDescription",
+    "name",
+    "pivotEnabled",
+    "satOnly",
+    "shortDescription",
+    "shortName",
+    "siriusChannelNumber",
+    "sortOrder",
+    "spanishContent",
+    "streamingName",
+    "subscribed",
+    "url",
+    "xmChannelNumber",
+    "xmServiceId"
+  ]
+}
+=end comment
+
+=cut
+
 sub getChannels {
     my ($class, $client, $cb) = @_;
     
