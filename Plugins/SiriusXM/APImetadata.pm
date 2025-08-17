@@ -163,10 +163,9 @@ sub _processResponse {
                     $track_info->{artists};
         
         # Start async duration lookup and continue with metadata building
-        $class->_lookupTrackDuration($xmplaylist_id, $title, $artist, sub {
+        $class->_lookupTrackDuration($xmplaylist_id, $title, $artist, $client, sub {
             my ($duration) = @_;
-            # Duration will be stored in database, but we don't wait for it
-            # to complete the current metadata response
+            # Duration handling is done within _lookupTrackDuration
         });
     }
     
@@ -240,13 +239,15 @@ sub _processResponse {
 
 # Lookup track duration with database cache and MusicBrainz fallback
 sub _lookupTrackDuration {
-    my ($class, $xmplaylist_id, $title, $artist, $callback) = @_;
+    my ($class, $xmplaylist_id, $title, $artist, $client, $callback) = @_;
     
     return unless $xmplaylist_id && $title && $artist;
     
     # First check database cache by ID
     my $cached_duration = Plugins::SiriusXM::TrackDurationDB->getDuration($xmplaylist_id);
     if (defined $cached_duration) {
+        # Update current song metadata if client is available
+        $class->_updateCurrentSongDuration($client, $cached_duration) if $client;
         $callback->($cached_duration) if $callback;
         return;
     }
@@ -258,6 +259,8 @@ sub _lookupTrackDuration {
         Plugins::SiriusXM::TrackDurationDB->storeDuration(
             $xmplaylist_id, $title, $artist, $cached_duration, 0  # Score 0 indicates from cache
         );
+        # Update current song metadata if client is available
+        $class->_updateCurrentSongDuration($client, $cached_duration) if $client;
         $callback->($cached_duration) if $callback;
         return;
     }
@@ -275,6 +278,10 @@ sub _lookupTrackDuration {
             );
             
             $log->info("Found and cached duration for '$title' by '$artist': ${duration}s (score: $score%)");
+            
+            # Update current song metadata if client is still available
+            $class->_updateCurrentSongDuration($client, $duration) if $client;
+            
             $callback->($duration) if $callback;
         } else {
             $log->debug("No suitable duration found for: $title by $artist");
@@ -282,5 +289,20 @@ sub _lookupTrackDuration {
         }
     });
 }
+
+# Helper function to update current song's metadata with duration
+sub _updateCurrentSongDuration {
+    my ($class, $client, $duration) = @_;
+    
+    return unless $client && defined $duration && $duration > 0;
+    
+    my $song = $client->playingSong();
+    if ($song) {
+        my $current_meta = $song->pluginData('xmplaylist_meta') || {};
+        $current_meta->{duration} = $duration;
+        $current_meta->{secs} = $duration;
+        $song->pluginData('xmplaylist_meta', $current_meta);
+        $log->debug("Updated current song metadata with duration: ${duration}s");
+    }
 
 1;
