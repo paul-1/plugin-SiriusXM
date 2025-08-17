@@ -511,4 +511,81 @@ sub searchChannels {
     });
 }
 
+sub getChannelsSortedByNumber {
+    my ($class, $client, $cb) = @_;
+    
+    $log->debug("Getting channels sorted by channel number");
+    
+    # Check cache first
+    my $cached_channel_info = $cache->get('siriusxm_channel_info');
+    if ($cached_channel_info) {
+        $log->debug("Building channel list from cached data");
+        my $sorted_channels = $class->buildChannelNumberMenu($cached_channel_info);
+        $cb->($sorted_channels);
+        return;
+    }
+    
+    # If no cache, get fresh data from API
+    $class->getChannels($client, sub {
+        my $category_menu = shift;
+        
+        # Get the channel info from cache (which should be populated by getChannels)
+        my $channel_info = $cache->get('siriusxm_channel_info');
+        if ($channel_info) {
+            my $sorted_channels = $class->buildChannelNumberMenu($channel_info);
+            $cb->($sorted_channels);
+        } else {
+            $log->error("Failed to get channel info for number sorting");
+            $cb->([]);
+        }
+    });
+}
+
+sub buildChannelNumberMenu {
+    my ($class, $categories) = @_;
+    
+    my @all_channels = ();
+    
+    # Collect all channels from all categories
+    for my $category_name (keys %$categories) {
+        my $channels_in_category = $categories->{$category_name};
+        
+        for my $channel (@$channels_in_category) {
+            # Build sxm protocol URL
+            my $stream_url = "sxm:" . $channel->{id};
+            
+            # Format channel name: "Channel Name (siriusChannelNumber)"
+            my $display_name = $channel->{name};
+            if ($channel->{number}) {
+                $display_name .= " (" . $channel->{number} . ")";
+            }
+            
+            push @all_channels, {
+                name => $display_name,
+                type => 'audio',
+                url  => $stream_url,
+                icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+                on_select => 'play',
+                description => $channel->{description},
+                channel_number => $channel->{number},
+                sort_key => $channel->{number} || 9999, # For sorting
+            };
+        }
+    }
+    
+    # Sort all channels by channel number
+    my @sorted_channels = sort {
+        my $a_num = $a->{sort_key};
+        my $b_num = $b->{sort_key};
+        $a_num <=> $b_num;
+    } @all_channels;
+    
+    # Remove the sort_key as it's no longer needed
+    for my $channel (@sorted_channels) {
+        delete $channel->{sort_key};
+    }
+    
+    return \@sorted_channels;
+}
+
 1;
