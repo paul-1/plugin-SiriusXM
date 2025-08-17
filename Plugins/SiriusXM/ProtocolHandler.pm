@@ -17,6 +17,7 @@ use Date::Parse;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::APImetadata;
+use Plugins::SiriusXM::TrackDurationDB;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
@@ -478,9 +479,30 @@ sub getMetadataFor {
         $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
         $meta->{bitrate} = '';
         
-#       Really noisy log message when using a LMS web.
-#        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
-#                  " by " . ($meta->{artist} || 'Unknown Artist'));
+        # Add duration if available
+        if (defined $xmplaylist_meta->{duration}) {
+            $meta->{duration} = $xmplaylist_meta->{duration};
+            $meta->{secs} = $xmplaylist_meta->{duration};
+            
+            # Set track duration for LMS
+            Slim::Music::Info::setDuration($song->track, $meta->{duration}) if $song;
+        }
+        
+        # Handle track timing if we have timestamp information
+        if ($xmplaylist_meta->{track_timestamp}) {
+            my $elapsed = $class->_calculateTrackElapsed($xmplaylist_meta->{track_timestamp});
+            if (defined $elapsed && $elapsed >= 0) {
+                # Only set elapsed time if we have a valid duration and elapsed time
+                if (defined $meta->{duration} && $elapsed < $meta->{duration}) {
+                    $song->track->set_current_position($elapsed) if $song;
+                    $log->debug("Set track elapsed time: ${elapsed}s of " . $meta->{duration} . "s");
+                }
+            }
+        }
+        
+        #       Really noisy log message when using a LMS web.
+        #        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
+        #                  " by " . ($meta->{artist} || 'Unknown Artist'));
     } elsif ($channel_info) {
         # Fall back to basic channel info when metadata is enabled
         $meta->{artist} = $channel_info->{name};
@@ -562,6 +584,31 @@ sub requestString {
     }
     
     return $class->SUPER::requestString($client, $url, $maxRedirects);
+}
+
+# Calculate elapsed time for a track based on its start timestamp
+sub _calculateTrackElapsed {
+    my ($class, $timestamp) = @_;
+    
+    return unless $timestamp;
+    
+    eval {
+        # Parse the UTC timestamp format: 2025-08-09T15:57:41.586Z
+        my $track_start_time = str2time($timestamp);
+        return unless defined $track_start_time;
+        
+        my $current_time = time();
+        my $elapsed = $current_time - $track_start_time;
+        
+        # Only return positive elapsed times (track has started)
+        return $elapsed >= 0 ? $elapsed : 0;
+    };
+    
+    if ($@) {
+        $log->warn("Failed to calculate track elapsed time from timestamp '$timestamp': $@");
+    }
+    
+    return;
 }
 
 1;

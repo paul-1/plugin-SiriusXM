@@ -15,6 +15,7 @@ use Proc::Background;
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
 use Plugins::SiriusXM::ProtocolHandler;
+use Plugins::SiriusXM::TrackDurationDB;
 
 my $prefs = preferences('plugin.siriusxm');
 my $log = Slim::Utils::Log->addLogCategory({
@@ -60,6 +61,9 @@ sub initPlugin {
     # Initialize the API module
     Plugins::SiriusXM::API->init();
     
+    # Initialize track duration database
+    Plugins::SiriusXM::TrackDurationDB->init();
+    
     # Add to music services menu
     Slim::Menu::TrackInfo->registerInfoProvider( siriusxm => (
         parent => 'moreinfo',
@@ -93,6 +97,9 @@ sub shutdownPlugin {
     
     # Clean up API connections
     Plugins::SiriusXM::API->cleanup();
+    
+    # Shutdown track duration database
+    Plugins::SiriusXM::TrackDurationDB->shutdown();
     
 }
 

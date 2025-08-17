@@ -10,6 +10,9 @@ use JSON::XS;
 use Date::Parse;
 use Time::HiRes;
 
+use Plugins::SiriusXM::TrackDurationDB;
+use Plugins::SiriusXM::MusicBrainzAPI;
+
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 
@@ -116,6 +119,7 @@ sub _processResponse {
     my $track_info = $latest_track->{track};
     my $spotify_info = $latest_track->{spotify};
     my $timestamp = $latest_track->{timestamp};
+    my $xmplaylist_id = $latest_track->{id};
 
     return unless $track_info;
 
@@ -151,6 +155,21 @@ sub _processResponse {
         }
     }
     
+    # Handle track duration processing if we're using xmplaylists metadata
+    if ($use_xmplaylists_metadata && $track_info->{title} && $track_info->{artists}) {
+        my $title = $track_info->{title};
+        my $artist = ref($track_info->{artists}) eq 'ARRAY' ? 
+                    join(', ', @{$track_info->{artists}}) : 
+                    $track_info->{artists};
+        
+        # Start async duration lookup and continue with metadata building
+        $class->_lookupTrackDuration($xmplaylist_id, $title, $artist, sub {
+            my ($duration) = @_;
+            # Duration will be stored in database, but we don't wait for it
+            # to complete the current metadata response
+        });
+    }
+    
     # Build new metadata
     my $new_meta = {};
     
@@ -180,6 +199,22 @@ sub _processResponse {
         $new_meta->{album} = $channel_info->{name} || 'SiriusXM';
         $new_meta->{bitrate} = '';
 
+        # Add duration if available from database
+        if ($xmplaylist_id) {
+            my $duration = Plugins::SiriusXM::TrackDurationDB->getDuration($xmplaylist_id);
+            if (defined $duration && $duration > 0) {
+                $new_meta->{duration} = $duration;
+                $new_meta->{secs} = $duration;
+                $log->debug("Added cached duration to metadata: ${duration}s");
+            }
+        }
+
+        # Add track start time info for timing calculations
+        if ($timestamp) {
+            $new_meta->{track_timestamp} = $timestamp;
+            $new_meta->{xmplaylist_id} = $xmplaylist_id if $xmplaylist_id;
+        }
+
     } else {
         # Fall back to basic channel info when metadata is too old or disabled
         if ($channel_info) {
@@ -201,6 +236,40 @@ sub _processResponse {
             is_fresh => $metadata_is_fresh,
         });
     }
+}
+
+# Lookup track duration with database cache and MusicBrainz fallback
+sub _lookupTrackDuration {
+    my ($class, $xmplaylist_id, $title, $artist, $callback) = @_;
+    
+    return unless $xmplaylist_id && $title && $artist;
+    
+    # First check database cache
+    my $cached_duration = Plugins::SiriusXM::TrackDurationDB->getDuration($xmplaylist_id);
+    if (defined $cached_duration) {
+        $callback->($cached_duration) if $callback;
+        return;
+    }
+    
+    # Fallback to MusicBrainz API search
+    $log->debug("Looking up duration for: $title by $artist");
+    
+    Plugins::SiriusXM::MusicBrainzAPI->searchTrackDuration($title, $artist, sub {
+        my ($duration, $score) = @_;
+        
+        if (defined $duration && $score) {
+            # Store in database for future use
+            Plugins::SiriusXM::TrackDurationDB->storeDuration(
+                $xmplaylist_id, $title, $artist, $duration, $score
+            );
+            
+            $log->info("Found and cached duration for '$title' by '$artist': ${duration}s (score: $score%)");
+            $callback->($duration) if $callback;
+        } else {
+            $log->debug("No suitable duration found for: $title by $artist");
+            $callback->() if $callback;
+        }
+    });
 }
 
 1;
