@@ -1,0 +1,182 @@
+Found SELinux - setting security context to: texrel_shlib_t for *.so files.
+Got @INC containing:
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server
+/etc/perl
+/usr/local/lib/x86_64-linux-gnu/perl/5.38.2
+/usr/local/share/perl/5.38.2
+/usr/lib/x86_64-linux-gnu/perl5/5.38
+/usr/share/perl5
+/usr/lib/x86_64-linux-gnu/perl-base
+/usr/lib/x86_64-linux-gnu/perl/5.38
+/usr/share/perl/5.38
+/usr/local/lib/site_perl
+
+Extended @INC to contain:
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/x86_64-linux-thread-multi
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/x86_64-linux-thread-multi/auto
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38.2/x86_64-linux-gnu-thread-multi
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38.2/x86_64-linux-gnu-thread-multi/auto
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/x86_64-linux-gnu-thread-multi
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/x86_64-linux-gnu-thread-multi/auto
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/x86_64-linux-gnu-thread-multi
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/lib
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server
+/home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server
+/etc/perl
+/usr/local/lib/x86_64-linux-gnu/perl/5.38.2
+/usr/local/share/perl/5.38.2
+/usr/lib/x86_64-linux-gnu/perl5/5.38
+/usr/share/perl5
+/usr/lib/x86_64-linux-gnu/perl-base
+/usr/lib/x86_64-linux-gnu/perl/5.38
+/usr/share/perl/5.38
+/usr/local/lib/site_perl
+
+Loaded module: [version] ok!
+Loaded module: [Time::HiRes] ok!
+Loaded module: [Log::Log4perl] ok!
+Loaded module: [JSON::XS] ok!
+The following modules are loaded after the first attempt:
+	vars.pm => /usr/lib/x86_64-linux-gnu/perl-base/vars.pm
+	Log/Log4perl/Config/PropertyConfigurator.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/lib/Log/Log4perl/Config/PropertyConfigurator.pm
+	POSIX.pm => /usr/lib/x86_64-linux-gnu/perl-base/POSIX.pm
+	version/vpp.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version/vpp.pm
+	Slim/Utils/OS/Unix.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS/Unix.pm
+	Log/Log4perl/Filter.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Filter.pm
+	Exporter/Heavy.pm => /usr/lib/x86_64-linux-gnu/perl-base/Exporter/Heavy.pm
+	warnings.pm => /usr/lib/x86_64-linux-gnu/perl-base/warnings.pm
+	JSON/XS.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/JSON/XS.pm
+	Log/Log4perl/Filter/Boolean.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Filter/Boolean.pm
+	constant.pm => /usr/lib/x86_64-linux-gnu/perl-base/constant.pm
+	Log/Log4perl/Layout/PatternLayout/Multiline.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/PatternLayout/Multiline.pm
+	Carp.pm => /usr/lib/x86_64-linux-gnu/perl-base/Carp.pm
+	Log/Log4perl/NDC.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/NDC.pm
+	strict.pm => /usr/lib/x86_64-linux-gnu/perl-base/strict.pm
+	File/Path.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Path.pm
+	Config.pm => /usr/lib/x86_64-linux-gnu/perl-base/Config.pm
+	Config_git.pl => /usr/lib/x86_64-linux-gnu/perl-base/Config_git.pl
+	Log/Log4perl/Config.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config.pm
+	Fcntl.pm => /usr/lib/x86_64-linux-gnu/perl-base/Fcntl.pm
+	attributes.pm => /usr/lib/x86_64-linux-gnu/perl-base/attributes.pm
+	Log/Log4perl/Config/Watch.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config/Watch.pm
+	Config_heavy.pl => /usr/lib/x86_64-linux-gnu/perl-base/Config_heavy.pl
+	Symbol.pm => /usr/lib/x86_64-linux-gnu/perl-base/Symbol.pm
+	Slim/Utils/OS/Linux.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS/Linux.pm
+	Tie/Hash.pm => /usr/lib/x86_64-linux-gnu/perl-base/Tie/Hash.pm
+	Log/Log4perl/JavaMap.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/JavaMap.pm
+	Slim/Utils/OS.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS.pm
+	XSLoader.pm => /usr/lib/x86_64-linux-gnu/perl-base/XSLoader.pm
+	Log/Log4perl/Layout/SimpleLayout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/SimpleLayout.pm
+	version/regex.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version/regex.pm
+	Log/Log4perl/Util.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Util.pm
+	Log/Log4perl/DateFormat.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/DateFormat.pm
+	Sys/Hostname.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/Sys/Hostname.pm
+	version.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version.pm
+	if.pm => /usr/share/perl/5.38/if.pm
+	Slim/Utils/OSDetect.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OSDetect.pm
+	locale.pm => /usr/lib/x86_64-linux-gnu/perl-base/locale.pm
+	Log/Log4perl.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl.pm
+	File/Spec/Functions.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/File/Spec/Functions.pm
+	DynaLoader.pm => /usr/lib/x86_64-linux-gnu/perl-base/DynaLoader.pm
+	common/sense.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/common/sense.pm
+	Log/Log4perl/Config/BaseConfigurator.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config/BaseConfigurator.pm
+	base.pm => /usr/lib/x86_64-linux-gnu/perl-base/base.pm
+	Log/Log4perl/MDC.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/MDC.pm
+	File/Spec/Unix.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Spec/Unix.pm
+	Log/Log4perl/Appender.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Appender.pm
+	File/Spec.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Spec.pm
+	overloading.pm => /usr/lib/x86_64-linux-gnu/perl-base/overloading.pm
+	Log/Log4perl/Level.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Level.pm
+	FindBin.pm => /usr/share/perl/5.38/FindBin.pm
+	warnings/register.pm => /usr/lib/x86_64-linux-gnu/perl-base/warnings/register.pm
+	overload.pm => /usr/lib/x86_64-linux-gnu/perl-base/overload.pm
+	Log/Log4perl/Logger.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/lib/Log/Log4perl/Logger.pm
+	File/Basename.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Basename.pm
+	Log/Log4perl/Layout/PatternLayout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/PatternLayout.pm
+	Cwd.pm => /usr/lib/x86_64-linux-gnu/perl-base/Cwd.pm
+	Log/Log4perl/Appender/String.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Appender/String.pm
+	Slim/bootstrap.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/bootstrap.pm
+	Log/Log4perl/Layout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout.pm
+	Time/HiRes.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/Time/HiRes.pm
+	Exporter.pm => /usr/lib/x86_64-linux-gnu/perl-base/Exporter.pm
+
+The following modules are loaded after the second attempt:
+	vars.pm => /usr/lib/x86_64-linux-gnu/perl-base/vars.pm
+	Log/Log4perl/Config/PropertyConfigurator.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/lib/Log/Log4perl/Config/PropertyConfigurator.pm
+	POSIX.pm => /usr/lib/x86_64-linux-gnu/perl-base/POSIX.pm
+	version/vpp.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version/vpp.pm
+	Slim/Utils/OS/Unix.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS/Unix.pm
+	Log/Log4perl/Filter.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Filter.pm
+	Exporter/Heavy.pm => /usr/lib/x86_64-linux-gnu/perl-base/Exporter/Heavy.pm
+	warnings.pm => /usr/lib/x86_64-linux-gnu/perl-base/warnings.pm
+	JSON/XS.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/arch/5.38/JSON/XS.pm
+	Log/Log4perl/Filter/Boolean.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Filter/Boolean.pm
+	constant.pm => /usr/lib/x86_64-linux-gnu/perl-base/constant.pm
+	Log/Log4perl/Layout/PatternLayout/Multiline.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/PatternLayout/Multiline.pm
+	Carp.pm => /usr/lib/x86_64-linux-gnu/perl-base/Carp.pm
+	Log/Log4perl/NDC.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/NDC.pm
+	strict.pm => /usr/lib/x86_64-linux-gnu/perl-base/strict.pm
+	File/Path.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Path.pm
+	Config.pm => /usr/lib/x86_64-linux-gnu/perl-base/Config.pm
+	Config_git.pl => /usr/lib/x86_64-linux-gnu/perl-base/Config_git.pl
+	Log/Log4perl/Config.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config.pm
+	Fcntl.pm => /usr/lib/x86_64-linux-gnu/perl-base/Fcntl.pm
+	attributes.pm => /usr/lib/x86_64-linux-gnu/perl-base/attributes.pm
+	Log/Log4perl/Config/Watch.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config/Watch.pm
+	Config_heavy.pl => /usr/lib/x86_64-linux-gnu/perl-base/Config_heavy.pl
+	Symbol.pm => /usr/lib/x86_64-linux-gnu/perl-base/Symbol.pm
+	Slim/Utils/OS/Linux.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS/Linux.pm
+	Tie/Hash.pm => /usr/lib/x86_64-linux-gnu/perl-base/Tie/Hash.pm
+	Log/Log4perl/JavaMap.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/JavaMap.pm
+	Slim/Utils/OS.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OS.pm
+	XSLoader.pm => /usr/lib/x86_64-linux-gnu/perl-base/XSLoader.pm
+	Log/Log4perl/Layout/SimpleLayout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/SimpleLayout.pm
+	version/regex.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version/regex.pm
+	Log/Log4perl/Util.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Util.pm
+	Log/Log4perl/DateFormat.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/DateFormat.pm
+	Sys/Hostname.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/Sys/Hostname.pm
+	version.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/version.pm
+	if.pm => /usr/share/perl/5.38/if.pm
+	Slim/Utils/OSDetect.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/Utils/OSDetect.pm
+	locale.pm => /usr/lib/x86_64-linux-gnu/perl-base/locale.pm
+	Log/Log4perl.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl.pm
+	File/Spec/Functions.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/File/Spec/Functions.pm
+	DynaLoader.pm => /usr/lib/x86_64-linux-gnu/perl-base/DynaLoader.pm
+	common/sense.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/common/sense.pm
+	Log/Log4perl/Config/BaseConfigurator.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Config/BaseConfigurator.pm
+	base.pm => /usr/lib/x86_64-linux-gnu/perl-base/base.pm
+	Log/Log4perl/MDC.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/MDC.pm
+	File/Spec/Unix.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Spec/Unix.pm
+	Log/Log4perl/Appender.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Appender.pm
+	File/Spec.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Spec.pm
+	overloading.pm => /usr/lib/x86_64-linux-gnu/perl-base/overloading.pm
+	Log/Log4perl/Level.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Level.pm
+	FindBin.pm => /usr/share/perl/5.38/FindBin.pm
+	warnings/register.pm => /usr/lib/x86_64-linux-gnu/perl-base/warnings/register.pm
+	overload.pm => /usr/lib/x86_64-linux-gnu/perl-base/overload.pm
+	Log/Log4perl/Logger.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/lib/Log/Log4perl/Logger.pm
+	File/Basename.pm => /usr/lib/x86_64-linux-gnu/perl-base/File/Basename.pm
+	Log/Log4perl/Layout/PatternLayout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout/PatternLayout.pm
+	Cwd.pm => /usr/lib/x86_64-linux-gnu/perl-base/Cwd.pm
+	Log/Log4perl/Appender/String.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Appender/String.pm
+	Slim/bootstrap.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/Slim/bootstrap.pm
+	Log/Log4perl/Layout.pm => /home/runner/work/plugin-SiriusXM/plugin-SiriusXM/lms-server/CPAN/Log/Log4perl/Layout.pm
+	Time/HiRes.pm => /usr/lib/x86_64-linux-gnu/perl/5.38/Time/HiRes.pm
+	Exporter.pm => /usr/lib/x86_64-linux-gnu/perl-base/Exporter.pm
+
+Usage:
+        perl sxm.pl username password [options]
+    
+        Options:
+            -l, --list              List available channels
+            -p, --port PORT         Server port (default: 9999)
+            -ca, --canada           Use Canadian region
+            -e, --env               Use SXM_USER and SXM_PASS environment variables
+            -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
+            -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
+            --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
+            --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
+            -h, --help              Show this help message
+
