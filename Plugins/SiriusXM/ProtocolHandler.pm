@@ -510,15 +510,6 @@ sub getMetadataFor {
         $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
         $meta->{bitrate} = '';
         
-        # Add duration if available
-        if (defined $xmplaylist_meta->{duration}) {
-            $meta->{duration} = $xmplaylist_meta->{duration};
-            $meta->{secs} = $xmplaylist_meta->{duration};
-            
-            # Set track duration for LMS
-            Slim::Music::Info::setDuration($song->track, $meta->{duration}) if $song;
-        }
-        
 
         
         #       Really noisy log message when using a LMS web.
@@ -665,11 +656,11 @@ sub _calculateNextUpdateInterval {
         return METADATA_UPDATE_INTERVAL;
     }
     
-    # Calculate using formula: Duration - (Current Time - Start Time) - 30
+    # Calculate using formula: Duration - (Current Time - Start Time) - 15
     my $current_time = time();
     my $elapsed = $current_time - $track_start_time;
     my $remaining = $duration - $elapsed;
-    my $nextInterval = $remaining - 30;
+    my $nextInterval = $remaining - 15;
     
     # Use 15s as minimum interval
     if ($nextInterval < 15) {
