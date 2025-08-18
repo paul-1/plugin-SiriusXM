@@ -477,7 +477,7 @@ sub getChannelInfoFromUrl {
 sub getMetadataFor {
     my ($class, $client, $url, undef, $song) = @_;
     
-    my $song ||= $client->playingSong();
+    $song ||= $client->playingSong();
     return {} unless $song;
 
     my $channel_info;
@@ -544,7 +544,7 @@ sub _clearPlayerStatesForDifferentChannel {
     my ($class, $client, $newUrl) = @_;
     my $clientId = $client->id();
 
-    return unless $client, $newUrl, $clientId;
+    return unless $client && $newUrl && $clientId;
 
     # Extract channel ID from the new URL
     my $newChannelId = $class->_extractChannelIdFromUrl($newUrl);
