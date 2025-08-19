@@ -13,7 +13,6 @@
             <link>https://github.com/paul-1/plugin-SiriusXM</link>
             <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/html/images/SiriusXMLogo.png</icon>
             <creator>paul-1</creator>
-            <email>your-email@example.com</email>
         </plugin>
     </plugins>
 </extensions>
