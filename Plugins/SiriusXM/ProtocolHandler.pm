@@ -116,9 +116,21 @@ sub onPlayerEvent {
     
     # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
     return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:\d+/[\w-]+\.m3u8$};
-    
-    $log->debug("Player event '$command' for client $clientId, URL: $url");
-    
+
+    $log->debug("Player event '$command' for client $clientId, URL:$url" );
+#    $log->debug(Dumper($request));
+
+    if ($song) {
+        my $handler = $song->currentTrackHandler();
+        if ($handler ne qw(Plugins::SiriusXM::ProtocolHandler) ) {
+            if ( $url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$} ) {
+                $log->debug("Current Track Handler: $handler overriding to SXM");
+                my $newurl = "sxm:" . $1;
+                $song->currentTrack()->url($newurl);
+                $song->_currentTrackHandler(Slim::Player::ProtocolHandlers->handlerForURL( $newurl ));
+            }
+        }
+    }
     if ($command eq 'play') {
         _startMetadataTimer($client, $url);
     } elsif ($command eq 'pause' || $command eq 'stop') {
@@ -312,6 +324,9 @@ sub _updateClientMetadata {
                   ($new_meta->{artist} || 'Unknown Artist'));
         
         my $song = $client->playingSong();
+
+#        $log->debug(Dumper($new_meta));
+
         if ($song) {
             # Update song metadata
             $song->pluginData('xmplaylist_meta', $new_meta);
