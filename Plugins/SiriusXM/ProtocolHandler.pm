@@ -579,27 +579,6 @@ sub _clearPlayerStatesForDifferentChannel {
     }
 }
 
-# Debug method to check channel metadata cache status
-sub getChannelMetadataDebugInfo {
-    my $class = shift;
-    
-    my $debug_info = {
-        total_channels => scalar(keys %channelMetadata),
-        channels => {}
-    };
-    
-    for my $channel_id (keys %channelMetadata) {
-        my $meta = $channelMetadata{$channel_id};
-        $debug_info->{channels}->{$channel_id} = {
-            has_metadata => (defined $meta && keys %$meta) ? 1 : 0,
-            title => $meta->{title} || 'N/A',
-            artist => $meta->{artist} || 'N/A'
-        };
-    }
-    
-    return $debug_info;
-}
-
 # Extract channel ID from URL (supports both sxm: and HTTP URLs)
 sub _extractChannelIdFromUrl {
     my ($class, $url) = @_;
