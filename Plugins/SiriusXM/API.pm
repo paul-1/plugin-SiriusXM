@@ -18,6 +18,9 @@ my $cache = Slim::Utils::Cache->new();
 # Cache timeout in seconds
 use constant CACHE_TIMEOUT => 86400; # 24 hours (1 day)
 
+# Track in-flight channel requests to prevent concurrent calls
+my %channel_fetch_callbacks = ();
+
 sub init {
     my $class = shift;
     $log->debug("Initializing SiriusXM API");
@@ -31,6 +34,8 @@ sub cleanup {
     $cache->remove('siriusxm_channel_info');
     $cache->remove('siriusxm_processed_channels');
     $cache->remove('siriusxm_auth_token');
+    # Clear any pending callbacks
+    %channel_fetch_callbacks = ();
 }
 
 sub invalidateChannelCache {
@@ -221,6 +226,16 @@ sub getChannels {
         return;
     }
     
+    # Check if we're already fetching channels
+    if (exists $channel_fetch_callbacks{'in_progress'}) {
+        $log->debug("Channel fetch already in progress, queuing callback");
+        push @{$channel_fetch_callbacks{'in_progress'}}, $cb if $cb;
+        return;
+    }
+    
+    # Initialize the callback queue
+    $channel_fetch_callbacks{'in_progress'} = $cb ? [$cb] : [];
+    
     my $port = $prefs->get('port') || '9999';
     my $url = "http://localhost:$port/channel/all";
     
@@ -241,7 +256,11 @@ sub getChannels {
             
             if ($@) {
                 $log->error("Failed to parse channel data from proxy: $@");
-                $cb->([]);
+                # Call all queued callbacks with empty result
+                for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                    $callback->([]) if $callback;
+                }
+                delete $channel_fetch_callbacks{'in_progress'};
                 return;
             }
             
@@ -262,7 +281,12 @@ sub getChannels {
                 $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
                 
                 $log->info("Retrieved and processed channels into menu structure");
-                $cb->($menu_items);
+                
+                # Call all queued callbacks with the result
+                for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                    $callback->($menu_items) if $callback;
+                }
+                delete $channel_fetch_callbacks{'in_progress'};
             });
         },
         sub {
@@ -273,7 +297,11 @@ sub getChannels {
             $cache->remove('siriusxm_channels');
             $cache->remove('siriusxm_processed_channels');
             
-            $cb->([]);
+            # Call all queued callbacks with empty result
+            for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                $callback->([]) if $callback;
+            }
+            delete $channel_fetch_callbacks{'in_progress'};
         },
         {
             timeout => 30,
