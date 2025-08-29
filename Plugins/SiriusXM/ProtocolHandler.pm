@@ -516,8 +516,7 @@ sub getMetadataFor {
             $meta->{album} = $cached_meta->{album} if $cached_meta->{album};
             $meta->{bitrate} = '';
             
-            $log->debug("Using rich metadata for current track channel $channel_id: " . 
-                       ($meta->{title} || 'Unknown'));
+#            $log->debug("Using rich metadata for current track channel $channel_id: " . ($meta->{title} || 'Unknown'));
         } else {
             # Fall back to basic channel info for current track
             $meta->{artist} = $channel_info->{name};
@@ -527,7 +526,7 @@ sub getMetadataFor {
             $meta->{album} = 'SiriusXM';
             $meta->{bitrate} = '';
             
-            $log->debug("Using basic channel info for current track channel $channel_id");
+#            $log->debug("Using basic channel info for current track channel $channel_id");
         }
     } else {
         # For non-current tracks, only return basic channel artwork and info
@@ -538,7 +537,7 @@ sub getMetadataFor {
         $meta->{album} = 'SiriusXM';
         $meta->{bitrate} = '';
         
-        $log->debug("Using channel artwork for non-current track channel $channel_id");
+#        $log->debug("Using channel artwork for non-current track channel $channel_id");
     }
 
     return $meta;
