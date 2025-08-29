@@ -119,9 +119,11 @@ sub onPlayerEvent {
     my $clientId = $client->id();
     my $song = $client->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
-    
+ 
+    my $port = $prefs->get('port');
+   
     # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
-    return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:\d+/[\w-]+\.m3u8$};
+    return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$};
 
     $log->debug("Player event '$command' for client $clientId, URL:$url" );
 #    $log->debug(Dumper($request));
@@ -129,7 +131,7 @@ sub onPlayerEvent {
     if ($song) {
         my $handler = $song->currentTrackHandler();
         if ($handler ne qw(Plugins::SiriusXM::ProtocolHandler) ) {
-            if ( $url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$} ) {
+            if ( $url =~ m{^http://localhost:$port\b/([\w-]+)\.m3u8$} ) {
                 $log->debug("Current Track Handler: $handler overriding to SXM");
                 my $newurl = "sxm:" . $1;
                 $song->currentTrack()->url($newurl);
@@ -589,8 +591,10 @@ sub _extractChannelIdFromUrl {
         return $1;
     }
 
+    my $port = $prefs->get('port');
+
     # Handle converted HTTP URLs
-    if ($url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+    if ($url =~ m{^http://localhost:$port\b/([\w-]+)\.m3u8$}) {
         return $1;
     }
 
