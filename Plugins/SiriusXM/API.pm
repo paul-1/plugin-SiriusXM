@@ -431,14 +431,13 @@ sub processChannelData {
         my $channel_name = $channel->{name};
         my $sirius_number = $channel->{siriusChannelNumber} || $channel->{channelNumber} || '';
         
-        # Try to get xmplaylist name from station lookup first, fallback to normalization
+        # Get xmplaylist name from station lookup if available
         my $xmp_name;
         if ($sirius_number && $station_lookup->{$sirius_number}) {
             $xmp_name = $station_lookup->{$sirius_number};
             $log->debug("Using xmplaylist deeplink for channel $sirius_number: $xmp_name");
         } else {
-            $xmp_name = $class->normalizeChannelName($channel_name);
-            $log->debug("Using normalized name for channel $sirius_number ($channel_name): $xmp_name");
+            $log->debug("No xmplaylist metadata available for channel $sirius_number ($channel_name), will use channel artwork");
         }
 
         # Find the primary category
