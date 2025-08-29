@@ -233,17 +233,21 @@ sub getChannels {
             }
             
             # Process and organize channels by category
-            my $categories = $class->processChannelData($channels_data);
-            
-            # Build hierarchical menu structure
-            my $menu_items = $class->buildCategoryMenu($categories);
-            
-            # Cache both the menu structure and the processed channel data separately
-            $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
-            $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
-            
-            $log->info("Retrieved and processed channels into menu structure");
-            $cb->($menu_items);
+            # First fetch station listings from xmplaylist.com for accurate mappings
+            Plugins::SiriusXM::APImetadata->fetchStationListings(sub {
+                my $station_lookup = shift || {};
+                my $categories = $class->processChannelData($channels_data, $station_lookup);
+                
+                # Build hierarchical menu structure
+                my $menu_items = $class->buildCategoryMenu($categories);
+                
+                # Cache both the menu structure and the processed channel data separately
+                $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+                $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
+                
+                $log->info("Retrieved and processed channels into menu structure");
+                $cb->($menu_items);
+            });
         },
         sub {
             my ($http, $error) = @_;
@@ -413,10 +417,11 @@ sub normalizeChannelName {
 
 
 sub processChannelData {
-    my ($class, $raw_channels) = @_;
+    my ($class, $raw_channels, $station_lookup) = @_;
     
     return [] unless $raw_channels && ref($raw_channels) eq 'ARRAY';
     
+    $station_lookup ||= {};  # Default to empty hash if not provided
     my %categories = ();
     
     # Process channels and organize by primary category
@@ -424,7 +429,17 @@ sub processChannelData {
         next unless $channel->{channelId} && $channel->{name};
         
         my $channel_name = $channel->{name};
-        my $xmp_name = $class->normalizeChannelName($channel_name);
+        my $sirius_number = $channel->{siriusChannelNumber} || $channel->{channelNumber} || '';
+        
+        # Try to get xmplaylist name from station lookup first, fallback to normalization
+        my $xmp_name;
+        if ($sirius_number && $station_lookup->{$sirius_number}) {
+            $xmp_name = $station_lookup->{$sirius_number};
+            $log->debug("Using xmplaylist deeplink for channel $sirius_number: $xmp_name");
+        } else {
+            $xmp_name = $class->normalizeChannelName($channel_name);
+            $log->debug("Using normalized name for channel $sirius_number ($channel_name): $xmp_name");
+        }
 
         # Find the primary category
         my $primary_category = 'Other';  # Default fallback

@@ -5,6 +5,7 @@ use warnings;
 
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
+use Slim::Utils::Cache;
 use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
 use Date::Parse;
@@ -12,8 +13,10 @@ use Time::HiRes;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
+my $cache = Slim::Utils::Cache->new();
 
 use constant METADATA_STALE_TIME => 230;
+use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
 
 # xmplaylists.com API JSON Schema:
 # {
@@ -54,6 +57,95 @@ use constant METADATA_STALE_TIME => 230;
 #     "applePlaylist": "string"
 #   }
 # }
+
+# Fetch station listings from xmplaylist.com API 
+# Returns mapping of siriusChannelNumber -> xmplaylist deeplink name
+sub fetchStationListings {
+    my ($class, $callback) = @_;
+    
+    # Check cache first
+    my $cached_stations = $cache->get('xmplaylist_stations');
+    if ($cached_stations) {
+        $log->debug("Using cached station listings from xmplaylist.com");
+        $callback->($cached_stations) if $callback;
+        return;
+    }
+    
+    my $url = "https://xmplaylist.com/api/station";
+    
+    $log->debug("Fetching station listings from xmplaylist.com");
+    
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            $class->_processStationListings($response, $callback);
+        },
+        sub {
+            my ($http, $error) = @_;
+            $log->warn("Failed to fetch station listings from xmplaylist.com: $error");
+            $callback->({}) if $callback;
+        },
+        {
+            timeout => 30,
+        }
+    );
+    
+    $http->get($url);
+}
+
+# Process station listings response and build lookup table
+sub _processStationListings {
+    my ($class, $response, $callback) = @_;
+    
+    return unless $response;
+    
+    my $content = $response->content;
+    my $data;
+    
+    eval {
+        $data = decode_json($content);
+    };
+    
+    if ($@) {
+        $log->error("Failed to parse station listings response: $@");
+        $callback->({}) if $callback;
+        return;
+    }
+    
+    # Build lookup table: siriusChannelNumber -> deeplink
+    my %station_lookup = ();
+    
+    if ($data->{results} && ref($data->{results}) eq 'ARRAY') {
+        for my $station (@{$data->{results}}) {
+            my $number = $station->{number};
+            my $deeplink = $station->{deeplink};
+            
+            if ($number && $deeplink) {
+                $station_lookup{$number} = $deeplink;
+                $log->debug("Station mapping: $number -> $deeplink");
+            }
+        }
+    }
+    
+    # Cache the lookup table
+    $cache->set('xmplaylist_stations', \%station_lookup, STATION_CACHE_TIMEOUT);
+    $log->info("Cached " . scalar(keys %station_lookup) . " station mappings for 6 hours");
+    
+    $callback->(\%station_lookup) if $callback;
+}
+
+# Get xmplaylist deeplink name for a given sirius channel number
+sub getChannelDeeplink {
+    my ($class, $sirius_number, $callback) = @_;
+    
+    return unless $sirius_number && $callback;
+    
+    $class->fetchStationListings(sub {
+        my $station_lookup = shift || {};
+        my $deeplink = $station_lookup->{$sirius_number};
+        $callback->($deeplink);
+    });
+}
 
 # Fetch metadata from xmplaylist.com API
 sub fetchMetadata {
