@@ -58,6 +58,9 @@ use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
 #   }
 # }
 
+# Track in-flight station listing requests to prevent concurrent calls
+my %station_fetch_callbacks = ();
+
 # Fetch station listings from xmplaylist.com API 
 # Returns mapping of siriusChannelNumber -> xmplaylist deeplink name
 sub fetchStationListings {
@@ -71,6 +74,16 @@ sub fetchStationListings {
         return;
     }
     
+    # Check if we're already fetching station listings
+    if (exists $station_fetch_callbacks{'in_progress'}) {
+        $log->debug("Station listings fetch already in progress, queuing callback");
+        push @{$station_fetch_callbacks{'in_progress'}}, $callback if $callback;
+        return;
+    }
+    
+    # Initialize the callback queue
+    $station_fetch_callbacks{'in_progress'} = $callback ? [$callback] : [];
+    
     my $url = "https://xmplaylist.com/api/station";
     
     $log->debug("Fetching station listings from xmplaylist.com");
@@ -78,12 +91,16 @@ sub fetchStationListings {
     my $http = Slim::Networking::SimpleAsyncHTTP->new(
         sub {
             my $response = shift;
-            $class->_processStationListings($response, $callback);
+            $class->_processStationListings($response, $station_fetch_callbacks{'in_progress'});
         },
         sub {
             my ($http, $error) = @_;
             $log->warn("Failed to fetch station listings from xmplaylist.com: $error");
-            $callback->({}) if $callback;
+            # Call all queued callbacks with empty result
+            for my $cb (@{$station_fetch_callbacks{'in_progress'} || []}) {
+                $cb->({}) if $cb;
+            }
+            delete $station_fetch_callbacks{'in_progress'};
         },
         {
             timeout => 30,
@@ -95,9 +112,12 @@ sub fetchStationListings {
 
 # Process station listings response and build lookup table
 sub _processStationListings {
-    my ($class, $response, $callback) = @_;
+    my ($class, $response, $callbacks) = @_;
     
     return unless $response;
+    
+    # Ensure callbacks is an array reference
+    $callbacks = [$callbacks] unless ref($callbacks) eq 'ARRAY';
     
     my $content = $response->content;
     my $data;
@@ -108,7 +128,11 @@ sub _processStationListings {
     
     if ($@) {
         $log->error("Failed to parse station listings response: $@");
-        $callback->({}) if $callback;
+        # Call all queued callbacks with empty result
+        for my $cb (@$callbacks) {
+            $cb->({}) if $cb;
+        }
+        delete $station_fetch_callbacks{'in_progress'};
         return;
     }
     
@@ -131,7 +155,13 @@ sub _processStationListings {
     $cache->set('xmplaylist_stations', \%station_lookup, STATION_CACHE_TIMEOUT);
     $log->info("Cached " . scalar(keys %station_lookup) . " station mappings for 6 hours");
     
-    $callback->(\%station_lookup) if $callback;
+    # Call all queued callbacks
+    for my $cb (@$callbacks) {
+        $cb->(\%station_lookup) if $cb;
+    }
+    
+    # Clear the in-progress flag
+    delete $station_fetch_callbacks{'in_progress'};
 }
 
 # Get xmplaylist deeplink name for a given sirius channel number

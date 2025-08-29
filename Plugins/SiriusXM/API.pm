@@ -29,6 +29,7 @@ sub cleanup {
     # Clear any cached data
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_channel_info');
+    $cache->remove('siriusxm_processed_channels');
     $cache->remove('siriusxm_auth_token');
 }
 
@@ -37,6 +38,7 @@ sub invalidateChannelCache {
     $log->info("Invalidating channel cache due to playback failure");
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_channel_info');
+    $cache->remove('siriusxm_processed_channels');
 }
 
 =begin comment
@@ -208,6 +210,17 @@ sub getChannels {
         return;
     }
     
+    # Check if we have completely processed channel data in cache
+    # This includes both proxy data and station mappings
+    my $cached_processed = $cache->get('siriusxm_processed_channels');
+    if ($cached_processed) {
+        $log->debug("Using cached processed channel data");
+        my $menu_items = $class->buildCategoryMenu($cached_processed);
+        $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+        $cb->($menu_items);
+        return;
+    }
+    
     my $port = $prefs->get('port') || '9999';
     my $url = "http://localhost:$port/channel/all";
     
@@ -238,10 +251,13 @@ sub getChannels {
                 my $station_lookup = shift || {};
                 my $categories = $class->processChannelData($channels_data, $station_lookup);
                 
+                # Cache the completely processed channel data with station mappings
+                $cache->set('siriusxm_processed_channels', $categories, CACHE_TIMEOUT);
+                
                 # Build hierarchical menu structure
                 my $menu_items = $class->buildCategoryMenu($categories);
                 
-                # Cache both the menu structure and the processed channel data separately
+                # Cache the menu structure
                 $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
                 $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
                 
@@ -255,6 +271,7 @@ sub getChannels {
             
             # Invalidate cache since proxy communication failed
             $cache->remove('siriusxm_channels');
+            $cache->remove('siriusxm_processed_channels');
             
             $cb->([]);
         },
@@ -530,7 +547,16 @@ sub getChannelsSortedByNumber {
     
     $log->debug("Getting channels sorted by channel number");
     
-    # Check cache first
+    # Check cache first for the processed data
+    my $cached_processed = $cache->get('siriusxm_processed_channels');
+    if ($cached_processed) {
+        $log->debug("Building channel list from cached processed data");
+        my $sorted_channels = $class->buildChannelNumberMenu($cached_processed);
+        $cb->($sorted_channels);
+        return;
+    }
+    
+    # Check legacy cache for backward compatibility
     my $cached_channel_info = $cache->get('siriusxm_channel_info');
     if ($cached_channel_info) {
         $log->debug("Building channel list from cached data");
@@ -543,8 +569,8 @@ sub getChannelsSortedByNumber {
     $class->getChannels($client, sub {
         my $category_menu = shift;
         
-        # Get the channel info from cache (which should be populated by getChannels)
-        my $channel_info = $cache->get('siriusxm_channel_info');
+        # Get the processed channel info from cache (which should be populated by getChannels)
+        my $channel_info = $cache->get('siriusxm_processed_channels') || $cache->get('siriusxm_channel_info');
         if ($channel_info) {
             my $sorted_channels = $class->buildChannelNumberMenu($channel_info);
             $cb->($sorted_channels);
