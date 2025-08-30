@@ -76,7 +76,10 @@ sub initPlayerEvents {
     $log->debug("Registering player event callbacks for metadata tracking");
     
     # Register callbacks for player state changes
-    Slim::Control::Request::subscribe(\&onPlayerEvent, [['playlist'], ['newsong', 'pause', 'stop', 'open'] ]);
+    Slim::Control::Request::subscribe(
+        \&onPlayerEvent,
+        [['play', 'pause', 'stop', 'playlist']]
+    );
 }
 
 # Clean up player event subscriptions and timers
@@ -112,7 +115,7 @@ sub onPlayerEvent {
     my $client = $request->client() || return;
     my $command = $request->getRequest(0) || return;
     my $subcommand = $request->getRequest(1) || '';
-    
+     
     return unless $client;
     
     my $clientId = $client->id();
@@ -125,35 +128,38 @@ sub onPlayerEvent {
     return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$};
 
     $log->debug("Player event '$command:$subcommand' for client $clientId, URL:$url" );
+#    $log->debug(Dumper($request));
 
-    # Check the song Protocol Handler, take it over if the url matches ours.
     if ($song) {
         my $handler = $song->currentTrackHandler();
         if ($handler ne qw(Plugins::SiriusXM::ProtocolHandler) ) {
             if ( $url =~ m{^http://localhost:$port\b/([\w-]+)\.m3u8$} ) {
-                $log->debug("Current Track Handler: $handler overriding to SiriusXM");
+                $log->debug("Current Track Handler: $handler overriding to SXM");
                 my $newurl = "sxm:" . $1;
                 $song->currentTrack()->url($newurl);
                 $song->_currentTrackHandler(Slim::Player::ProtocolHandlers->handlerForURL( $newurl ));
             }
         }
     }
-    # Handle playlist changes - may need to start/stop timers
-    my $clientId = $client->id();
-    my $isPlaying = $client->isPlaying();
-    my $timersRunning = exists $playerStates{$clientId} && $playerStates{$clientId}->{timer};
-  
-    if ( $subcommand eq 'newsong' && !$timersRunning) {
+    if ($command eq 'play') {
         _startMetadataTimer($client, $url);
-    } elsif ($isPlaying && !$timersRunning) {
-        # Start timers if playing and no timers running
-        _startMetadataTimer($client, $url);
-    } elsif ($isPlaying && $timersRunning) {
-        # Do nothing - timers already running
-    } elsif (!$isPlaying && $timersRunning) {
-        # Stop timers if not playing but timers are running
+    } elsif ($command eq 'pause' || $command eq 'stop') {
         _stopMetadataTimer($client);
-        return;
+    } elsif ($command eq 'playlist') {
+        # Handle playlist changes - may need to start/stop timers
+        my $clientId = $client->id();
+        my $isPlaying = $client->isPlaying();
+        my $timersRunning = exists $playerStates{$clientId} && $playerStates{$clientId}->{timer};
+        
+        if ($isPlaying && !$timersRunning) {
+            # Start timers if playing and no timers running
+            _startMetadataTimer($client, $url);
+        } elsif ($isPlaying && $timersRunning) {
+            # Do nothing - timers already running
+        } elsif (!$isPlaying && $timersRunning) {
+            # Stop timers if not playing but timers are running
+            _stopMetadataTimer($client);
+        }
     }
 
     # Initialize Player Metatadata
@@ -231,9 +237,7 @@ sub _stopMetadataTimer {
         }
         
         # Clean up state
-        $playerStates{$clientId}->{last_next} => undef;
-        $playerStates{$clientId}->{timer} => undef;
-            
+        delete $playerStates{$clientId};
     }
 }
 
