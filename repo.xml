@@ -4,12 +4,12 @@
         <title lang="EN">SiriusXM Plugin Repository</title>
     </details>
     <plugins>
-        <plugin name="SiriusXM" version="0.5.8" minTarget="8.3" maxTarget="*">
+        <plugin name="SiriusXM" version="0.5.9" minTarget="8.3" maxTarget="*">
             <title lang="EN">SiriusXM</title>
             <desc lang="EN">Stream SiriusXM satellite radio through Lyrion Music Server</desc>
             <catagory>musicservices</catagory>
-            <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v0.5.8/SiriusXM-0.5.8.zip</url>
-            <sha>b9fa8cfffa64bc08be35dfef96b0d5996711eff2</sha>
+            <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v0.5.9/SiriusXM-0.5.9.zip</url>
+            <sha>01640baa95585bd9a96bb883b6ad945ee88d8b8c</sha>
             <link>https://github.com/paul-1/plugin-SiriusXM</link>
             <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/html/images/SiriusXMLogo.png</icon>
             <creator>paul-1</creator>
