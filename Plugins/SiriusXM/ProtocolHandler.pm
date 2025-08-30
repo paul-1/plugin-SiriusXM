@@ -11,6 +11,7 @@ use Slim::Utils::Misc;
 use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
+use Slim::Player::Playlist;
 use JSON::XS;
 use Data::Dumper;
 use Date::Parse;
@@ -113,7 +114,8 @@ sub onPlayerEvent {
     my $request = shift;
     my $client = $request->client() || return;
     my $command = $request->getRequest(0) || return;
-    
+    my $subcommand = $request->getRequest(1) || '';
+     
     return unless $client;
     
     my $clientId = $client->id();
@@ -125,7 +127,7 @@ sub onPlayerEvent {
     # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
     return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$};
 
-    $log->debug("Player event '$command' for client $clientId, URL:$url" );
+    $log->debug("Player event '$command:$subcommand' for client $clientId, URL:$url" );
 #    $log->debug(Dumper($request));
 
     if ($song) {
@@ -359,7 +361,7 @@ sub getFormatForURL {
     my ($class, $url) = @_;
     
     # For sxm: URLs, we'll stream as HTTP since we convert to HTTP proxy URLs
-    return 'mp3';  # Default format, actual format determined by proxy
+    return 'm3u8';  # Default format, actual format determined by proxy
 }
 
 sub scanUrl {
@@ -394,7 +396,9 @@ sub getNextTrack {
         $song->currentTrack()->url($httpUrl);
         
         $log->debug("Converted sxm URL to HTTP URL: $httpUrl");
-        
+
+        Slim::Player::Playlist::refreshPlaylist($client);
+    
         $successCb->();
     } else {
         $errorCb->('Failed to convert sxm URL to HTTP URL');
@@ -475,7 +479,7 @@ sub getChannelInfoFromUrl {
 # Provide metadata for the stream
 sub getMetadataFor {
     my ($class, $client, $url, undef, $song) = @_;
-    
+
     $song ||= $client->playingSong();
     return {} unless $song;
 
