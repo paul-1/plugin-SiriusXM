@@ -1077,10 +1077,13 @@ sub get_segment {
 
 sub get_channels {
     my $self = shift;
+    my $retry_count = shift || 0;
+    my $max_retries = 3;
+    my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
     
     # Download channel list if necessary
     if (!defined $self->{channels}) {
-        main::log_debug("Fetching channel list");
+        main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
         
         my $postdata = {
             moduleList => {
@@ -1099,25 +1102,64 @@ sub get_channels {
         
         my $data = $self->post_request('get', $postdata, 1, undef);  # Use global authentication for channel listing
         if (!$data) {
-            main::log_error('Unable to get channel list');
+            main::log_error('Unable to get channel list - no data returned from server');
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1);
+            }
+            main::log_error("Failed to get channel list after $max_retries retries");
             return [];
         }
         
+        # Add trace logging to dump server response
+        main::log_trace("Channel list response received: " . $self->{json}->encode($data));
+        
+        my $channels;
         eval {
-            $self->{channels} = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
+            $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
         };
         if ($@) {
             main::log_error("Error parsing JSON response for channels: $@");
+            main::log_trace("Failed to parse channel data from response structure");
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1);
+            }
+            main::log_error("Failed to parse channel data after $max_retries retries");
             return [];
         }
         
         # Ensure channels is defined and is an array reference
-        if (!defined $self->{channels} || ref($self->{channels}) ne 'ARRAY') {
-            main::log_error("Channel data is not in expected format");
-            $self->{channels} = [];
+        if (!defined $channels || ref($channels) ne 'ARRAY') {
+            main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
+            main::log_trace("Server returned unexpected channel data format");
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1);
+            }
+            main::log_error("Channel data format invalid after $max_retries retries");
             return [];
         }
         
+        # Check if we got an empty channel list
+        if (@$channels == 0) {
+            main::log_warn("Server returned empty channel list");
+            main::log_trace("Empty channel list received from server - this may indicate authentication or service issues");
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1);
+            }
+            main::log_error("Received empty channel list after $max_retries retries");
+            # Don't cache empty results - let subsequent calls retry
+            return [];
+        }
+        
+        # Only cache successful, non-empty results
+        $self->{channels} = $channels;
         main::log_info("Loaded " . @{$self->{channels}} . " channels");
     }
     
