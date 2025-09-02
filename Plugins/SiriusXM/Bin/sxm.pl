@@ -1111,6 +1111,13 @@ sub get_channels {
             return [];
         }
         
+        # Ensure channels is defined and is an array reference
+        if (!defined $self->{channels} || ref($self->{channels}) ne 'ARRAY') {
+            main::log_error("Channel data is not in expected format");
+            $self->{channels} = [];
+            return [];
+        }
+        
         main::log_info("Loaded " . @{$self->{channels}} . " channels");
     }
     
