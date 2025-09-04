@@ -1109,11 +1109,12 @@ sub get_channels {
                 return $self->get_channels($retry_count + 1);
             }
             main::log_error("Failed to get channel list after $max_retries retries");
+
+            # Add trace logging to dump server response
+            main::log_error("Channel list response received: " . $self->{json}->encode($data));
+        
             return [];
         }
-        
-        # Add trace logging to dump server response
-        main::log_trace("Channel list response received: " . $self->{json}->encode($data));
         
         my $channels;
         eval {
@@ -1121,7 +1122,6 @@ sub get_channels {
         };
         if ($@) {
             main::log_error("Error parsing JSON response for channels: $@");
-            main::log_trace("Failed to parse channel data from response structure");
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
@@ -1134,7 +1134,6 @@ sub get_channels {
         # Ensure channels is defined and is an array reference
         if (!defined $channels || ref($channels) ne 'ARRAY') {
             main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
-            main::log_trace("Server returned unexpected channel data format");
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
@@ -1147,7 +1146,6 @@ sub get_channels {
         # Check if we got an empty channel list
         if (@$channels == 0) {
             main::log_warn("Server returned empty channel list");
-            main::log_trace("Empty channel list received from server - this may indicate authentication or service issues");
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
