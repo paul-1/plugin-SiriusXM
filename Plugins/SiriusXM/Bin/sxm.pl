@@ -909,16 +909,19 @@ sub get_playlist {
     if ($response->code == 403) {
         main::log_warn("Received status code 403 on playlist for channel: $channel_id, renewing session");
         
-        # Clear any potentially corrupted cookies before re-authentication
-        main::log_debug("Clearing cookies for channel $channel_id before re-authentication");
-        $self->clear_channel_cookies($channel_id);
-        
-        # Re-authenticate for this specific channel and retry
+        # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
         } else {
-            main::log_error("Failed to re-authenticate for channel: $channel_id");
-            return undef;
+            # If re-authentication failed, clear potentially corrupted cookies and try once more
+            main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
+            $self->clear_channel_cookies($channel_id);
+            if ($self->authenticate($channel_id)) {
+                return $self->get_playlist($name, 0);
+            } else {
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing cookies");
+                return undef;
+            }
         }
     }
     
@@ -1090,17 +1093,23 @@ sub get_segment {
         if ($max_attempts > 0) {
             main::log_warn("Received status code 403 on segment for channel: $channel_id, renewing session");
             
-            # Clear any potentially corrupted cookies before re-authentication  
-            main::log_debug("Clearing cookies for channel $channel_id before re-authentication");
-            $self->clear_channel_cookies($channel_id);
-            
+            # Try re-authentication first (without clearing cookies)
             main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
             if ($self->authenticate($channel_id)) {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                main::log_error("Session renewal failed for channel: $channel_id");
-                return undef;
+                # If re-authentication failed, clear potentially corrupted cookies and try once more
+                main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
+                $self->clear_channel_cookies($channel_id);
+                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing cookies");
+                if ($self->authenticate($channel_id)) {
+                    main::log_trace("Session renewed successfully for channel: $channel_id after clearing cookies, retrying segment request");
+                    return $self->get_segment($path, $max_attempts - 1);
+                } else {
+                    main::log_error("Session renewal failed for channel: $channel_id after clearing cookies");
+                    return undef;
+                }
             }
         } else {
             main::log_error("Received status code 403 on segment for channel: $channel_id, max attempts exceeded");
