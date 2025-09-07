@@ -1131,6 +1131,20 @@ sub get_channels {
     my $max_retries = 3;
     my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
     
+    # Check if cached channels are stale (older than 1 day)
+    my $cache_timeout = 86400; # 24 hours (1 day)
+    my $now = time();
+    my $cache_expired = 0;
+    
+    if (defined $self->{channels} && defined $self->{channels_cached_at}) {
+        if (($now - $self->{channels_cached_at}) > $cache_timeout) {
+            main::log_debug("Channel cache expired (age: " . ($now - $self->{channels_cached_at}) . " seconds), clearing cache");
+            $cache_expired = 1;
+            delete $self->{channels};
+            delete $self->{channels_cached_at};
+        }
+    }
+    
     # Download channel list if necessary
     if (!defined $self->{channels}) {
         main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
@@ -1208,6 +1222,7 @@ sub get_channels {
         
         # Only cache successful, non-empty results
         $self->{channels} = $channels;
+        $self->{channels_cached_at} = time();
         main::log_info("Loaded " . @{$self->{channels}} . " channels");
     }
     
