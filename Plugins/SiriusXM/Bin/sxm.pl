@@ -1134,18 +1134,25 @@ sub get_channels {
     # Check if cached channels are stale (older than 1 day)
     my $cache_timeout = 86400; # 24 hours (1 day)
     my $now = time();
-    my $cache_expired = 0;
     
     if (defined $self->{channels} && defined $self->{channels_cached_at}) {
-        if (($now - $self->{channels_cached_at}) > $cache_timeout) {
-            main::log_debug("Channel cache expired (age: " . ($now - $self->{channels_cached_at}) . " seconds), clearing cache");
-            $cache_expired = 1;
-            delete $self->{channels};
-            delete $self->{channels_cached_at};
+        my $cache_age = $now - $self->{channels_cached_at};
+        if ($cache_age > $cache_timeout) {
+            # Cache is expired - serve stale data but trigger background refresh
+            main::log_debug("Channel cache expired (age: $cache_age seconds), serving stale data and triggering background refresh");
+            
+            # Only start background refresh if one isn't already in progress
+            if (!$self->{background_refresh_in_progress}) {
+                $self->{background_refresh_in_progress} = 1;
+                $self->_refresh_channels_background();
+            }
+            
+            # Return stale cached data immediately to avoid blocking
+            return $self->{channels};
         }
     }
     
-    # Download channel list if necessary
+    # Download channel list if necessary (no cache exists)
     if (!defined $self->{channels}) {
         main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
         
@@ -1227,6 +1234,66 @@ sub get_channels {
     }
     
     return $self->{channels};
+}
+
+sub _refresh_channels_background {
+    my $self = shift;
+    
+    # Use a simple eval with alarm for non-blocking refresh
+    # This avoids complex forking while still preventing request blocking
+    eval {
+        local $SIG{ALRM} = sub { die "background_timeout" };
+        alarm(30); # Allow 30 seconds for background refresh
+        
+        main::log_debug("Starting background channel refresh");
+        
+        my $postdata = {
+            moduleList => {
+                modules => [{
+                    moduleArea => 'Discovery',
+                    moduleType => 'ChannelListing',
+                    moduleRequest => {
+                        consumeRequests => [],
+                        resultTemplate  => 'responsive',
+                        alerts          => [],
+                        profileInfos    => [],
+                    }
+                }]
+            }
+        };
+        
+        my $data = $self->post_request('get', $postdata, 1, undef);
+        if ($data) {
+            my $channels;
+            eval {
+                $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
+            };
+            
+            if (!$@ && ref($channels) eq 'ARRAY' && @$channels > 0) {
+                # Successfully got fresh channel data - update cache
+                $self->{channels} = $channels;
+                $self->{channels_cached_at} = time();
+                main::log_info("Background refresh completed - updated " . @{$self->{channels}} . " channels");
+            } else {
+                main::log_warn("Background refresh failed - keeping existing cache");
+            }
+        } else {
+            main::log_warn("Background refresh failed - no data returned, keeping existing cache");
+        }
+        
+        alarm(0);
+    };
+    
+    if ($@) {
+        if ($@ =~ /background_timeout/) {
+            main::log_warn("Background channel refresh timed out - keeping existing cache");
+        } else {
+            main::log_warn("Background channel refresh error: $@ - keeping existing cache");
+        }
+    }
+    
+    # Clear the background refresh flag
+    $self->{background_refresh_in_progress} = 0;
 }
 
 sub get_channel {
