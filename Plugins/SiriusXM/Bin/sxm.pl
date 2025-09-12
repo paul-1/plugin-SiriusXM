@@ -1131,24 +1131,21 @@ sub get_channels {
     my $max_retries = 3;
     my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
     
-    # Check if cached channels are stale (older than 1 day)
+    # Check if we need to schedule a proactive cache refresh
+    $self->_check_and_schedule_cache_refresh();
+    
+    # Return cached channels if they exist and are still valid
     my $cache_timeout = 86400; # 24 hours (1 day)
     my $now = time();
     
     if (defined $self->{channels} && defined $self->{channels_cached_at}) {
         my $cache_age = $now - $self->{channels_cached_at};
-        if ($cache_age > $cache_timeout) {
-            # Cache is expired - serve stale data but trigger background refresh
-            main::log_debug("Channel cache expired (age: $cache_age seconds), serving stale data and triggering background refresh");
-            
-            # Only start background refresh if one isn't already in progress
-            if (!$self->{background_refresh_in_progress}) {
-                $self->{background_refresh_in_progress} = 1;
-                $self->_refresh_channels_background();
-            }
-            
-            # Return stale cached data immediately to avoid blocking
+        if ($cache_age <= $cache_timeout) {
+            # Cache is still valid, return it
             return $self->{channels};
+        } else {
+            # Cache has expired - we need to fetch fresh data
+            main::log_debug("Channel cache expired (age: $cache_age seconds), fetching fresh data");
         }
     }
     
@@ -1236,6 +1233,28 @@ sub get_channels {
     return $self->{channels};
 }
 
+sub _check_and_schedule_cache_refresh {
+    my $self = shift;
+    
+    # Only proceed if we have cached data
+    return unless defined $self->{channels} && defined $self->{channels_cached_at};
+    
+    # Check if we're already refreshing
+    return if $self->{background_refresh_in_progress};
+    
+    my $cache_timeout = 86400; # 24 hours (1 day)
+    my $refresh_threshold = $cache_timeout * 0.75; # Refresh when cache is 75% of its lifetime (18 hours)
+    my $now = time();
+    my $cache_age = $now - $self->{channels_cached_at};
+    
+    # Schedule proactive refresh when cache is 75% of its lifetime
+    if ($cache_age >= $refresh_threshold) {
+        main::log_debug("Channel cache is $cache_age seconds old (threshold: $refresh_threshold), scheduling proactive refresh");
+        $self->{background_refresh_in_progress} = 1;
+        $self->_refresh_channels_background();
+    }
+}
+
 sub _refresh_channels_background {
     my $self = shift;
     
@@ -1291,7 +1310,7 @@ sub _refresh_channels_background {
             main::log_warn("Background channel refresh error: $@ - keeping existing cache");
         }
     }
-    
+        
     # Clear the background refresh flag
     $self->{background_refresh_in_progress} = 0;
 }
