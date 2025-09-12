@@ -120,6 +120,7 @@ use HTTP::Daemon;
 use HTTP::Cookies;
 use URI;
 use URI::Escape;
+use IO::Select;
 
 # Data handling modules
 use JSON::XS;
@@ -1131,9 +1132,6 @@ sub get_channels {
     my $max_retries = 3;
     my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
     
-    # Check if we need to schedule a proactive cache refresh
-    $self->_check_and_schedule_cache_refresh();
-    
     # Return cached channels if they exist and are still valid
     my $cache_timeout = 86400; # 24 hours (1 day)
     my $now = time();
@@ -1233,7 +1231,7 @@ sub get_channels {
     return $self->{channels};
 }
 
-sub _check_and_schedule_cache_refresh {
+sub _perform_cache_maintenance {
     my $self = shift;
     
     # Only proceed if we have cached data
@@ -1249,9 +1247,16 @@ sub _check_and_schedule_cache_refresh {
     
     # Schedule proactive refresh when cache is 75% of its lifetime
     if ($cache_age >= $refresh_threshold) {
-        main::log_debug("Channel cache is $cache_age seconds old (threshold: $refresh_threshold), scheduling proactive refresh");
+        main::log_debug("Cache maintenance: Channel cache is $cache_age seconds old (threshold: $refresh_threshold), scheduling proactive refresh");
         $self->{background_refresh_in_progress} = 1;
         $self->_refresh_channels_background();
+    } else {
+        # Log cache status periodically (every 6 hours for debugging)
+        my $hours_old = int($cache_age / 3600);
+        my $refresh_hours = int($refresh_threshold / 3600);
+        if ($cache_age % 21600 < 60) { # Log approximately every 6 hours (within 1 minute window)
+            main::log_debug("Cache maintenance: Channel cache is $hours_old hours old (refresh at $refresh_hours hours)");
+        }
     }
 }
 
@@ -1425,44 +1430,59 @@ sub start_http_daemon {
     main::log_info("HTTP server started on port $port");
     main::log_info("Access channels at: http://127.0.0.1:$port/channel.m3u8");
     
+    # Set up IO::Select for non-blocking server loop with periodic maintenance
+    my $select = IO::Select->new($daemon);
+    my $maintenance_interval = 60; # Check cache maintenance every 60 seconds
+    
     while ($main::RUNNING) {
-        main::log_trace("Server loop iteration, waiting for client connection");
-        my $client = $daemon->accept();
-        if (!$client) {
-            main::log_trace("No client connection, continuing loop");
-            next;
-        }
+        main::log_trace("Server loop iteration, waiting for client connection or maintenance timeout");
         
-        main::log_debug("Client connected, handling request");
+        # Use select with timeout to enable periodic maintenance
+        my @ready = $select->can_read($maintenance_interval);
         
-        # Handle client with timeout and error handling
-        eval {
-            local $SIG{ALRM} = sub { die "timeout" };
-            local $SIG{PIPE} = 'IGNORE'; # Ignore broken pipe for this client
-            alarm(10); # Reduced timeout to 10 seconds
-            
-            # Handle only one request per connection to avoid holding connections open
-            my $request = $client->get_request();
-            if ($request) {
-                handle_http_request($client, $request, $sxm);
+        if (@ready) {
+            # We have a client connection waiting
+            my $client = $daemon->accept();
+            if (!$client) {
+                main::log_trace("No client connection despite select indication, continuing loop");
+                next;
             }
             
-            alarm(0);
-        };
-        if ($@) {
-            if ($@ =~ /timeout/) {
-                main::log_warn("Client request timeout");
-            } else {
-                main::log_warn("Client request error: $@");
+            main::log_debug("Client connected, handling request");
+            
+            # Handle client with timeout and error handling
+            eval {
+                local $SIG{ALRM} = sub { die "timeout" };
+                local $SIG{PIPE} = 'IGNORE'; # Ignore broken pipe for this client
+                alarm(10); # Reduced timeout to 10 seconds
+                
+                # Handle only one request per connection to avoid holding connections open
+                my $request = $client->get_request();
+                if ($request) {
+                    handle_http_request($client, $request, $sxm);
+                }
+                
+                alarm(0);
+            };
+            if ($@) {
+                if ($@ =~ /timeout/) {
+                    main::log_warn("Client request timeout");
+                } else {
+                    main::log_warn("Client request error: $@");
+                }
             }
+            
+            # Ensure client connection is properly closed
+            eval {
+                $client->close();
+            };
+            undef $client;
+            main::log_debug("Client connection closed");
+        } else {
+            # No client connections - perform periodic maintenance
+            main::log_trace("No client connections, performing cache maintenance check");
+            $sxm->_perform_cache_maintenance();
         }
-        
-        # Ensure client connection is properly closed
-        eval {
-            $client->close();
-        };
-        undef $client;
-        main::log_debug("Client connection closed");
     }
     
     main::log_debug("Server shutdown - daemon closed");
