@@ -1128,8 +1128,9 @@ sub get_segment {
 sub get_channels {
     my $self = shift;
     my $retry_count = shift || 0;
-    my $max_retries = 3;
-    my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
+    my $reauth_attempted = shift || 0; # Track if we've attempted reauthorization
+    my $max_retries = 1; # Reduce from 3 to 1 simple retry
+    my $retry_delay = 2; # Use fixed delay of 2 seconds
     
     # Download channel list if necessary - cache indefinitely for playback use
     if (!defined $self->{channels}) {
@@ -1156,7 +1157,7 @@ sub get_channels {
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
-                return $self->get_channels($retry_count + 1);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
             }
             main::log_error("Failed to get channel list after $max_retries retries");
 
@@ -1175,7 +1176,7 @@ sub get_channels {
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
-                return $self->get_channels($retry_count + 1);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
             }
             main::log_error("Failed to parse channel data after $max_retries retries");
             return [];
@@ -1184,12 +1185,30 @@ sub get_channels {
         # Ensure channels is defined and is an array reference
         if (!defined $channels || ref($channels) ne 'ARRAY') {
             main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
+            
+            # First try simple retry
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
-                return $self->get_channels($retry_count + 1);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
             }
-            main::log_error("Channel data format invalid after $max_retries retries");
+            
+            # If simple retry failed and we haven't tried reauthorization yet, try clearing cookies and reauthenticating
+            if (!$reauth_attempted) {
+                main::log_info("Simple retry failed, attempting to clear cookies and reauthenticate...");
+                $self->clear_channel_cookies(undef); # Clear global cookies
+                
+                # Try to authenticate again
+                if ($self->authenticate(undef)) {
+                    main::log_info("Reauthorization successful, retrying channel fetch...");
+                    # Reset retry count and try again with fresh authentication
+                    return $self->get_channels(0, 1); # reauth_attempted = 1
+                } else {
+                    main::log_error("Reauthorization failed");
+                }
+            }
+            
+            main::log_error("Channel data format invalid after retries and reauthorization");
             return [];
         }
         
@@ -1199,7 +1218,7 @@ sub get_channels {
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
-                return $self->get_channels($retry_count + 1);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
             }
             main::log_error("Received empty channel list after $max_retries retries");
             # Don't cache empty results - let subsequent calls retry
