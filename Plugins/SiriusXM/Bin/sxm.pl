@@ -1131,7 +1131,7 @@ sub get_channels {
     my $max_retries = 3;
     my $retry_delay = 2 ** $retry_count; # Exponential backoff: 1, 2, 4 seconds
     
-    # Download channel list if necessary
+    # Download channel list if necessary - cache indefinitely for playback use
     if (!defined $self->{channels}) {
         main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
         
@@ -1213,6 +1213,19 @@ sub get_channels {
     
     return $self->{channels};
 }
+
+sub refresh_channels {
+    my $self = shift;
+    
+    # Clear cached channels to force refresh
+    main::log_debug("Refreshing channel data (clearing cache)");
+    delete $self->{channels};
+    
+    # Fetch fresh channel data
+    return $self->get_channels();
+}
+
+
 
 sub get_channel {
     my ($self, $name) = @_;
@@ -1447,7 +1460,7 @@ sub handle_http_request {
         main::log_debug("Channel info request for: $channel");
         
         if ( $channel eq 'all' ) {
-            $channel_info = $sxm->get_channels();
+            $channel_info = $sxm->refresh_channels();
         } else {
             $channel_info = $sxm->get_simplified_channel_info($channel);
         }
