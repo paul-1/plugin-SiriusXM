@@ -1185,7 +1185,7 @@ sub get_channels {
         # Ensure channels is defined and is an array reference
         if (!defined $channels || ref($channels) ne 'ARRAY') {
             main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
-            
+            main::log_error("Channel data received: " . $self->{json}->encode($data));
             # First try simple retry
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
