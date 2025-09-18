@@ -1167,6 +1167,54 @@ sub get_channels {
             return [];
         }
         
+        # Check for API response status - only code 100 indicates success
+        my ($status, $message, $message_code);
+        eval {
+            $status = $data->{ModuleListResponse}->{status};
+            if (exists $data->{ModuleListResponse}->{messages} && 
+                ref($data->{ModuleListResponse}->{messages}) eq 'ARRAY' &&
+                @{$data->{ModuleListResponse}->{messages}} > 0) {
+                $message = $data->{ModuleListResponse}->{messages}->[0]->{message};
+                $message_code = $data->{ModuleListResponse}->{messages}->[0]->{code};
+            }
+        };
+        if ($@) {
+            main::log_debug("No status messages found in channel list response, proceeding with channel parsing");
+        }
+        
+        # Check for successful response (code 100) - anything else is an error
+        if (defined $message_code && $message_code != 100) {
+            # Handle session expiration codes specifically
+            if ($message_code == 201 || $message_code == 208) {
+                if (!$reauth_attempted) {
+                    main::log_warn("Session expired (code: $message_code), re-authenticating for channel list");
+                    $self->clear_channel_cookies(undef); # Clear global cookies
+                    
+                    if ($self->authenticate(undef)) {
+                        main::log_info("Successfully re-authenticated for channel list");
+                        # Reset retry count and try again with fresh authentication
+                        return $self->get_channels(0, 1); # reauth_attempted = 1
+                    } else {
+                        main::log_error("Failed to re-authenticate for channel list");
+                        return [];
+                    }
+                } else {
+                    main::log_error("Session expired after re-authentication attempt, giving up");
+                    return [];
+                }
+            } else {
+                # Handle other error codes
+                main::log_error("API returned error code $message_code: $message");
+                if ($retry_count < $max_retries) {
+                    main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                    sleep($retry_delay);
+                    return $self->get_channels($retry_count + 1, $reauth_attempted);
+                }
+                main::log_error("Failed to get channel list after $max_retries retries due to API error");
+                return [];
+            }
+        }
+        
         my $channels;
         eval {
             $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
@@ -1186,29 +1234,15 @@ sub get_channels {
         if (!defined $channels || ref($channels) ne 'ARRAY') {
             main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
             main::log_error("Channel data received: " . $self->{json}->encode($data));
-            # First try simple retry
+            
+            # Simple retry only (session expiration already handled above)
             if ($retry_count < $max_retries) {
                 main::log_info("Retrying channel fetch in $retry_delay seconds...");
                 sleep($retry_delay);
                 return $self->get_channels($retry_count + 1, $reauth_attempted);
             }
             
-            # If simple retry failed and we haven't tried reauthorization yet, try clearing cookies and reauthenticating
-            if (!$reauth_attempted) {
-                main::log_info("Simple retry failed, attempting to clear cookies and reauthenticate...");
-                $self->clear_channel_cookies(undef); # Clear global cookies
-                
-                # Try to authenticate again
-                if ($self->authenticate(undef)) {
-                    main::log_info("Reauthorization successful, retrying channel fetch...");
-                    # Reset retry count and try again with fresh authentication
-                    return $self->get_channels(0, 1); # reauth_attempted = 1
-                } else {
-                    main::log_error("Reauthorization failed");
-                }
-            }
-            
-            main::log_error("Channel data format invalid after retries and reauthorization");
+            main::log_error("Channel data format invalid after $max_retries retries");
             return [];
         }
         
