@@ -941,8 +941,8 @@ sub get_playlist {
     
     my $response = $self->{ua}->get($uri);
     
-    if ($response->code == 403) {
-        main::log_warn("Received status code 403 on playlist for channel: $channel_id, renewing session");
+    if ($response->code == 403 || $response->code == 500) {
+        main::log_warn("Received status code " . $response->code . " on playlist for channel: $channel_id, renewing session");
         
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
@@ -1124,9 +1124,9 @@ sub get_segment {
     
     my $response = $self->{ua}->get($uri);
     
-    if ($response->code == 403) {
+    if ($response->code == 403 || $response->code == 500) {
         if ($max_attempts > 0) {
-            main::log_warn("Received status code 403 on segment for channel: $channel_id, renewing session");
+            main::log_warn("Received status code " . $response->code . " on segment for channel: $channel_id, renewing session");
             
             # Try re-authentication first (without clearing cookies)
             main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
@@ -1147,7 +1147,7 @@ sub get_segment {
                 }
             }
         } else {
-            main::log_error("Received status code 403 on segment for channel: $channel_id, max attempts exceeded");
+            main::log_error("Received status code " . $response->code . " on segment for channel: $channel_id, max attempts exceeded");
             return undef;
         }
     }
