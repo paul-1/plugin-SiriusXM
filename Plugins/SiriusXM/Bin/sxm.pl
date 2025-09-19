@@ -522,10 +522,12 @@ sub post_request {
     my $json_data = $self->{json}->encode($postdata);
     
     main::log_trace("POST request to: $url");
-    # Sanitize POST data to prevent password logging
-    my $sanitized_postdata = main::sanitize_for_logging($postdata);
-    my $sanitized_json = $self->{json}->encode($sanitized_postdata);
-    main::log_trace("POST data: $sanitized_json");
+    # Only sanitize POST data if trace logging is enabled to avoid unnecessary overhead
+    if ($main::CONFIG{verbose} >= main::LOG_TRACE) {
+        my $sanitized_postdata = main::sanitize_for_logging($postdata);
+        my $sanitized_json = $self->{json}->encode($sanitized_postdata);
+        main::log_trace("POST data: $sanitized_json");
+    }
     
     my $request = HTTP::Request->new(POST => $url);
     $request->content_type('application/json');
