@@ -146,7 +146,7 @@ use constant {
 };
 
 # Global configuration
-my %CONFIG = (
+our %CONFIG = (
     username     => '',
     password     => '',
     port         => 9999,
@@ -274,6 +274,36 @@ sub log_warn  { log_message(LOG_WARN,  shift) }
 sub log_info  { log_message(LOG_INFO,  shift) }
 sub log_debug { log_message(LOG_DEBUG, shift) }
 sub log_trace { log_message(LOG_TRACE, shift) }
+
+# Sanitize sensitive data for safe logging
+sub sanitize_for_logging {
+    my ($data) = @_;
+    
+    # Handle different data types
+    if (ref($data) eq 'HASH') {
+        my %sanitized = %$data;  # Create a copy
+        
+        # Recursively sanitize hash values
+        for my $key (keys %sanitized) {
+            if ($key =~ /^password$/i) {
+                # Mask password fields
+                $sanitized{$key} = '*****';
+            } else {
+                # Recursively sanitize nested structures
+                $sanitized{$key} = sanitize_for_logging($sanitized{$key});
+            }
+        }
+        return \%sanitized;
+    }
+    elsif (ref($data) eq 'ARRAY') {
+        # Recursively sanitize array elements
+        return [map { sanitize_for_logging($_) } @$data];
+    }
+    else {
+        # Return scalars as-is
+        return $data;
+    }
+}
 
 #=============================================================================
 # Signal handling
@@ -492,7 +522,12 @@ sub post_request {
     my $json_data = $self->{json}->encode($postdata);
     
     main::log_trace("POST request to: $url");
-    main::log_trace("POST data: $json_data");
+    # Only sanitize POST data if trace logging is enabled to avoid unnecessary overhead
+    if ($main::CONFIG{verbose} >= main::LOG_TRACE) {
+        my $sanitized_postdata = main::sanitize_for_logging($postdata);
+        my $sanitized_json = $self->{json}->encode($sanitized_postdata);
+        main::log_trace("POST data: $sanitized_json");
+    }
     
     my $request = HTTP::Request->new(POST => $url);
     $request->content_type('application/json');
