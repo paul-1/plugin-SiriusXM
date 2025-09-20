@@ -146,7 +146,7 @@ use constant {
 };
 
 # Global configuration
-my %CONFIG = (
+our %CONFIG = (
     username     => '',
     password     => '',
     port         => 9999,
