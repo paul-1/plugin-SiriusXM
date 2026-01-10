@@ -1185,9 +1185,9 @@ sub cache_next_segment {
     # Log progress
     my $remaining = scalar(@$queue);
     if ($remaining > 0) {
-        main::log_info("Cached $cached_count segments for channel $channel_id, $remaining remaining in queue");
+        main::log_debug("Cached $cached_count segments for channel $channel_id, $remaining remaining in queue");
     } else {
-        main::log_info("Cached $cached_count segments for channel $channel_id, queue now empty");
+        main::log_debug("Cached $cached_count segments for channel $channel_id, queue now empty");
     }
 }
 
