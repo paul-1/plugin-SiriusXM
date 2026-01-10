@@ -1003,10 +1003,12 @@ sub get_playlist {
             }
         }
 
-        # Stop output N lines before the last ".aac" line where N = segment_drop + 1
+        # Drop the last N segments by finding the cutoff point
+        # If we want to drop 3 segments, we keep up to aac_lines[-4] (the 4th from end)
+        # This drops the last 3 .aac segments and their associated metadata
         my @removed_lines;
         if (@aac_lines > $segment_drop) {
-            # Calculate cutoff line: -(segment_drop + 1) from the end of .aac lines
+            # Calculate cutoff line: keep up to the (segment_drop + 1)th .aac line from the end
             my $cutoff_line = $aac_lines[-($segment_drop + 1)];
             @removed_lines = @lines[($cutoff_line + 1) .. $#lines];  # Get the lines being removed
             @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
