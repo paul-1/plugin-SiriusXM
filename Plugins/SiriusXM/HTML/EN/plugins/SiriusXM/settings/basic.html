@@ -58,6 +58,10 @@
 		</select>
 	[% END %]
 
+	[% WRAPPER setting title="PLUGIN_SIRIUSXM_SEGMENT_DROP" desc="PLUGIN_SIRIUSXM_SEGMENT_DROP_DESC" %]
+		<input type="number" class="stdedit" name="pref_segment_drop" id="segment_drop" value="[% prefs.pref_segment_drop || 3 %]" min="0" max="30" size="10">
+	[% END %]
+
 	<div class="prefDesc">
 		<input type="submit" name="saveSettings" value="[% 'PLUGIN_SIRIUSXM_SAVE_SETTINGS' | string %]" class="stdclick">
 	</div>

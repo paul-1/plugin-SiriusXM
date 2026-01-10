@@ -153,3 +153,9 @@ PLUGIN_SIRIUSXM_PROXY_NOT_RUNNING
 
 PLUGIN_SIRIUSXM_PROXY_RESTART_SUCCESS
 	EN	Proxy restarted successfully
+
+PLUGIN_SIRIUSXM_SEGMENT_DROP
+	EN	Playlist Segment Drop
+
+PLUGIN_SIRIUSXM_SEGMENT_DROP_DESC
+	EN	Number of segments to drop from the first playlist to buffer more content (0-30, default: 3)
