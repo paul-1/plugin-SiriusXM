@@ -345,9 +345,10 @@ use JSON::XS;
 
 # Constants
 use constant {
-    USER_AGENT       => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
-    REST_FORMAT      => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
-    LIVE_PRIMARY_HLS => 'https://siriusxm-priprodlive.akamaized.net',
+    USER_AGENT              => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
+    REST_FORMAT             => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
+    LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
+    SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
 };
 
 sub new {
@@ -1159,11 +1160,10 @@ sub cache_next_segment {
     my $queue = $self->{segment_queue}->{$channel_id};
     return unless $queue && @$queue;
     
-    # Cache up to 2 segments at a time to avoid blocking while making progress
-    my $batch_size = 2;
+    # Cache up to SEGMENT_CACHE_BATCH_SIZE segments at a time to avoid blocking while making progress
     my $cached_count = 0;
     
-    for (my $i = 0; $i < $batch_size && @$queue; $i++) {
+    while ($cached_count < SEGMENT_CACHE_BATCH_SIZE && @$queue) {
         # Get the next segment to cache
         my $segment_path = shift @$queue;
         
