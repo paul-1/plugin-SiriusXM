@@ -1159,20 +1159,35 @@ sub cache_next_segment {
     my $queue = $self->{segment_queue}->{$channel_id};
     return unless $queue && @$queue;
     
-    # Get the next segment to cache
-    my $segment_path = shift @$queue;
+    # Cache up to 2 segments at a time to avoid blocking while making progress
+    my $batch_size = 2;
+    my $cached_count = 0;
     
-    main::log_debug("Caching segment: $segment_path for channel $channel_id");
+    for (my $i = 0; $i < $batch_size && @$queue; $i++) {
+        # Get the next segment to cache
+        my $segment_path = shift @$queue;
+        
+        main::log_debug("Caching segment: $segment_path for channel $channel_id");
+        
+        # Fetch the segment
+        my $segment_data = $self->get_segment($segment_path);
+        
+        if ($segment_data) {
+            # Store in cache
+            $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
+            main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+            $cached_count++;
+        } else {
+            main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+        }
+    }
     
-    # Fetch the segment
-    my $segment_data = $self->get_segment($segment_path);
-    
-    if ($segment_data) {
-        # Store in cache
-        $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
-        main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+    # Log progress
+    my $remaining = scalar(@$queue);
+    if ($remaining > 0) {
+        main::log_info("Cached $cached_count segments for channel $channel_id, $remaining remaining in queue");
     } else {
-        main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+        main::log_info("Cached $cached_count segments for channel $channel_id, queue now empty");
     }
 }
 
