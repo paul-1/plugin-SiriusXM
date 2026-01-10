@@ -102,7 +102,7 @@ sub handler {
             ($params->{pref_region} && $params->{pref_region} ne $old_region) ||
             ($params->{pref_quality} && $params->{pref_quality} ne $old_quality) ||
             ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level) ||
-            (defined $params->{pref_segment_drop} && $params->{pref_segment_drop} ne $old_segment_drop)
+            (defined $params->{pref_segment_drop} && $params->{pref_segment_drop} != $old_segment_drop)
         );
         
         if ($need_restart) {

@@ -990,7 +990,7 @@ sub get_playlist {
     # Extract and store segment list from the playlist BEFORE modifying it
     $self->extract_segments_from_playlist($content, $channel_id);
 
-    # Remove segments from the playlist if this is the first time weve seen it
+    # Remove segments from the playlist if this is the first time we've seen it
     # This will make ffmpeg cache a bit more without needing to use command line options
     my $segment_drop = $CONFIG{segment_drop};
     if ( $segment_drop > 0 && (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1) ) {
