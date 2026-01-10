@@ -359,6 +359,8 @@ sub new {
         channels  => undef,
         channel_base_paths => {},
         channel_cookies => {},  # Store per-channel cookie jars
+        segment_cache => {},    # Store cached segments per channel_id
+        segment_queue => {},    # Track segments to be cached per channel_id
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -1007,7 +1009,158 @@ sub get_playlist {
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
     }
+    
+    # Extract and store segment list from the playlist
+    $self->extract_segments_from_playlist($content, $channel_id);
+    
     return $content;
+}
+
+# Extract segment paths from a playlist
+sub extract_segments_from_playlist {
+    my ($self, $content, $channel_id) = @_;
+    
+    my @segments = ();
+    for my $line (split /\n/, $content) {
+        if ($line =~ /\.aac$/) {
+            # Extract just the filename
+            $line =~ s/^\s+|\s+$//g;
+            push @segments, $line;
+        }
+    }
+    
+    # Store the segment list for this channel
+    $self->{playlists}->{$channel_id}->{'segments'} = \@segments;
+    
+    main::log_debug("Extracted " . scalar(@segments) . " segments for channel $channel_id");
+    main::log_trace("Segments: " . join(", ", @segments));
+    
+    # Check if we need to start caching new segments
+    # Find segments not yet in cache or queue
+    my @uncached_segments = ();
+    for my $segment (@segments) {
+        # Skip if already cached
+        next if exists $self->{segment_cache}->{$channel_id}->{$segment};
+        
+        # Skip if already in queue
+        my $in_queue = 0;
+        if ($self->{segment_queue}->{$channel_id}) {
+            for my $queued (@{$self->{segment_queue}->{$channel_id}}) {
+                if ($queued eq $segment) {
+                    $in_queue = 1;
+                    last;
+                }
+            }
+        }
+        next if $in_queue;
+        
+        push @uncached_segments, $segment;
+    }
+    
+    # If there are uncached segments and no active queue, start caching
+    if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
+        main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . " uncached segments");
+        # Add to queue and start caching
+        $self->{segment_queue}->{$channel_id} = \@uncached_segments;
+        $self->cache_next_segment($channel_id);
+    }
+    
+    return \@segments;
+}
+
+# Start precaching remaining segments in the background
+sub precache_segments {
+    my ($self, $channel_id, $current_segment) = @_;
+    
+    # Get the segment list for this channel
+    my $segments = $self->{playlists}->{$channel_id}->{'segments'};
+    return unless $segments && @$segments;
+    
+    # Find the index of the current segment
+    my $current_index = -1;
+    for my $i (0 .. $#$segments) {
+        if ($segments->[$i] eq $current_segment) {
+            $current_index = $i;
+            last;
+        }
+    }
+    
+    if ($current_index < 0) {
+        main::log_warn("Current segment $current_segment not found in playlist for channel $channel_id");
+        return;
+    }
+    
+    # Get remaining segments after the current one
+    my @remaining_segments = @{$segments}[($current_index + 1) .. $#$segments];
+    
+    if (@remaining_segments) {
+        main::log_info("Starting precache of " . scalar(@remaining_segments) . " segments for channel $channel_id");
+        main::log_debug("Segments to cache: " . join(", ", @remaining_segments));
+        
+        # Store the queue of segments to cache
+        $self->{segment_queue}->{$channel_id} = \@remaining_segments;
+        
+        # Cache the first segment immediately in the background
+        $self->cache_next_segment($channel_id);
+    } else {
+        main::log_debug("No remaining segments to precache for channel $channel_id");
+    }
+}
+
+# Cache the next segment in the queue for a channel
+sub cache_next_segment {
+    my ($self, $channel_id) = @_;
+    
+    my $queue = $self->{segment_queue}->{$channel_id};
+    return unless $queue && @$queue;
+    
+    # Get the next segment to cache
+    my $segment_path = shift @$queue;
+    
+    main::log_debug("Caching segment: $segment_path for channel $channel_id");
+    
+    # Fetch the segment
+    my $segment_data = $self->get_segment($segment_path);
+    
+    if ($segment_data) {
+        # Store in cache
+        $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
+        main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+    } else {
+        main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+    }
+}
+
+# Get a segment from cache or fetch it
+sub get_cached_segment {
+    my ($self, $segment_path, $channel_id) = @_;
+    
+    # Check if segment is in cache
+    if (exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
+        main::log_info("Using cached segment: $segment_path for channel $channel_id");
+        my $data = $self->{segment_cache}->{$channel_id}->{$segment_path};
+        
+        # Drop the segment from cache after use
+        delete $self->{segment_cache}->{$channel_id}->{$segment_path};
+        main::log_debug("Dropped cached segment: $segment_path for channel $channel_id");
+        
+        # Start caching the next segment in the queue
+        $self->cache_next_segment($channel_id);
+        
+        return $data;
+    }
+    
+    # Not in cache, fetch it and start precaching
+    main::log_debug("Segment not in cache, fetching: $segment_path for channel $channel_id");
+    
+    my $data = $self->get_segment($segment_path);
+    
+    if ($data) {
+        # Start precaching remaining segments
+        $self->precache_segments($channel_id, $segment_path);
+    }
+    
+    return $data;
 }
 
 sub select_quality_variant {
@@ -1525,7 +1678,22 @@ sub handle_http_request {
         
         main::log_debug("Segment request: $segment_path");
         
-        my $data = $sxm->get_segment($segment_path);
+        # Extract channel_id from segment path
+        my $channel_id;
+        if ($segment_path =~ /^([^_]+)_/) {
+            $channel_id = $1;
+        }
+        
+        my $data;
+        if ($channel_id) {
+            # Use cached segment if available
+            $data = $sxm->get_cached_segment($segment_path, $channel_id);
+        } else {
+            # Fallback to direct fetch if we can't extract channel_id
+            main::log_warn("Could not extract channel_id from segment path: $segment_path");
+            $data = $sxm->get_segment($segment_path);
+        }
+        
         if ($data) {
             my $response = HTTP::Response->new(200);
             $response->content_type('audio/x-aac');
