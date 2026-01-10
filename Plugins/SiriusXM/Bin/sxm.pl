@@ -1075,16 +1075,19 @@ sub extract_segments_from_playlist {
     
     # If there are uncached segments and no active queue, start caching
     if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
-        # Calculate total cache size
+        # Calculate total cache size and count
         my $cache_size = 0;
+        my $cache_count = 0;
         if ($self->{segment_cache}->{$channel_id}) {
             for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
                 $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+                $cache_count++;
             }
         }
         
         main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
-                      " uncached segments, current cache size: " . sprintf("%.2f MB", $cache_size / 1024 / 1024));
+                      " uncached segments, current cache: " . $cache_count . " segments (" . 
+                      sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
         # Add to queue and start caching
         $self->{segment_queue}->{$channel_id} = \@uncached_segments;
         $self->cache_next_segment($channel_id);
@@ -1119,17 +1122,19 @@ sub precache_segments {
     my @remaining_segments = @{$segments}[($current_index + 1) .. $#$segments];
     
     if (@remaining_segments) {
-        # Calculate total cache size
+        # Calculate total cache size and count
         my $cache_size = 0;
+        my $cache_count = 0;
         if ($self->{segment_cache}->{$channel_id}) {
             for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
                 $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+                $cache_count++;
             }
         }
         
         main::log_info("Starting precache of " . scalar(@remaining_segments) . 
-                      " segments for channel $channel_id, current cache size: " . 
-                      sprintf("%.2f MB", $cache_size / 1024 / 1024));
+                      " segments for channel $channel_id, current cache: " . $cache_count . " segments (" . 
+                      sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
         main::log_debug("Segments to cache: " . join(", ", @remaining_segments));
         
         # Store the queue of segments to cache
