@@ -15,6 +15,7 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
+        --segment-drop NUM      Number of segments to drop from first playlist (default: 3, max: 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
         -h, --help              Show this help message
@@ -157,6 +158,7 @@ our %CONFIG = (
     help         => 0,
     quality      => 'High',
     logfile      => '/var/log/sxm-proxy.log',
+    segment_drop => 3,
 );
 
 # Global state
@@ -988,9 +990,10 @@ sub get_playlist {
     # Extract and store segment list from the playlist BEFORE modifying it
     $self->extract_segments_from_playlist($content, $channel_id);
 
-    # Remove the last 3 segments from the playlist if this is the first time weve seen it
-    # This will make ffmpeg cache a bit more without needing to use command lines options
-    if ( not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1 ) {
+    # Remove segments from the playlist if this is the first time we've seen it
+    # This will make ffmpeg cache a bit more without needing to use command line options
+    my $segment_drop = $CONFIG{segment_drop};
+    if ( $segment_drop > 0 && (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1) ) {
         my @lines = split /\n/, $content;
         # Find all lines ending with ".aac"
         my @aac_lines;
@@ -1000,16 +1003,18 @@ sub get_playlist {
             }
         }
 
-        # Stop output 4 lines BEFORE the last ".aac" line 
+        # Drop the last N segments by finding the cutoff point
+        # If we want to drop 3 segments, we keep up to aac_lines[-4] (the 4th from end)
+        # This drops the last 3 .aac segments and their associated metadata
         my @removed_lines;
-        if (@aac_lines >= 3) {
-            # 4th from the end of .aac lines
-            my $cutoff_line = $aac_lines[-4];
+        if (@aac_lines > $segment_drop) {
+            # Calculate cutoff line: keep up to the (segment_drop + 1)th .aac line from the end
+            my $cutoff_line = $aac_lines[-($segment_drop + 1)];
             @removed_lines = @lines[($cutoff_line + 1) .. $#lines];  # Get the lines being removed
             @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
         }
         my $rlines = join("\n", @removed_lines);
-        main::log_trace("First Playlist, Removed $rlines");
+        main::log_trace("First Playlist, Removed $segment_drop segments: $rlines");
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
     }
@@ -1868,6 +1873,13 @@ sub parse_arguments {
             } else {
                 die "Invalid quality level: $value. Use: High, Med, Low\n";
             }
+        },
+        'segment-drop=i' => sub {
+            my ($name, $value) = @_;
+            if ($value < 0 || $value > 30) {
+                die "Invalid segment-drop value: $value. Must be between 0 and 30\n";
+            }
+            $CONFIG{segment_drop} = $value;
         },
         'logfile=s'     => \$CONFIG{logfile},
         'lmsroot=s'     => \$CONFIG{lmsroot},
