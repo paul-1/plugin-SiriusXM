@@ -345,9 +345,10 @@ use JSON::XS;
 
 # Constants
 use constant {
-    USER_AGENT       => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
-    REST_FORMAT      => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
-    LIVE_PRIMARY_HLS => 'https://siriusxm-priprodlive.akamaized.net',
+    USER_AGENT              => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
+    REST_FORMAT             => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
+    LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
+    SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
 };
 
 sub new {
@@ -1159,20 +1160,34 @@ sub cache_next_segment {
     my $queue = $self->{segment_queue}->{$channel_id};
     return unless $queue && @$queue;
     
-    # Get the next segment to cache
-    my $segment_path = shift @$queue;
+    # Cache up to SEGMENT_CACHE_BATCH_SIZE segments at a time to avoid blocking while making progress
+    my $cached_count = 0;
     
-    main::log_debug("Caching segment: $segment_path for channel $channel_id");
+    while ($cached_count < SEGMENT_CACHE_BATCH_SIZE && @$queue) {
+        # Get the next segment to cache
+        my $segment_path = shift @$queue;
+        
+        main::log_debug("Caching segment: $segment_path for channel $channel_id");
+        
+        # Fetch the segment
+        my $segment_data = $self->get_segment($segment_path);
+        
+        if ($segment_data) {
+            # Store in cache
+            $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
+            main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+            $cached_count++;
+        } else {
+            main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+        }
+    }
     
-    # Fetch the segment
-    my $segment_data = $self->get_segment($segment_path);
-    
-    if ($segment_data) {
-        # Store in cache
-        $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
-        main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+    # Log progress
+    my $remaining = scalar(@$queue);
+    if ($remaining > 0) {
+        main::log_debug("Cached $cached_count segments for channel $channel_id, $remaining remaining in queue");
     } else {
-        main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+        main::log_debug("Cached $cached_count segments for channel $channel_id, queue now empty");
     }
 }
 
