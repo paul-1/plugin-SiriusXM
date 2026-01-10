@@ -981,19 +981,12 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
     
+
+
     my @lines = split /\n/, $content;
-    my $modified_segments = 0;
-    for my $i (0..$#lines) {
-        $lines[$i] =~ s/\r?\n$//;
-        if ($lines[$i] =~ /\.aac$/) {
-            my $original = $lines[$i];
-            $lines[$i] = "$base_path/$lines[$i]";
-            $modified_segments++;
-            main::log_trace("Modified segment: '$original' -> '$lines[$i]'");
-        }
-    }
-    
-    main::log_trace("Modified $modified_segments segments with base path");
+
+
+
     return join("\n", @lines);
 }
 
