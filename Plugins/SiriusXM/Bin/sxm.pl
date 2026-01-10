@@ -359,6 +359,7 @@ sub new {
         channels  => undef,
         channel_base_paths => {},
         channel_cookies => {},  # Store per-channel cookie jars
+ 
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
     };
@@ -746,9 +747,9 @@ sub get_playlist_url {
     $use_cache //= 1;
     $max_attempts //= 5;
     
-    if ($use_cache && exists $self->{playlists}->{$channel_id}) {
+    if ($use_cache && exists $self->{playlists}->{$channel_id}->{'url'}) {
         main::log_trace("Using cached playlist for channel: $channel_id");
-        return $self->{playlists}->{$channel_id};
+        return $self->{playlists}->{$channel_id}->{'url'};
     }
     
     my $timestamp = sprintf("%.0f", time() * 1000);
@@ -819,7 +820,7 @@ sub get_playlist_url {
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
-                $self->{playlists}->{$channel_id} = $variant_url;
+                $self->{playlists}->{$channel_id}->{'url'} = $variant_url;
                 main::log_debug("Cached playlist URL for channel: $channel_id");
                 return $variant_url;
             }
@@ -980,14 +981,33 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base URL: $base_url");
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
-    
 
+    # Remove the last 3 segments from the playlist if this is the first time weve seen it
+    # This will make ffmpeg cache a bit more without needing to use command lines options
+    if ( not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1 ) {
+        my @lines = split /\n/, $content;
+        # Find all lines ending with ".aac"
+        my @aac_lines;
+        for my $i (0 .. $#lines) {
+            if ($lines[$i] =~ /\.aac/) {
+                push @aac_lines, $i;
+            }
+        }
 
-    my @lines = split /\n/, $content;
-
-
-
-    return join("\n", @lines);
+        # Stop output 4 lines BEFORE the last ".aac" line 
+        my @removed_lines;
+        if (@aac_lines >= 3) {
+            # 4th from the end of .aac lines
+            my $cutoff_line = $aac_lines[-4];
+            @removed_lines = @lines[($cutoff_line + 1) .. $#lines];  # Get the lines being removed
+            @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
+        }
+        my $rlines = join("\n", @removed_lines);
+        main::log_trace("First Playlist, Removed $rlines");
+        $self->{playlists}->{$channel_id}->{'First'} = 1;
+        $content = join("\n", @lines);
+    }
+    return $content;
 }
 
 sub select_quality_variant {
