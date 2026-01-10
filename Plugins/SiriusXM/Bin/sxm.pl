@@ -361,6 +361,7 @@ sub new {
         channel_cookies => {},  # Store per-channel cookie jars
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
+        last_segment => {},     # Track last requested segment per channel_id
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -984,6 +985,9 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
+    # Extract and store segment list from the playlist BEFORE modifying it
+    $self->extract_segments_from_playlist($content, $channel_id);
+
     # Remove the last 3 segments from the playlist if this is the first time weve seen it
     # This will make ffmpeg cache a bit more without needing to use command lines options
     if ( not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1 ) {
@@ -1010,9 +1014,6 @@ sub get_playlist {
         $content = join("\n", @lines);
     }
     
-    # Extract and store segment list from the playlist
-    $self->extract_segments_from_playlist($content, $channel_id);
-    
     return $content;
 }
 
@@ -1022,9 +1023,11 @@ sub extract_segments_from_playlist {
     
     my @segments = ();
     for my $line (split /\n/, $content) {
-        if ($line =~ /\.aac$/) {
-            # Extract just the filename
+        # Match .aac with optional whitespace/control characters at end
+        if ($line =~ /\.aac/) {
+            # Extract just the filename, strip all whitespace
             $line =~ s/^\s+|\s+$//g;
+            $line =~ s/\r//g;  # Remove any carriage returns
             push @segments, $line;
         }
     }
@@ -1033,12 +1036,25 @@ sub extract_segments_from_playlist {
     $self->{playlists}->{$channel_id}->{'segments'} = \@segments;
     
     main::log_debug("Extracted " . scalar(@segments) . " segments for channel $channel_id");
-    main::log_trace("Segments: " . join(", ", @segments));
     
     # Check if we need to start caching new segments
-    # Find segments not yet in cache or queue
+    # Only look from the last requested segment to the end
+    my $start_index = 0;
+    if ($self->{last_segment}->{$channel_id}) {
+        my $last_seg = $self->{last_segment}->{$channel_id};
+        for my $i (0 .. $#segments) {
+            if ($segments[$i] eq $last_seg) {
+                $start_index = $i + 1;  # Start from next segment
+                last;
+            }
+        }
+    }
+    
+    # Find segments not yet in cache or queue, starting from last requested
     my @uncached_segments = ();
-    for my $segment (@segments) {
+    for my $i ($start_index .. $#segments) {
+        my $segment = $segments[$i];
+        
         # Skip if already cached
         next if exists $self->{segment_cache}->{$channel_id}->{$segment};
         
@@ -1059,7 +1075,16 @@ sub extract_segments_from_playlist {
     
     # If there are uncached segments and no active queue, start caching
     if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
-        main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . " uncached segments");
+        # Calculate total cache size
+        my $cache_size = 0;
+        if ($self->{segment_cache}->{$channel_id}) {
+            for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
+                $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+            }
+        }
+        
+        main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
+                      " uncached segments, current cache size: " . sprintf("%.2f MB", $cache_size / 1024 / 1024));
         # Add to queue and start caching
         $self->{segment_queue}->{$channel_id} = \@uncached_segments;
         $self->cache_next_segment($channel_id);
@@ -1094,7 +1119,17 @@ sub precache_segments {
     my @remaining_segments = @{$segments}[($current_index + 1) .. $#$segments];
     
     if (@remaining_segments) {
-        main::log_info("Starting precache of " . scalar(@remaining_segments) . " segments for channel $channel_id");
+        # Calculate total cache size
+        my $cache_size = 0;
+        if ($self->{segment_cache}->{$channel_id}) {
+            for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
+                $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+            }
+        }
+        
+        main::log_info("Starting precache of " . scalar(@remaining_segments) . 
+                      " segments for channel $channel_id, current cache size: " . 
+                      sprintf("%.2f MB", $cache_size / 1024 / 1024));
         main::log_debug("Segments to cache: " . join(", ", @remaining_segments));
         
         # Store the queue of segments to cache
@@ -1134,6 +1169,9 @@ sub cache_next_segment {
 # Get a segment from cache or fetch it
 sub get_cached_segment {
     my ($self, $segment_path, $channel_id) = @_;
+    
+    # Track this as the last requested segment for this channel
+    $self->{last_segment}->{$channel_id} = $segment_path;
     
     # Check if segment is in cache
     if (exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
