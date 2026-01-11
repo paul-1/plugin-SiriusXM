@@ -1189,11 +1189,8 @@ sub calculate_playlist_update_delay {
     my $delay = ($new_segment_count * $avg_duration) - 1;
     
     # Ensure delay is at least 1 second and at most 300 seconds (5 minutes)
-    $delay = 1 if $delay < 1;
-    $delay = 300 if $delay > 300;
-    
-    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (avg duration: %.1f, new segments: %d)", 
-                           $delay, $avg_duration, $new_segment_count));
+    $delay = 5 if $delay < 5;
+    $delay = 20 if $delay > 20;
     
     return $delay;
 }
@@ -1863,7 +1860,7 @@ sub start_http_daemon {
     # Create IO::Select for non-blocking accept with timeout
     my $select = IO::Select->new($daemon);
     my $last_refresh_check = time();
-    my $refresh_check_interval = 1;  # Check for expired playlists every 5 seconds
+    my $refresh_check_interval = 1;  # Check for expired playlists every 1 seconds
     
     while ($main::RUNNING) {
         # Check if any expired playlists need refreshing or segments need caching
