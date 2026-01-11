@@ -1182,11 +1182,7 @@ sub cache_next_segment {
     
     # Log progress
     my $remaining = scalar(@$queue);
-    if ($remaining > 0) {
-        main::log_debug("Cached $cached_count segments for channel $channel_id, $remaining remaining in queue");
-    } else {
-        main::log_debug("Cached $cached_count segments for channel $channel_id, queue now empty");
-    }
+    main::log_debug("Cached $cached_count segments for channel $channel_id, $remaining remaining segments to cache");
 }
 
 # Get a segment from cache or fetch it
@@ -1203,7 +1199,11 @@ sub get_cached_segment {
         
         # Drop the segment from cache after use
         delete $self->{segment_cache}->{$channel_id}->{$segment_path};
-        main::log_debug("Dropped cached segment: $segment_path for channel $channel_id");
+        
+        # Get the number of remaining cached segments for this channel
+        my $remaining_segments = scalar keys %{$self->{segment_cache}->{$channel_id}};
+        # Optionally log or output the count of remaining segments
+        main::log_debug("Dropped cached segment: $segment_path, Segments in cache: $remaining_segments");
         
         # Start caching the next segment in the queue
         $self->cache_next_segment($channel_id);
