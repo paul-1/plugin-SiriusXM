@@ -155,7 +155,7 @@ PLUGIN_SIRIUSXM_PROXY_RESTART_SUCCESS
 	EN	Proxy restarted successfully
 
 PLUGIN_SIRIUSXM_SEGMENT_DROP
-	EN	Playlist Segment Drop
+	EN	Playlist behind live
 
 PLUGIN_SIRIUSXM_SEGMENT_DROP_DESC
-	EN	Number of segments to drop from the first playlist to buffer more content (0-30, default: 3)
+	EN	FFmpeg will start about 3 segments behind live. Number of additional 10s segments behind live to start. (0-30, default: 1)

@@ -63,7 +63,7 @@ use constant HAS_AIO      => 0;
 use constant LOCALFILE    => 0;
 use constant NOMYSB       => 1;
 
-our $VERSION = '1.0.0';
+our $VERSION = '1.1.0';
 our $REVISION    = undef;
 our $BUILDDATE   = undef;
 
@@ -158,7 +158,7 @@ our %CONFIG = (
     help         => 0,
     quality      => 'High',
     logfile      => '/var/log/sxm-proxy.log',
-    segment_drop => 3,
+    segment_drop => 0,
 );
 
 # Global state
@@ -1005,8 +1005,6 @@ sub get_playlist {
         }
 
         # Drop the last N segments by finding the cutoff point
-        # If we want to drop 3 segments, we keep up to aac_lines[-4] (the 4th from end)
-        # This drops the last 3 .aac segments and their associated metadata
         my @removed_lines;
         if (@aac_lines > $segment_drop) {
             # Calculate cutoff line: keep up to the (segment_drop + 1)th .aac line from the end
@@ -1015,7 +1013,7 @@ sub get_playlist {
             @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
         }
         my $rlines = join("\n", @removed_lines);
-        main::log_trace("First Playlist, Removed $segment_drop segments: $rlines");
+        main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
     }

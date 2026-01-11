@@ -132,7 +132,6 @@ sub startProxy {
     my $region = $prefs->get('region') || 'US';
     my $quality = $prefs->get('quality') || 'high';
     my $segment_drop = $prefs->get('segment_drop');
-    $segment_drop = 3 unless defined $segment_drop;
     
     # Check if credentials are configured
     unless ($username && $password) {
