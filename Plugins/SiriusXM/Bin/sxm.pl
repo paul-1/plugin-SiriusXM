@@ -368,8 +368,6 @@ sub new {
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_next_update => {}, # Track next scheduled update time per channel_id
-        playlist_first_load => {},  # Track if this is the first playlist load per channel_id
- 
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
     };
@@ -1012,6 +1010,8 @@ sub get_playlist {
     # Extract and store segment list from the playlist BEFORE modifying it
     # This now returns (segments_array_ref, uncached_segment_count)
     my ($segments, $new_segment_count) = $self->extract_segments_from_playlist($content, $channel_id);
+    # Cache the playlist content
+    $self->{playlist_cache}->{$channel_id} = $content;
 
     # Remove segments from the playlist if this is the first time we've seen it
     # This will make ffmpeg cache a bit more without needing to use command line options
@@ -1038,19 +1038,6 @@ sub get_playlist {
         main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
-    }
-    
-    # Cache the playlist content
-    $self->{playlist_cache}->{$channel_id} = $content;
-    
-    # Check if this is the first playlist load for this channel
-    my $is_first_load = !exists $self->{playlist_first_load}->{$channel_id};
-    
-    if ($is_first_load) {
-        # Mark that we've loaded this channel's playlist at least once
-        $self->{playlist_first_load}->{$channel_id} = 1;
-        main::log_info("First playlist load for channel $channel_id - skipping scheduling (may be caching many segments)");
-        # Don't schedule next update on first load
     } else {
         # Schedule next playlist update based on new segment count (second load and beyond)
         if ($new_segment_count > 0) {
@@ -1062,8 +1049,8 @@ sub get_playlist {
             main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                                   $channel_id, $delay, $update_time, $new_segment_count));
         } else {
-            # No new segments, schedule a default update in 30 seconds
-            my $delay = 30;
+            # No new segments, schedule a default update in 10 seconds
+            my $delay = 10;
             my $next_update = time() + $delay;
             $self->{playlist_next_update}->{$channel_id} = $next_update;
             main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
@@ -1680,11 +1667,6 @@ sub refresh_expired_playlists {
     }
 }
 
-
-}
-
-
-
 sub get_channel {
     my ($self, $name) = @_;
     
@@ -1809,18 +1791,18 @@ sub start_http_daemon {
         }
         
         # Wait for client connection with timeout
-        main::log_trace("Server loop iteration, waiting for client connection");
+#        main::log_trace("Server loop iteration, waiting for client connection");
         my @ready = $select->can_read(1.0);  # 1 second timeout
         
         if (!@ready) {
             # No client connection within timeout, continue loop
-            main::log_trace("No client connection within timeout, continuing loop");
+#            main::log_trace("No client connection within timeout, continuing loop");
             next;
         }
         
         my $client = $daemon->accept();
         if (!$client) {
-            main::log_trace("No client connection, continuing loop");
+#            main::log_trace("No client connection, continuing loop");
             next;
         }
         
