@@ -368,6 +368,9 @@ sub new {
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_next_update => {}, # Track next scheduled update time per channel_id
+        channel_last_activity => {}, # Track last client activity time per channel_id
+        channel_avg_duration => {},  # Track average EXTINF duration per channel_id
+ 
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
     };
@@ -1041,7 +1044,7 @@ sub get_playlist {
     } else {
         # Schedule next playlist update based on new segment count (second load and beyond)
         if ($new_segment_count > 0) {
-            my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count);
+            my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
             my $next_update = time() + $delay;
             $self->{playlist_next_update}->{$channel_id} = $next_update;
             
@@ -1157,7 +1160,7 @@ sub parse_extinf_durations {
 
 # Calculate next playlist update time based on new segment count
 sub calculate_playlist_update_delay {
-    my ($self, $content, $new_segment_count) = @_;
+    my ($self, $content, $new_segment_count, $channel_id) = @_;
     
     # Parse segment durations from EXTINF tags
     my $durations = $self->parse_extinf_durations($content);
@@ -1169,6 +1172,9 @@ sub calculate_playlist_update_delay {
         $sum += $_ for @$durations;
         $avg_duration = $sum / scalar(@$durations);
     }
+    
+    # Store the average duration for this channel for idle timeout checking
+    $self->{channel_avg_duration}->{$channel_id} = $avg_duration;
     
     # Calculate delay: (new_segment_count * avg_duration) - 1 second buffer
     # Subtract 1 second to ensure we fetch slightly before it's needed
@@ -1630,16 +1636,40 @@ sub refresh_expired_playlists {
     
     my $now = time();
     my @channels_to_refresh;
+    my @channels_to_clear;
     
-    # Find all channels with expired playlists
+    # Check all channels with scheduled updates
     for my $channel_id (keys %{$self->{playlist_next_update}}) {
+        # Check if channel has been idle for too long (4x EXTINF duration)
+        if (exists $self->{channel_last_activity}->{$channel_id} && 
+            exists $self->{channel_avg_duration}->{$channel_id}) {
+            
+            my $last_activity = $self->{channel_last_activity}->{$channel_id};
+            my $avg_duration = $self->{channel_avg_duration}->{$channel_id};
+            my $idle_timeout = $avg_duration * 4;
+            my $idle_time = $now - $last_activity;
+            
+            if ($idle_time >= $idle_timeout) {
+                main::log_info(sprintf("Channel %s idle for %.1fs (timeout: %.1fs, 4x avg duration of %.1fs) - stopping refresh and clearing cache", 
+                                      $channel_id, $idle_time, $idle_timeout, $avg_duration));
+                push @channels_to_clear, $channel_id;
+                next;  # Skip refresh for this channel
+            }
+        }
+        
+        # Check if playlist needs refresh
         my $next_update = $self->{playlist_next_update}->{$channel_id};
         if ($now >= $next_update) {
             push @channels_to_refresh, $channel_id;
         }
     }
     
-    # Refresh expired playlists in the background
+    # Clear cache for idle channels
+    for my $channel_id (@channels_to_clear) {
+        $self->clear_channel_cache($channel_id);
+    }
+    
+    # Refresh expired playlists for active channels
     for my $channel_id (@channels_to_refresh) {
         main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
         
@@ -1722,6 +1752,37 @@ sub get_simplified_channel_info {
     
     main::log_warn("Channel not found for simplified info: $name");
     return undef;
+}
+
+# Clear all cached data for a channel (used when idle timeout exceeded)
+sub clear_channel_cache {
+    my ($self, $channel_id) = @_;
+    
+    main::log_info("Clearing all cached data for idle channel: $channel_id");
+    
+    # Clear playlist cache
+    delete $self->{playlist_cache}->{$channel_id};
+    delete $self->{playlist_next_update}->{$channel_id};
+    delete $self->{playlist}->{$channel_id}->{'First'};
+    
+    # Clear segment cache and queue
+    delete $self->{segment_cache}->{$channel_id};
+    delete $self->{segment_queue}->{$channel_id};
+    delete $self->{last_segment}->{$channel_id};
+    
+    # Clear activity tracking
+    delete $self->{channel_last_activity}->{$channel_id};
+    delete $self->{channel_avg_duration}->{$channel_id};
+    
+    main::log_debug("Cleared playlist, segment cache, and activity data for channel $channel_id");
+}
+
+# Update last activity time for a channel
+sub update_channel_activity {
+    my ($self, $channel_id) = @_;
+    
+    $self->{channel_last_activity}->{$channel_id} = time();
+    main::log_trace("Updated activity timestamp for channel $channel_id");
 }
 
 1;
@@ -1866,6 +1927,12 @@ sub handle_http_request {
         
         my $data = $sxm->get_playlist($channel);
         if ($data) {
+            # Update activity timestamp for this channel
+            my ($guid, $channel_id) = $sxm->get_channel($channel);
+            if ($channel_id) {
+                $sxm->update_channel_activity($channel_id);
+            }
+            
             my $response = HTTP::Response->new(200);
             $response->content_type('application/x-mpegURL');
             $response->header('Connection', 'close');
@@ -1893,6 +1960,9 @@ sub handle_http_request {
         
         my $data;
         if ($channel_id) {
+            # Update activity timestamp for this channel
+            $sxm->update_channel_activity($channel_id);
+            
             # Use cached segment if available
             $data = $sxm->get_cached_segment($segment_path, $channel_id);
         } else {
