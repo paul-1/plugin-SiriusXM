@@ -1184,13 +1184,12 @@ sub calculate_playlist_update_delay {
     # Store the average duration for this channel for idle timeout checking
     $self->{channel_avg_duration}->{$channel_id} = $avg_duration;
     
-    # Calculate delay: (new_segment_count * avg_duration) - 1 second buffer
-    # Subtract 1 second to ensure we fetch slightly before it's needed
-    my $delay = ($new_segment_count * $avg_duration) - 1;
+    # Calculate delay: (new_segment_count * avg_duration)
+    my $delay = ($new_segment_count * $avg_duration);
     
-    # Ensure delay is at least 1 second and at most 300 seconds (5 minutes)
+    # Ensure delay is at least 1 second and at most 30 seconds
     $delay = 5 if $delay < 5;
-    $delay = 20 if $delay > 20;
+    $delay = 30 if $delay > 30;
     
     return $delay;
 }
