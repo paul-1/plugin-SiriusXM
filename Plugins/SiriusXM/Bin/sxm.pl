@@ -1049,6 +1049,7 @@ sub get_playlist {
         main::log_info("First playlist load for channel $channel_id - skipping scheduling (may be caching many segments)");
     } else {
         # Schedule next playlist update based on new segment count (second load and beyond)
+        # Use the count saved BEFORE any caching started
         if ($new_segment_count > 0) {
             my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
             my $next_update = time() + $delay;
@@ -1058,8 +1059,8 @@ sub get_playlist {
             main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                                   $channel_id, $delay, $update_time, $new_segment_count));
         } else {
-            # No new segments, schedule a default update in 10 seconds
-            my $delay = 10;
+            # No new segments, schedule a default update in 30 seconds
+            my $delay = 30;
             my $next_update = time() + $delay;
             $self->{playlist_next_update}->{$channel_id} = $next_update;
             main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
@@ -1140,9 +1141,8 @@ sub extract_segments_from_playlist {
         main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
                       " uncached segments, current cache: " . $cache_count . " segments (" . 
                       sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
-        # Add to queue and start caching
+        # Add to queue - let background loop handle caching to avoid blocking
         $self->{segment_queue}->{$channel_id} = \@uncached_segments;
-        $self->cache_next_segment($channel_id);
     }
     
     # Return both segments array and count of uncached segments
@@ -1700,6 +1700,22 @@ sub refresh_expired_playlists {
     }
 }
 
+# Process segment caching queues for all active channels
+sub process_segment_queues {
+    my $self = shift;
+    
+    # Iterate through all channels with segment queues
+    for my $channel_id (keys %{$self->{segment_queue}}) {
+        my $queue = $self->{segment_queue}->{$channel_id};
+        
+        # Skip if queue is empty
+        next unless $queue && @$queue;
+        
+        # Cache a batch of segments for this channel
+        $self->cache_next_segment($channel_id);
+    }
+}
+
 sub get_channel {
     my ($self, $name) = @_;
     
@@ -1848,10 +1864,11 @@ sub start_http_daemon {
     my $refresh_check_interval = 5;  # Check for expired playlists every 5 seconds
     
     while ($main::RUNNING) {
-        # Check if any expired playlists need refreshing
+        # Check if any expired playlists need refreshing or segments need caching
         my $now = time();
         if ($now - $last_refresh_check >= $refresh_check_interval) {
             $sxm->refresh_expired_playlists();
+            $sxm->process_segment_queues();
             $last_refresh_check = $now;
         }
         
