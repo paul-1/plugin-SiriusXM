@@ -367,6 +367,7 @@ sub new {
         segment_queue => {},    # Track segments to be cached per channel_id
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
+        playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
         playlist_next_update => {}, # Track next scheduled update time per channel_id
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
@@ -1013,8 +1014,10 @@ sub get_playlist {
     # Extract and store segment list from the playlist BEFORE modifying it
     # This now returns (segments_array_ref, uncached_segment_count)
     my ($segments, $new_segment_count) = $self->extract_segments_from_playlist($content, $channel_id);
-    # Cache the playlist content
+    
+    # Cache the playlist content and channel name for efficient lookup
     $self->{playlist_cache}->{$channel_id} = $content;
+    $self->{playlist_channel_name}->{$channel_id} = $name;
 
     # Remove segments from the playlist if this is the first time we've seen it
     # This will make ffmpeg cache a bit more without needing to use command line options
@@ -1041,6 +1044,9 @@ sub get_playlist {
         main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
+        
+        # Skip scheduling on first load
+        main::log_info("First playlist load for channel $channel_id - skipping scheduling (may be caching many segments)");
     } else {
         # Schedule next playlist update based on new segment count (second load and beyond)
         if ($new_segment_count > 0) {
@@ -1673,26 +1679,23 @@ sub refresh_expired_playlists {
     for my $channel_id (@channels_to_refresh) {
         main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
         
-        # Get the channel name from channel_id
-        my $channels = $self->get_channels();
-        my $channel_name;
-        for my $channel (@$channels) {
-            if ($channel->{channelId} eq $channel_id) {
-                $channel_name = $channel->{name};
-                last;
-            }
-        }
+        # Get the channel name from our cached mapping
+        my $channel_name = $self->{playlist_channel_name}->{$channel_id};
         
         if ($channel_name) {
+            # Manually clear the playlist cache to avoid expiring authentication
+            delete $self->{playlist_cache}->{$channel_id};
+            delete $self->{playlist_next_update}->{$channel_id};
+            
             # Fetch new playlist (this will update the cache and schedule next update)
             eval {
-                $self->get_playlist($channel_name, 0);  # Force fetch, don't use cache
+                $self->get_playlist($channel_name, 1);  # Use cache for auth, but we cleared playlist cache above
             };
             if ($@) {
                 main::log_warn("Error refreshing playlist for channel $channel_id: $@");
             }
         } else {
-            main::log_warn("Could not find channel name for channel_id $channel_id");
+            main::log_warn("Could not find channel name for channel_id $channel_id in cache");
         }
     }
 }
@@ -1762,8 +1765,9 @@ sub clear_channel_cache {
     
     # Clear playlist cache
     delete $self->{playlist_cache}->{$channel_id};
+    delete $self->{playlist_channel_name}->{$channel_id};
     delete $self->{playlist_next_update}->{$channel_id};
-    delete $self->{playlist}->{$channel_id}->{'First'};
+    delete $self->{playlists}->{$channel_id}->{'First'};
     
     # Clear segment cache and queue
     delete $self->{segment_cache}->{$channel_id};
