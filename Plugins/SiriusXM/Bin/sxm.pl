@@ -121,6 +121,7 @@ use HTTP::Daemon;
 use HTTP::Cookies;
 use URI;
 use URI::Escape;
+use IO::Select;
 
 # Data handling modules
 use JSON::XS;
@@ -365,6 +366,8 @@ sub new {
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
         last_segment => {},     # Track last requested segment per channel_id
+        playlist_cache => {},   # Store cached m3u8 content per channel_id
+        playlist_next_update => {}, # Track next scheduled update time per channel_id
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -914,6 +917,23 @@ sub get_playlist {
         return undef;
     }
     
+    # Check if we have a cached playlist and it's not time to update yet
+    my $now = time();
+    if ($use_cache && 
+        exists $self->{playlist_cache}->{$channel_id} && 
+        exists $self->{playlist_next_update}->{$channel_id}) {
+        
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now < $next_update) {
+            my $remaining = $next_update - $now;
+            main::log_debug(sprintf("Using cached playlist for channel %s (next update in %.1f seconds)", 
+                                   $channel_id, $remaining));
+            return $self->{playlist_cache}->{$channel_id};
+        } else {
+            main::log_debug("Cached playlist expired for channel $channel_id, fetching new one");
+        }
+    }
+    
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
     return undef unless $url;
     
@@ -989,7 +1009,8 @@ sub get_playlist {
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
     # Extract and store segment list from the playlist BEFORE modifying it
-    $self->extract_segments_from_playlist($content, $channel_id);
+    # This now returns (segments_array_ref, uncached_segment_count)
+    my ($segments, $new_segment_count) = $self->extract_segments_from_playlist($content, $channel_id);
 
     # Remove segments from the playlist if this is the first time we've seen it
     # This will make ffmpeg cache a bit more without needing to use command line options
@@ -1016,6 +1037,26 @@ sub get_playlist {
         main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
         $self->{playlists}->{$channel_id}->{'First'} = 1;
         $content = join("\n", @lines);
+    }
+    
+    # Cache the playlist content
+    $self->{playlist_cache}->{$channel_id} = $content;
+    
+    # Schedule next playlist update based on new segment count
+    if ($new_segment_count > 0) {
+        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count);
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        
+        my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
+        main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
+                              $channel_id, $delay, $update_time, $new_segment_count));
+    } else {
+        # No new segments, schedule a default update in 30 seconds
+        my $delay = 30;
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
     }
     
     return $content;
@@ -1097,7 +1138,52 @@ sub extract_segments_from_playlist {
         $self->cache_next_segment($channel_id);
     }
     
-    return \@segments;
+    # Return both segments array and count of uncached segments
+    return (\@segments, scalar(@uncached_segments));
+}
+
+# Parse EXTINF tags from playlist content to calculate segment durations
+sub parse_extinf_durations {
+    my ($self, $content) = @_;
+    
+    my @durations = ();
+    for my $line (split /\n/, $content) {
+        # Match #EXTINF:<duration>, format
+        if ($line =~ /^#EXTINF:([\d.]+),/) {
+            push @durations, $1;
+        }
+    }
+    
+    return \@durations;
+}
+
+# Calculate next playlist update time based on new segment count
+sub calculate_playlist_update_delay {
+    my ($self, $content, $new_segment_count) = @_;
+    
+    # Parse segment durations from EXTINF tags
+    my $durations = $self->parse_extinf_durations($content);
+    
+    # Default to 10 seconds if we can't parse durations
+    my $avg_duration = 10.0;
+    if (@$durations > 0) {
+        my $sum = 0;
+        $sum += $_ for @$durations;
+        $avg_duration = $sum / scalar(@$durations);
+    }
+    
+    # Calculate delay: (new_segment_count * avg_duration) - 1 second buffer
+    # Subtract 1 second to ensure we fetch slightly before it's needed
+    my $delay = ($new_segment_count * $avg_duration) - 1;
+    
+    # Ensure delay is at least 1 second and at most 300 seconds (5 minutes)
+    $delay = 1 if $delay < 1;
+    $delay = 300 if $delay > 300;
+    
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (avg duration: %.1f, new segments: %d)", 
+                           $delay, $avg_duration, $new_segment_count));
+    
+    return $delay;
 }
 
 # Start precaching remaining segments in the background
@@ -1540,6 +1626,52 @@ sub refresh_channels {
     return $self->get_channels();
 }
 
+# Check and refresh expired playlists
+sub refresh_expired_playlists {
+    my $self = shift;
+    
+    my $now = time();
+    my @channels_to_refresh;
+    
+    # Find all channels with expired playlists
+    for my $channel_id (keys %{$self->{playlist_next_update}}) {
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now >= $next_update) {
+            push @channels_to_refresh, $channel_id;
+        }
+    }
+    
+    # Refresh expired playlists in the background
+    for my $channel_id (@channels_to_refresh) {
+        main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
+        
+        # Get the channel name from channel_id
+        my $channels = $self->get_channels();
+        my $channel_name;
+        for my $channel (@$channels) {
+            if ($channel->{channelId} eq $channel_id) {
+                $channel_name = $channel->{name};
+                last;
+            }
+        }
+        
+        if ($channel_name) {
+            # Fetch new playlist (this will update the cache and schedule next update)
+            eval {
+                $self->get_playlist($channel_name, 0);  # Force fetch, don't use cache
+            };
+            if ($@) {
+                main::log_warn("Error refreshing playlist for channel $channel_id: $@");
+            }
+        } else {
+            main::log_warn("Could not find channel name for channel_id $channel_id");
+        }
+    }
+}
+
+
+}
+
 
 
 sub get_channel {
@@ -1652,8 +1784,29 @@ sub start_http_daemon {
     main::log_info("HTTP server started on port $port");
     main::log_info("Access channels at: http://127.0.0.1:$port/channel.m3u8");
     
+    # Create IO::Select for non-blocking accept with timeout
+    my $select = IO::Select->new($daemon);
+    my $last_refresh_check = time();
+    my $refresh_check_interval = 5;  # Check for expired playlists every 5 seconds
+    
     while ($main::RUNNING) {
+        # Check if any expired playlists need refreshing
+        my $now = time();
+        if ($now - $last_refresh_check >= $refresh_check_interval) {
+            $sxm->refresh_expired_playlists();
+            $last_refresh_check = $now;
+        }
+        
+        # Wait for client connection with timeout
         main::log_trace("Server loop iteration, waiting for client connection");
+        my @ready = $select->can_read(1.0);  # 1 second timeout
+        
+        if (!@ready) {
+            # No client connection within timeout, continue loop
+            main::log_trace("No client connection within timeout, continuing loop");
+            next;
+        }
+        
         my $client = $daemon->accept();
         if (!$client) {
             main::log_trace("No client connection, continuing loop");
