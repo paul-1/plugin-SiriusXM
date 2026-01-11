@@ -368,6 +368,7 @@ sub new {
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_next_update => {}, # Track next scheduled update time per channel_id
+        playlist_first_load => {},  # Track if this is the first playlist load per channel_id
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -1042,21 +1043,31 @@ sub get_playlist {
     # Cache the playlist content
     $self->{playlist_cache}->{$channel_id} = $content;
     
-    # Schedule next playlist update based on new segment count
-    if ($new_segment_count > 0) {
-        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count);
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        
-        my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
-        main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
-                              $channel_id, $delay, $update_time, $new_segment_count));
+    # Check if this is the first playlist load for this channel
+    my $is_first_load = !exists $self->{playlist_first_load}->{$channel_id};
+    
+    if ($is_first_load) {
+        # Mark that we've loaded this channel's playlist at least once
+        $self->{playlist_first_load}->{$channel_id} = 1;
+        main::log_info("First playlist load for channel $channel_id - skipping scheduling (may be caching many segments)");
+        # Don't schedule next update on first load
     } else {
-        # No new segments, schedule a default update in 30 seconds
-        my $delay = 30;
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+        # Schedule next playlist update based on new segment count (second load and beyond)
+        if ($new_segment_count > 0) {
+            my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count);
+            my $next_update = time() + $delay;
+            $self->{playlist_next_update}->{$channel_id} = $next_update;
+            
+            my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
+            main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
+                                  $channel_id, $delay, $update_time, $new_segment_count));
+        } else {
+            # No new segments, schedule a default update in 30 seconds
+            my $delay = 30;
+            my $next_update = time() + $delay;
+            $self->{playlist_next_update}->{$channel_id} = $next_update;
+            main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+        }
     }
     
     return $content;
