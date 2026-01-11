@@ -1095,6 +1095,8 @@ sub extract_segments_from_playlist {
     # Check if we need to start caching new segments
     # Only look from the last requested segment to the end
     my $start_index = 0;
+    my $defer_caching = 0;
+    
     if ($self->{last_segment}->{$channel_id}) {
         my $last_seg = $self->{last_segment}->{$channel_id};
         for my $i (0 .. $#segments) {
@@ -1105,9 +1107,9 @@ sub extract_segments_from_playlist {
         }
     } else {
         # No last_segment recorded yet - client hasn't requested any segments
-        # Defer caching until we know where the client starts
+        # Defer caching until we know where the client starts, but still count segments for scheduling
         main::log_debug("No last_segment for channel $channel_id - deferring caching until client requests first segment");
-        return (\@segments, 0);  # Return 0 uncached segments to skip queuing
+        $defer_caching = 1;
     }
     
     # Find segments not yet in cache or queue, starting from last requested
@@ -1133,7 +1135,7 @@ sub extract_segments_from_playlist {
         push @uncached_segments, $segment;
     }
     
-    # If there are uncached segments and no active queue, start caching
+    # If there are uncached segments and no active queue, consider queueing them
     if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
         # Calculate total cache size and count
         my $cache_size = 0;
@@ -1148,8 +1150,14 @@ sub extract_segments_from_playlist {
         main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
                       " uncached segments, current cache: " . $cache_count . " segments (" . 
                       sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
-        # Add to queue - let background loop handle caching to avoid blocking
-        $self->{segment_queue}->{$channel_id} = \@uncached_segments;
+        
+        # Only queue segments if we're not deferring caching
+        if (!$defer_caching) {
+            # Add to queue - let background loop handle caching to avoid blocking
+            $self->{segment_queue}->{$channel_id} = \@uncached_segments;
+        } else {
+            main::log_debug("Deferring segment queueing for channel $channel_id until client requests first segment");
+        }
     }
     
     # Return both segments array and count of uncached segments
