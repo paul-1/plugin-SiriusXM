@@ -222,19 +222,21 @@ sub init_logging {
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%M>:%4L: %m%n
         };
     }
 
     # Set the logger with all appenders in one line
-    $log4perl_config = "log4perl.logger.siriusxm.proxy = $log_level, $appenders\n" . $log4perl_config;
+    $log4perl_config = "log4perl.logger.sxm.proxy = $log_level, $appenders\n" . $log4perl_config;
 
     # Initialize Log4Perl directly (not through LMS wrapper)
     Log::Log4perl->init(\$log4perl_config);    
-    
+
+
     # Get logger instance for this process
-    $LOGGER = get_logger('siriusxm.proxy');
-    
+    $Log::Log4perl::caller_depth++;
+    $LOGGER = get_logger('sxm.proxy');
+    $Log::Log4perl::caller_depth--;
     $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
     if ($logfile && -w $logdir) {
         $LOGGER->info("File logging enabled: $logfile");
@@ -245,7 +247,7 @@ sub init_logging {
 
 sub log_message {
     my ($level, $message) = @_;
-    
+
     # Always check if the level should be logged based on CONFIG{verbose}
     return if $level > $CONFIG{verbose};
     
@@ -256,7 +258,7 @@ sub log_message {
         printf "%s <%s>: %s\n", $timestamp, $level_name, $message;
         return;
     }
-    
+    $Log::Log4perl::caller_depth +=2;
     # Use LMS logging system with level mapping
     if ($level == LOG_ERROR) {
         $LOGGER->error($message);
@@ -270,6 +272,7 @@ sub log_message {
         # Map TRACE to DEBUG since LMS only supports up to DEBUG level
         $LOGGER->debug("[TRACE] $message");
     }
+    $Log::Log4perl::caller_depth -=2;
 }
 
 sub log_error { log_message(LOG_ERROR, shift) }
@@ -1011,9 +1014,8 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
-    # Extract and store segment list from the playlist BEFORE modifying it
-    # This now returns (segments_array_ref, uncached_segment_count)
-    my ($segments, $new_segment_count) = $self->extract_segments_from_playlist($content, $channel_id);
+    # Extract and queue segment list from the playlist BEFORE modifying it
+    my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
     
     # Cache the playlist content and channel name for efficient lookup
     $self->{playlist_cache}->{$channel_id} = $content;
@@ -1059,11 +1061,11 @@ sub get_playlist {
             main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                                   $channel_id, $delay, $update_time, $new_segment_count));
         } else {
-            # No new segments, schedule a default update in 30 seconds
-            my $delay = 30;
+            # No new segments, schedule a default update in 10 seconds
+            my $delay = 10;
             my $next_update = time() + $delay;
             $self->{playlist_next_update}->{$channel_id} = $next_update;
-            main::log_debug("No new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+            main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
         }
     }
     
@@ -1146,7 +1148,7 @@ sub extract_segments_from_playlist {
     }
     
     # Return both segments array and count of uncached segments
-    return (\@segments, scalar(@uncached_segments));
+    return scalar(@uncached_segments);
 }
 
 # Parse EXTINF tags from playlist content to calculate segment durations
@@ -1861,7 +1863,7 @@ sub start_http_daemon {
     # Create IO::Select for non-blocking accept with timeout
     my $select = IO::Select->new($daemon);
     my $last_refresh_check = time();
-    my $refresh_check_interval = 5;  # Check for expired playlists every 5 seconds
+    my $refresh_check_interval = 1;  # Check for expired playlists every 5 seconds
     
     while ($main::RUNNING) {
         # Check if any expired playlists need refreshing or segments need caching
