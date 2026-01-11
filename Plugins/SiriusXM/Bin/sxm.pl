@@ -1103,6 +1103,11 @@ sub extract_segments_from_playlist {
                 last;
             }
         }
+    } else {
+        # No last_segment recorded yet - client hasn't requested any segments
+        # Defer caching until we know where the client starts
+        main::log_debug("No last_segment for channel $channel_id - deferring caching until client requests first segment");
+        return (\@segments, 0);  # Return 0 uncached segments to skip queuing
     }
     
     # Find segments not yet in cache or queue, starting from last requested
@@ -1155,41 +1160,46 @@ sub extract_segments_from_playlist {
 sub parse_extinf_durations {
     my ($self, $content) = @_;
     
-    my @durations = ();
+    # Optimization: Just read the first EXTINF tag
+    # Assume all segments have the same duration
     for my $line (split /\n/, $content) {
         # Match #EXTINF:<duration>, format
         if ($line =~ /^#EXTINF:([\d.]+),/) {
-            push @durations, $1;
+            return $1;  # Return first duration found
         }
     }
     
-    return \@durations;
+    return 10.0;  # Default if no EXTINF found
 }
 
 # Calculate next playlist update time based on new segment count
 sub calculate_playlist_update_delay {
     my ($self, $content, $new_segment_count, $channel_id) = @_;
     
-    # Parse segment durations from EXTINF tags
-    my $durations = $self->parse_extinf_durations($content);
+    # Get segment duration from first EXTINF tag
+    my $extinf_duration = $self->parse_extinf_durations($content);
     
-    # Default to 10 seconds if we can't parse durations
-    my $avg_duration = 10.0;
-    if (@$durations > 0) {
-        my $sum = 0;
-        $sum += $_ for @$durations;
-        $avg_duration = $sum / scalar(@$durations);
+    # Store the EXTINF duration for this channel for idle timeout checking
+    $self->{channel_avg_duration}->{$channel_id} = $extinf_duration;
+    
+    # Adaptive backoff strategy:
+    # - Start with EXTINF duration as base
+    # - If 1 new segment: backoff by 1.7x (to avoid constant refreshing)
+    # - If >1 new segments: use EXTINF duration (more segments = faster refresh needed)
+    my $delay;
+    if ($new_segment_count == 1) {
+        $delay = $extinf_duration * 1.7;
+    } else {
+        $delay = $extinf_duration;
     }
     
-    # Store the average duration for this channel for idle timeout checking
-    $self->{channel_avg_duration}->{$channel_id} = $avg_duration;
-    
-    # Calculate delay: (new_segment_count * avg_duration)
-    my $delay = ($new_segment_count * $avg_duration);
-    
-    # Ensure delay is at least 1 second and at most 30 seconds
+    # Ensure delay is at least 5 seconds and at most 30 seconds
     $delay = 5 if $delay < 5;
     $delay = 30 if $delay > 30;
+    
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
+                           $delay, $extinf_duration, $new_segment_count, 
+                           $new_segment_count == 1 ? "backoff 1.7x" : "EXTINF"));
     
     return $delay;
 }
