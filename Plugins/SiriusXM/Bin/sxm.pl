@@ -1061,8 +1061,8 @@ sub get_playlist {
             main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                                   $channel_id, $delay, $update_time, $new_segment_count));
         } else {
-            # No new segments, schedule a default update in 10 seconds
-            my $delay = 10;
+            # No new segments, schedule a default update in 6 seconds
+            my $delay = 6;
             my $next_update = time() + $delay;
             $self->{playlist_next_update}->{$channel_id} = $next_update;
             main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
@@ -1196,9 +1196,9 @@ sub calculate_playlist_update_delay {
     # - If >1 new segments: use EXTINF duration (more segments = faster refresh needed)
     my $delay;
     if ($new_segment_count == 1) {
-        $delay = $extinf_duration * 1.7;
+        $delay = $extinf_duration - 1;
     } else {
-        $delay = $extinf_duration;
+        $delay = $extinf_duration * 1.6;
     }
     
     # Ensure delay is at least 5 seconds and at most 30 seconds
