@@ -923,9 +923,14 @@ sub get_playlist {
         return undef;
     }
     
+    # Check if caching is disabled (segment_drop == 0)
+    my $segment_drop = $CONFIG{segment_drop};
+    my $caching_enabled = $segment_drop >= 1;
+    
     # Check if we have a cached playlist and it's not time to update yet
+    # Only use cache if caching is enabled
     my $now = time();
-    if ($use_cache && 
+    if ($caching_enabled && $use_cache && 
         exists $self->{playlist_cache}->{$channel_id} && 
         exists $self->{playlist_next_update}->{$channel_id}) {
         
@@ -1014,6 +1019,16 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
+    # Check if caching is enabled (segment_drop >= 1)
+    my $segment_drop = $CONFIG{segment_drop};
+    my $caching_enabled = $segment_drop >= 1;
+    
+    # If caching is disabled, return playlist directly without any processing
+    if (!$caching_enabled) {
+        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id - returning playlist as-is");
+        return $content;
+    }
+
     # Extract and queue segment list from the playlist BEFORE modifying it
     my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
     
@@ -1023,7 +1038,6 @@ sub get_playlist {
 
     # Remove segments from the playlist if this is the first time we've seen it
     # This will make ffmpeg cache a bit more without needing to use command line options
-    my $segment_drop = $CONFIG{segment_drop};
     if ( $segment_drop > 0 && (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1) ) {
         my @lines = split /\n/, $content;
         # Find all lines ending with ".aac"
@@ -1304,8 +1318,11 @@ sub get_cached_segment {
     # Track this as the last requested segment for this channel
     $self->{last_segment}->{$channel_id} = $segment_path;
     
-    # Check if segment is in cache
-    if (exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
+    # Check if caching is enabled
+    my $caching_enabled = $CONFIG{segment_drop} >= 1;
+    
+    # Check if segment is in cache (only if caching is enabled)
+    if ($caching_enabled && exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
         main::log_info("Using cached segment: $segment_path for channel $channel_id");
         my $data = $self->{segment_cache}->{$channel_id}->{$segment_path};
         
@@ -1323,12 +1340,13 @@ sub get_cached_segment {
         return $data;
     }
     
-    # Not in cache, fetch it and start precaching
-    main::log_debug("Segment not in cache, fetching: $segment_path for channel $channel_id");
+    # Not in cache, fetch it directly
+    main::log_debug("Fetching segment directly: $segment_path for channel $channel_id");
     
     my $data = $self->get_segment($segment_path);
     
-    if ($data) {
+    # Only start precaching if caching is enabled
+    if ($caching_enabled && $data) {
         # Start precaching remaining segments
         $self->precache_segments($channel_id, $segment_path);
     }
@@ -1656,6 +1674,9 @@ sub refresh_channels {
 sub refresh_expired_playlists {
     my $self = shift;
     
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
+    
     my $now = time();
     my @channels_to_refresh;
     my @channels_to_clear;
@@ -1719,6 +1740,9 @@ sub refresh_expired_playlists {
 # Process segment caching queues for all active channels
 sub process_segment_queues {
     my $self = shift;
+    
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
     
     # Iterate through all channels with segment queues
     for my $channel_id (keys %{$self->{segment_queue}}) {
