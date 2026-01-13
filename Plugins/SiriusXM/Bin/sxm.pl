@@ -876,9 +876,6 @@ sub get_playlist_variant_url {
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
     
-    # Try to clean up any potential character encoding issues
-    $content =~ s/\r//g;  # Remove carriage returns
-    
     # Check if this is a master playlist with quality variants
     if ($content =~ /#EXT-X-STREAM-INF/) {
         main::log_debug("Master playlist detected in variant URL, selecting quality variant");
@@ -891,16 +888,27 @@ sub get_playlist_variant_url {
         }
     }
     
+    # Parse playlist according to Apple HLS specification
+    # Handle both Unix (\n) and Windows (\r\n) line endings
+    my @lines = split /\r?\n/, $content;
     my $found_lines = 0;
-    for my $line (split /\n/, $content) {
-        chomp($line);  # Remove any trailing newlines
-        $line =~ s/^\s+|\s+$//g;  # Trim whitespace
-        next if $line eq '';  # Skip empty lines
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Skip empty lines (permitted by HLS spec)
+        next if $line eq '';
+        
+        # Skip comments and tags
+        next if $line =~ /^#/;
         
         $found_lines++;
         main::log_trace("Processing line $found_lines: '$line'");
+        
+        # Look for .m3u8 URLs (variant playlists)
         if ($line =~ /\.m3u8$/) {
-            # First variant should be 256k one
+            # Found a variant playlist URL
             my $base_url = $url;
             $base_url =~ s/\/[^\/]+$//;
             my $variant_url = "$base_url/$line";
@@ -917,81 +925,86 @@ sub get_playlist_variant_url {
 sub trim_playlist {
     my ($self, $content, $segment_drop, $is_first_load) = @_;
     
-    my @lines = split /\n/, $content;
-    my @header = ();
-    my @segments = ();
-    my $in_header = 1;
+    # Parse playlist according to Apple HLS specification
+    # - Lines starting with # are tags or comments
+    # - Empty lines should be ignored but preserved in output
+    # - Each segment consists of #EXTINF followed by URI line
+    # - Tags like #EXT-X-PROGRAM-DATE-TIME and #EXT-X-DISCONTINUITY can appear between segments
     
-    # Separate header from segments
-    # Header ends when we see the first segment (line with .aac)
+    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
+    my @header = ();
+    my @segment_entries = ();  # Array of segment entry arrays (all lines for each segment)
+    my $in_header = 1;
+    my $current_segment = [];
+    
+    # Separate header from segments according to HLS spec
+    # Header ends at first #EXTINF tag (which marks start of first segment)
     for my $line (@lines) {
+        # Ignore leading/trailing whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
         if ($in_header) {
-            push @header, $line;
-            if ($line =~ /\.aac/) {
+            if ($line =~ /^#EXTINF:/) {
+                # First segment starts here
                 $in_header = 0;
-                pop @header;  # Remove the segment line from header
-                push @segments, $line;  # Add it to segments
+                push @$current_segment, $line;
+            } else {
+                # Still in header
+                push @header, $line;
             }
         } else {
-            push @segments, $line;
+            # In segment section
+            if ($line =~ /^#EXTINF:/) {
+                # New segment starts - save previous segment if it has content
+                if (@$current_segment) {
+                    push @segment_entries, $current_segment;
+                }
+                # Start new segment
+                $current_segment = [$line];
+            } else {
+                # Part of current segment (URI, tags, or empty lines)
+                push @$current_segment, $line;
+            }
         }
     }
     
-    # Find all .aac segment lines to count actual segments
-    my @segment_lines = ();
-    for my $i (0 .. $#segments) {
-        if ($segments[$i] =~ /\.aac/) {
-            push @segment_lines, $i;
-        }
+    # Don't forget the last segment
+    if (@$current_segment) {
+        push @segment_entries, $current_segment;
     }
     
-    # Find the position of the last .aac segment
-    my $last_segment_idx = $#segment_lines;
+    my $original_count = scalar(@segment_entries);
     
     # Always trim from beginning: keep only last (10 + segment_drop) segments
     my $segments_to_keep = 10 + $segment_drop;
     
-    # Calculate the start index (go back segments_to_keep from the last segment)
-    my $start_segment_idx = $last_segment_idx - $segments_to_keep;
-    $start_segment_idx = 0 if $start_segment_idx < 0;
+    # Calculate indices for segments to keep
+    my $start_idx = $original_count - $segments_to_keep;
+    $start_idx = 0 if $start_idx < 0;
     
-    # Get the line index for the start segment
-    my $start_line = $segment_lines[$start_segment_idx];
-    
-    # Find the beginning of this segment entry (includes EXTINF and possibly PROGRAM-DATE-TIME)
-    # Go back to find the #EXTINF line before this .aac line
-    my $segment_start_line = $start_line;
-    for (my $i = $start_line - 1; $i >= 0; $i--) {
-        if ($segments[$i] =~ /^#EXTINF:/) {
-            $segment_start_line = $i;
-            last;
-        }
-        # Stop if we hit another segment
-        last if $segments[$i] =~ /\.aac/;
-    }
-    
-    # Calculate the end index
-    # On first load: drop the last segment_drop segments
-    # On subsequent loads: keep all segments (up to last)
-    my $end_segment_idx;
+    my $end_idx;
     if ($is_first_load) {
-        $end_segment_idx = $last_segment_idx - $segment_drop;
-        $end_segment_idx = $last_segment_idx if $end_segment_idx > $last_segment_idx;
+        # On first load: additionally drop the last segment_drop segments
+        $end_idx = $original_count - $segment_drop - 1;
+        $end_idx = $original_count - 1 if $end_idx >= $original_count;
+        $end_idx = $start_idx if $end_idx < $start_idx;  # Ensure valid range
     } else {
-        $end_segment_idx = $last_segment_idx;
+        # On subsequent loads: keep all trimmed segments
+        $end_idx = $original_count - 1;
     }
     
-    # Get the line index for the end segment
-    my $end_line = $segment_lines[$end_segment_idx];
+    # Extract the segments we want to keep
+    my @kept_segments = @segment_entries[$start_idx .. $end_idx];
     
-    # Extract the trimmed segments
-    my @trimmed_segments = @segments[$segment_start_line .. $end_line];
+    # Rebuild the playlist according to HLS spec
+    # Header, then segments (each segment's lines in order)
+    my @output_lines = @header;
+    for my $segment (@kept_segments) {
+        push @output_lines, @$segment;
+    }
     
-    # Rebuild the playlist
-    my $trimmed_content = join("\n", @header, @trimmed_segments);
-    
-    my $original_count = scalar(@segment_lines);
-    my $trimmed_count = $end_segment_idx - $start_segment_idx + 1;
+    my $trimmed_content = join("\n", @output_lines);
+    my $trimmed_count = scalar(@kept_segments);
     
     if ($is_first_load) {
         main::log_debug(sprintf("First load: Trimmed playlist from %d to %d segments (keeping last %d, dropping last %d)", 
@@ -1170,14 +1183,39 @@ sub get_playlist {
 sub extract_segments_from_playlist {
     my ($self, $content, $channel_id) = @_;
     
+    # Parse playlist according to Apple HLS specification
+    # Segment URIs immediately follow their #EXTINF tag
+    # We need to extract the URI lines (segment filenames)
+    
+    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
     my @segments = ();
-    for my $line (split /\n/, $content) {
-        # Match .aac with optional whitespace/control characters at end
-        if ($line =~ /\.aac/) {
-            # Extract just the filename, strip all whitespace
-            $line =~ s/^\s+|\s+$//g;
-            $line =~ s/\r//g;  # Remove any carriage returns
-            push @segments, $line;
+    my $next_is_uri = 0;
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Skip empty lines (permitted by HLS spec)
+        next if $line eq '';
+        
+        # Check if this is an #EXTINF tag
+        if ($line =~ /^#EXTINF:/) {
+            # Next non-comment, non-empty line should be the URI
+            $next_is_uri = 1;
+            next;
+        }
+        
+        # If we're expecting a URI and this isn't a tag/comment
+        if ($next_is_uri && $line !~ /^#/) {
+            # This is the segment URI
+            # Verify it looks like a segment (contains .aac or similar)
+            if ($line =~ /\.aac/) {
+                push @segments, $line;
+            }
+            $next_is_uri = 0;
+        } elsif ($line =~ /^#/) {
+            # This is another tag (like #EXT-X-PROGRAM-DATE-TIME, #EXT-X-DISCONTINUITY)
+            # Don't reset next_is_uri - URI comes after all tags for this segment
         }
     }
     
@@ -1262,16 +1300,30 @@ sub extract_segments_from_playlist {
 sub parse_extinf_durations {
     my ($self, $content) = @_;
     
-    # Read #EXT-X-TARGETDURATION from playlist header
-    # This is more reliable than parsing individual EXTINF tags
-    for my $line (split /\n/, $content) {
+    # Parse #EXT-X-TARGETDURATION from playlist header per Apple HLS specification
+    # Format: #EXT-X-TARGETDURATION:<duration>
+    # This tag is REQUIRED in Media Playlists and specifies the maximum segment duration
+    # More reliable than parsing individual #EXTINF tags
+    
+    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
         # Match #EXT-X-TARGETDURATION:<duration>
-        if ($line =~ /^#EXT-X-TARGETDURATION:(\d+)/) {
-            return $1;  # Return target duration from header
+        # Duration is an integer (decimal-integer per spec)
+        if ($line =~ /^#EXT-X-TARGETDURATION:\s*(\d+)\s*$/) {
+            my $duration = $1;
+            main::log_debug("Found EXT-X-TARGETDURATION: $duration seconds");
+            return $duration;
         }
     }
     
-    return 10.0;  # Default if no EXT-X-TARGETDURATION found
+    # If no EXT-X-TARGETDURATION found, return default
+    # Note: This shouldn't happen with valid HLS playlists, but we handle it gracefully
+    main::log_debug("No EXT-X-TARGETDURATION found in playlist, using default 10 seconds");
+    return 10;
 }
 
 # Calculate next playlist update time based on new segment count
@@ -1453,18 +1505,34 @@ sub select_quality_variant {
     
     main::log_debug("Selecting quality variant for: $quality ($desired_bandwidth bps)");
     
-    my @lines = split /\n/, $master_playlist;
+    # Parse master playlist according to Apple HLS specification
+    # #EXT-X-STREAM-INF tags are followed by the URI line
+    my @lines = split /\r?\n/, $master_playlist;  # Handle both Unix and Windows line endings
     my %variants = ();
     
     # Parse master playlist to extract variants with their bandwidths
     for my $i (0..$#lines) {
-        $lines[$i] =~ s/\r?\n$//;
-        if ($lines[$i] =~ /#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
+        my $line = $lines[$i];
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Look for #EXT-X-STREAM-INF tag with BANDWIDTH attribute
+        if ($line =~ /^#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
             my $bandwidth = $1;
-            # Next line should contain the variant URL
-            if ($i + 1 <= $#lines && $lines[$i + 1] !~ /^#/) {
-                my $variant_url = $lines[$i + 1];
-                $variant_url =~ s/\r?\n$//;
+            
+            # Per HLS spec, URI line immediately follows (skip comments/empty lines)
+            for my $j (($i + 1)..$#lines) {
+                my $next_line = $lines[$j];
+                $next_line =~ s/^\s+|\s+$//g;
+                
+                # Skip empty lines
+                next if $next_line eq '';
+                
+                # If it's another tag, something is wrong - break
+                last if $next_line =~ /^#/;
+                
+                # This should be the URI line
+                my $variant_url = $next_line;
                 
                 # Convert relative URL to absolute if needed
                 if ($variant_url !~ /^https?:\/\//) {
