@@ -913,6 +913,103 @@ sub get_playlist_variant_url {
     return undef;
 }
 
+# Trim playlist to reduce size from 1800+ segments to a manageable window
+sub trim_playlist {
+    my ($self, $content, $segment_drop) = @_;
+    
+    my @lines = split /\n/, $content;
+    my @header = ();
+    my @segments = ();
+    my $in_header = 1;
+    
+    # Separate header from segments
+    # Header ends when we see the first segment (line with .aac)
+    for my $line (@lines) {
+        if ($in_header) {
+            push @header, $line;
+            if ($line =~ /\.aac/) {
+                $in_header = 0;
+                pop @header;  # Remove the segment line from header
+                push @segments, $line;  # Add it to segments
+            }
+        } else {
+            push @segments, $line;
+        }
+    }
+    
+    # Find all #EXT-X-PROGRAM-DATE-TIME: positions
+    my @datetime_positions = ();
+    for my $i (0 .. $#segments) {
+        if ($segments[$i] =~ /^#EXT-X-PROGRAM-DATE-TIME:/) {
+            push @datetime_positions, $i;
+        }
+    }
+    
+    # If we don't have enough datetime markers, return as-is
+    if (@datetime_positions < 2) {
+        main::log_debug("Not enough PROGRAM-DATE-TIME markers to trim playlist");
+        return $content;
+    }
+    
+    # Find the last datetime position
+    my $last_datetime_pos = $datetime_positions[-1];
+    
+    # Calculate the start position: go back (10 + segment_drop) segments from the last datetime
+    # Each segment typically consists of 2-3 lines (#EXTINF, #EXT-X-PROGRAM-DATE-TIME (optional), segment.aac)
+    # So we look for .aac lines to count actual segments
+    my @segment_lines = ();
+    for my $i (0 .. $#segments) {
+        if ($segments[$i] =~ /\.aac/) {
+            push @segment_lines, $i;
+        }
+    }
+    
+    # Find the position of the last .aac segment
+    my $last_segment_idx = $#segment_lines;
+    
+    # Calculate how many segments to keep from the end: (10 + segment_drop)
+    my $segments_to_keep = 10 + $segment_drop;
+    
+    # Calculate the start index (go back segments_to_keep from the last segment)
+    my $start_segment_idx = $last_segment_idx - $segments_to_keep;
+    $start_segment_idx = 0 if $start_segment_idx < 0;
+    
+    # Get the line index for the start segment
+    my $start_line = $segment_lines[$start_segment_idx];
+    
+    # Find the beginning of this segment entry (includes EXTINF and possibly PROGRAM-DATE-TIME)
+    # Go back to find the #EXTINF line before this .aac line
+    my $segment_start_line = $start_line;
+    for (my $i = $start_line - 1; $i >= 0; $i--) {
+        if ($segments[$i] =~ /^#EXTINF:/) {
+            $segment_start_line = $i;
+            last;
+        }
+        # Stop if we hit another segment
+        last if $segments[$i] =~ /\.aac/;
+    }
+    
+    # Calculate the end index: drop the last segment_drop segments
+    my $end_segment_idx = $last_segment_idx - $segment_drop;
+    $end_segment_idx = $last_segment_idx if $end_segment_idx > $last_segment_idx;
+    
+    # Get the line index for the end segment
+    my $end_line = $segment_lines[$end_segment_idx];
+    
+    # Extract the trimmed segments
+    my @trimmed_segments = @segments[$segment_start_line .. $end_line];
+    
+    # Rebuild the playlist
+    my $trimmed_content = join("\n", @header, @trimmed_segments);
+    
+    my $original_count = scalar(@segment_lines);
+    my $trimmed_count = $end_segment_idx - $start_segment_idx + 1;
+    main::log_debug(sprintf("Trimmed playlist from %d to %d segments (keeping last %d, dropping last %d)", 
+                           $original_count, $trimmed_count, $segments_to_keep, $segment_drop));
+    
+    return $trimmed_content;
+}
+
 sub get_playlist {
     my ($self, $name, $use_cache) = @_;
     $use_cache //= 1;
@@ -1030,57 +1127,36 @@ sub get_playlist {
     }
 
     # Extract and queue segment list from the playlist BEFORE modifying it
+    # This works on the full playlist for proper caching
     my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
     
-    # Cache the playlist content and channel name for efficient lookup
-    $self->{playlist_cache}->{$channel_id} = $content;
+    # Trim the playlist to reduce size (keep only relevant segments)
+    # The average playlist is 1800+ segments, but we only need a small window
+    my $trimmed_content = $self->trim_playlist($content, $segment_drop);
+    
+    # Cache the trimmed playlist content and channel name for efficient lookup
+    $self->{playlist_cache}->{$channel_id} = $trimmed_content;
     $self->{playlist_channel_name}->{$channel_id} = $name;
 
-    # Remove segments from the playlist if this is the first time we've seen it
-    # This will make ffmpeg cache a bit more without needing to use command line options
-    if ( $segment_drop > 0 && (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1) ) {
-        my @lines = split /\n/, $content;
-        # Find all lines ending with ".aac"
-        my @aac_lines;
-        for my $i (0 .. $#lines) {
-            if ($lines[$i] =~ /\.aac/) {
-                push @aac_lines, $i;
-            }
-        }
+    # Use the trimmed content for return to client
+    $content = $trimmed_content;
 
-        # Drop the last N segments by finding the cutoff point
-        my @removed_lines;
-        if (@aac_lines > $segment_drop) {
-            # Calculate cutoff line: keep up to the (segment_drop + 1)th .aac line from the end
-            my $cutoff_line = $aac_lines[-($segment_drop + 1)];
-            @removed_lines = @lines[($cutoff_line + 1) .. $#lines];  # Get the lines being removed
-            @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
-        }
-        my $rlines = join("\n", @removed_lines);
-        main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
-        $self->{playlists}->{$channel_id}->{'First'} = 1;
-        $content = join("\n", @lines);
+    # Schedule next playlist update based on new segment count
+    # Use the count saved BEFORE any caching started
+    if ($new_segment_count > 0) {
+        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
         
-        # Skip scheduling on first load
-        main::log_info("First playlist load for channel $channel_id - skipping scheduling (may be caching many segments)");
+        my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
+        main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
+                              $channel_id, $delay, $update_time, $new_segment_count));
     } else {
-        # Schedule next playlist update based on new segment count (second load and beyond)
-        # Use the count saved BEFORE any caching started
-        if ($new_segment_count > 0) {
-            my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
-            my $next_update = time() + $delay;
-            $self->{playlist_next_update}->{$channel_id} = $next_update;
-            
-            my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
-            main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
-                                  $channel_id, $delay, $update_time, $new_segment_count));
-        } else {
-            # No new segments, schedule a default update in 6 seconds
-            my $delay = 6;
-            my $next_update = time() + $delay;
-            $self->{playlist_next_update}->{$channel_id} = $next_update;
-            main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
-        }
+        # No new segments, schedule a default update in 6 seconds
+        my $delay = 6;
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
     }
     
     return $content;
@@ -1182,16 +1258,16 @@ sub extract_segments_from_playlist {
 sub parse_extinf_durations {
     my ($self, $content) = @_;
     
-    # Optimization: Just read the first EXTINF tag
-    # Assume all segments have the same duration
+    # Read #EXT-X-TARGETDURATION from playlist header
+    # This is more reliable than parsing individual EXTINF tags
     for my $line (split /\n/, $content) {
-        # Match #EXTINF:<duration>, format
-        if ($line =~ /^#EXTINF:([\d.]+),/) {
-            return $1;  # Return first duration found
+        # Match #EXT-X-TARGETDURATION:<duration>
+        if ($line =~ /^#EXT-X-TARGETDURATION:(\d+)/) {
+            return $1;  # Return target duration from header
         }
     }
     
-    return 10.0;  # Default if no EXTINF found
+    return 10.0;  # Default if no EXT-X-TARGETDURATION found
 }
 
 # Calculate next playlist update time based on new segment count
