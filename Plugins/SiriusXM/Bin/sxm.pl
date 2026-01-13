@@ -1025,7 +1025,7 @@ sub get_playlist {
     
     # If caching is disabled, return playlist directly without any processing
     if (!$caching_enabled) {
-        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id - returning playlist as-is");
+        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id");
         return $content;
     }
 
