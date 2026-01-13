@@ -915,7 +915,7 @@ sub get_playlist_variant_url {
 
 # Trim playlist to reduce size from 1800+ segments to a manageable window
 sub trim_playlist {
-    my ($self, $content, $segment_drop) = @_;
+    my ($self, $content, $segment_drop, $is_first_load) = @_;
     
     my @lines = split /\n/, $content;
     my @header = ();
@@ -937,26 +937,7 @@ sub trim_playlist {
         }
     }
     
-    # Find all #EXT-X-PROGRAM-DATE-TIME: positions
-    my @datetime_positions = ();
-    for my $i (0 .. $#segments) {
-        if ($segments[$i] =~ /^#EXT-X-PROGRAM-DATE-TIME:/) {
-            push @datetime_positions, $i;
-        }
-    }
-    
-    # If we don't have enough datetime markers, return as-is
-    if (@datetime_positions < 2) {
-        main::log_debug("Not enough PROGRAM-DATE-TIME markers to trim playlist");
-        return $content;
-    }
-    
-    # Find the last datetime position
-    my $last_datetime_pos = $datetime_positions[-1];
-    
-    # Calculate the start position: go back (10 + segment_drop) segments from the last datetime
-    # Each segment typically consists of 2-3 lines (#EXTINF, #EXT-X-PROGRAM-DATE-TIME (optional), segment.aac)
-    # So we look for .aac lines to count actual segments
+    # Find all .aac segment lines to count actual segments
     my @segment_lines = ();
     for my $i (0 .. $#segments) {
         if ($segments[$i] =~ /\.aac/) {
@@ -967,7 +948,7 @@ sub trim_playlist {
     # Find the position of the last .aac segment
     my $last_segment_idx = $#segment_lines;
     
-    # Calculate how many segments to keep from the end: (10 + segment_drop)
+    # Always trim from beginning: keep only last (10 + segment_drop) segments
     my $segments_to_keep = 10 + $segment_drop;
     
     # Calculate the start index (go back segments_to_keep from the last segment)
@@ -989,9 +970,16 @@ sub trim_playlist {
         last if $segments[$i] =~ /\.aac/;
     }
     
-    # Calculate the end index: drop the last segment_drop segments
-    my $end_segment_idx = $last_segment_idx - $segment_drop;
-    $end_segment_idx = $last_segment_idx if $end_segment_idx > $last_segment_idx;
+    # Calculate the end index
+    # On first load: drop the last segment_drop segments
+    # On subsequent loads: keep all segments (up to last)
+    my $end_segment_idx;
+    if ($is_first_load) {
+        $end_segment_idx = $last_segment_idx - $segment_drop;
+        $end_segment_idx = $last_segment_idx if $end_segment_idx > $last_segment_idx;
+    } else {
+        $end_segment_idx = $last_segment_idx;
+    }
     
     # Get the line index for the end segment
     my $end_line = $segment_lines[$end_segment_idx];
@@ -1004,8 +992,14 @@ sub trim_playlist {
     
     my $original_count = scalar(@segment_lines);
     my $trimmed_count = $end_segment_idx - $start_segment_idx + 1;
-    main::log_debug(sprintf("Trimmed playlist from %d to %d segments (keeping last %d, dropping last %d)", 
-                           $original_count, $trimmed_count, $segments_to_keep, $segment_drop));
+    
+    if ($is_first_load) {
+        main::log_debug(sprintf("First load: Trimmed playlist from %d to %d segments (keeping last %d, dropping last %d)", 
+                               $original_count, $trimmed_count, $segments_to_keep, $segment_drop));
+    } else {
+        main::log_debug(sprintf("Trimmed playlist from %d to %d segments (keeping last %d)", 
+                               $original_count, $trimmed_count, $segments_to_keep));
+    }
     
     return $trimmed_content;
 }
@@ -1130,9 +1124,19 @@ sub get_playlist {
     # This works on the full playlist for proper caching
     my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
     
+    # Check if this is the first load for this channel
+    my $is_first_load = (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1);
+    
     # Trim the playlist to reduce size (keep only relevant segments)
     # The average playlist is 1800+ segments, but we only need a small window
-    my $trimmed_content = $self->trim_playlist($content, $segment_drop);
+    # On first load: also drop last segment_drop segments
+    # On subsequent loads: keep all segments up to the last one
+    my $trimmed_content = $self->trim_playlist($content, $segment_drop, $is_first_load);
+    
+    # Mark that we've processed the first load
+    if ($is_first_load) {
+        $self->{playlists}->{$channel_id}->{'First'} = 1;
+    }
     
     # Cache the trimmed playlist content and channel name for efficient lookup
     $self->{playlist_cache}->{$channel_id} = $trimmed_content;
