@@ -925,96 +925,53 @@ sub get_playlist_variant_url {
 sub trim_playlist {
     my ($self, $content, $segment_drop, $is_first_load) = @_;
     
-    # Parse playlist according to Apple HLS specification
-    # - Lines starting with # are tags or comments
-    # - Empty lines should be ignored but preserved in output
-    # - Each segment consists of #EXTINF followed by URI line
-    # - Tags like #EXT-X-PROGRAM-DATE-TIME and #EXT-X-DISCONTINUITY can appear between segments
+    # Optimized playlist trimming following Apple HLS specification
+    # Single pass through data, minimal memory allocation
     
-    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
-    my @header = ();
-    my @segment_entries = ();  # Array of segment entry arrays (all lines for each segment)
-    my $in_header = 1;
-    my $current_segment = [];
+    my @lines = split /\r?\n/, $content;
+    my $segments_to_keep = 10 + $segment_drop;
+    my @segment_starts = ();  # Track start line indices of segments
+    my $header_end = -1;
     
-    # Separate header from segments according to HLS spec
-    # Header ends at first #EXTINF tag (which marks start of first segment)
-    for my $line (@lines) {
-        # Ignore leading/trailing whitespace per HLS spec
+    # Single pass: find header end and all segment start positions
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
         $line =~ s/^\s+|\s+$//g;
         
-        if ($in_header) {
-            if ($line =~ /^#EXTINF:/) {
-                # First segment starts here
-                $in_header = 0;
-                push @$current_segment, $line;
-            } else {
-                # Still in header
-                push @header, $line;
-            }
-        } else {
-            # In segment section
-            if ($line =~ /^#EXTINF:/) {
-                # New segment starts - save previous segment if it has content
-                if (@$current_segment) {
-                    push @segment_entries, $current_segment;
-                }
-                # Start new segment
-                $current_segment = [$line];
-            } else {
-                # Part of current segment (URI, tags, or empty lines)
-                push @$current_segment, $line;
-            }
+        if ($line =~ /^#EXTINF:/) {
+            push @segment_starts, $i;
+            $header_end = $i - 1 if $header_end == -1;
         }
     }
     
-    # Don't forget the last segment
-    if (@$current_segment) {
-        push @segment_entries, $current_segment;
-    }
+    my $total_segments = scalar(@segment_starts);
+    return $content if $total_segments <= $segments_to_keep && !$is_first_load;
     
-    my $original_count = scalar(@segment_entries);
-    
-    # Always trim from beginning: keep only last (10 + segment_drop) segments
-    my $segments_to_keep = 10 + $segment_drop;
-    
-    # Calculate indices for segments to keep
-    my $start_idx = $original_count - $segments_to_keep;
-    $start_idx = 0 if $start_idx < 0;
-    
-    my $end_idx;
+    # Calculate which segments to include
+    my $start_seg = $total_segments > $segments_to_keep ? $total_segments - $segments_to_keep : 0;
+    my $end_seg;
     if ($is_first_load) {
-        # On first load: additionally drop the last segment_drop segments
-        $end_idx = $original_count - $segment_drop - 1;
-        $end_idx = $original_count - 1 if $end_idx >= $original_count;
-        $end_idx = $start_idx if $end_idx < $start_idx;  # Ensure valid range
+        $end_seg = $total_segments - $segment_drop - 1;
+        $end_seg = $start_seg if $end_seg < $start_seg;
     } else {
-        # On subsequent loads: keep all trimmed segments
-        $end_idx = $original_count - 1;
+        $end_seg = $total_segments - 1;
     }
     
-    # Extract the segments we want to keep
-    my @kept_segments = @segment_entries[$start_idx .. $end_idx];
+    # Build output: header + selected segments
+    my @output;
+    push @output, @lines[0 .. $header_end] if $header_end >= 0;
     
-    # Rebuild the playlist according to HLS spec
-    # Header, then segments (each segment's lines in order)
-    my @output_lines = @header;
-    for my $segment (@kept_segments) {
-        push @output_lines, @$segment;
+    for my $seg_idx ($start_seg .. $end_seg) {
+        my $start_line = $segment_starts[$seg_idx];
+        my $end_line = $seg_idx < $#segment_starts ? $segment_starts[$seg_idx + 1] - 1 : $#lines;
+        push @output, @lines[$start_line .. $end_line];
     }
     
-    my $trimmed_content = join("\n", @output_lines);
-    my $trimmed_count = scalar(@kept_segments);
+    main::log_debug(sprintf("Trimmed playlist: %d -> %d segments%s", 
+                           $total_segments, $end_seg - $start_seg + 1,
+                           $is_first_load ? " (first load drop)" : ""));
     
-    if ($is_first_load) {
-        main::log_debug(sprintf("First load: Trimmed playlist from %d to %d segments (keeping last %d, dropping last %d)", 
-                               $original_count, $trimmed_count, $segments_to_keep, $segment_drop));
-    } else {
-        main::log_debug(sprintf("Trimmed playlist from %d to %d segments (keeping last %d)", 
-                               $original_count, $trimmed_count, $segments_to_keep));
-    }
-    
-    return $trimmed_content;
+    return join("\n", @output);
 }
 
 sub get_playlist {
@@ -1142,21 +1099,27 @@ sub get_playlist {
     
     # Trim the playlist to reduce size (keep only relevant segments)
     # The average playlist is 1800+ segments, but we only need a small window
-    # On first load: also drop last segment_drop segments
-    # On subsequent loads: keep all segments up to the last one
-    my $trimmed_content = $self->trim_playlist($content, $segment_drop, $is_first_load);
+    # Always trim to keep last (10 + segment_drop) segments
+    my $trimmed_content = $self->trim_playlist($content, $segment_drop, 0);
     
-    # Mark that we've processed the first load
-    if ($is_first_load) {
-        $self->{playlists}->{$channel_id}->{'First'} = 1;
-    }
-    
-    # Cache the trimmed playlist content and channel name for efficient lookup
+    # Cache the full trimmed playlist (without end segments dropped)
+    # This ensures subsequent loads get the segments that were hidden on first load
     $self->{playlist_cache}->{$channel_id} = $trimmed_content;
     $self->{playlist_channel_name}->{$channel_id} = $name;
+    
+    # On first load: drop last segment_drop segments from what we return to client
+    # This helps ffmpeg cache properly, but cache still has full trimmed version
+    my $content_to_return;
+    if ($is_first_load) {
+        $content_to_return = $self->trim_playlist($content, $segment_drop, 1);
+        $self->{playlists}->{$channel_id}->{'First'} = 1;
+        main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full trimmed version)");
+    } else {
+        $content_to_return = $trimmed_content;
+    }
 
-    # Use the trimmed content for return to client
-    $content = $trimmed_content;
+    # Use the appropriate content for return to client
+    $content = $content_to_return;
 
     # Schedule next playlist update based on new segment count
     # Use the count saved BEFORE any caching started
@@ -1183,49 +1146,29 @@ sub get_playlist {
 sub extract_segments_from_playlist {
     my ($self, $content, $channel_id) = @_;
     
-    # Parse playlist according to Apple HLS specification
-    # Segment URIs immediately follow their #EXTINF tag
-    # We need to extract the URI lines (segment filenames)
+    # Optimized segment extraction following Apple HLS specification
+    # URI lines immediately follow #EXTINF tags
     
-    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
+    my @lines = split /\r?\n/, $content;
     my @segments = ();
-    my $next_is_uri = 0;
+    my $expecting_uri = 0;
     
     for my $line (@lines) {
-        # Trim whitespace per HLS spec
         $line =~ s/^\s+|\s+$//g;
-        
-        # Skip empty lines (permitted by HLS spec)
         next if $line eq '';
         
-        # Check if this is an #EXTINF tag
         if ($line =~ /^#EXTINF:/) {
-            # Next non-comment, non-empty line should be the URI
-            $next_is_uri = 1;
-            next;
-        }
-        
-        # If we're expecting a URI and this isn't a tag/comment
-        if ($next_is_uri && $line !~ /^#/) {
-            # This is the segment URI
-            # Verify it looks like a segment (contains .aac or similar)
-            if ($line =~ /\.aac/) {
-                push @segments, $line;
-            }
-            $next_is_uri = 0;
-        } elsif ($line =~ /^#/) {
-            # This is another tag (like #EXT-X-PROGRAM-DATE-TIME, #EXT-X-DISCONTINUITY)
-            # Don't reset next_is_uri - URI comes after all tags for this segment
+            $expecting_uri = 1;
+        } elsif ($expecting_uri && $line !~ /^#/ && $line =~ /\.aac/) {
+            push @segments, $line;
+            $expecting_uri = 0;
         }
     }
     
-    # Store the segment list for this channel
     $self->{playlists}->{$channel_id}->{'segments'} = \@segments;
-    
     main::log_debug("Extracted " . scalar(@segments) . " segments for channel $channel_id");
     
-    # Check if we need to start caching new segments
-    # Only look from the last requested segment to the end
+    # Determine uncached segments based on last requested position
     my $start_index = 0;
     my $defer_caching = 0;
     
@@ -1233,43 +1176,38 @@ sub extract_segments_from_playlist {
         my $last_seg = $self->{last_segment}->{$channel_id};
         for my $i (0 .. $#segments) {
             if ($segments[$i] eq $last_seg) {
-                $start_index = $i + 1;  # Start from next segment
+                $start_index = $i + 1;
                 last;
             }
         }
     } else {
-        # No last_segment recorded yet - client hasn't requested any segments
-        # Defer caching until we know where the client starts, but still count segments for scheduling
         main::log_debug("No last_segment for channel $channel_id - deferring caching until client requests first segment");
         $defer_caching = 1;
     }
     
-    # Find segments not yet in cache or queue, starting from last requested
+    # Count uncached segments efficiently
     my @uncached_segments = ();
     for my $i ($start_index .. $#segments) {
         my $segment = $segments[$i];
-        
-        # Skip if already cached
         next if exists $self->{segment_cache}->{$channel_id}->{$segment};
         
-        # Skip if already in queue
-        my $in_queue = 0;
+        # Check queue efficiently
         if ($self->{segment_queue}->{$channel_id}) {
+            my $in_queue = 0;
             for my $queued (@{$self->{segment_queue}->{$channel_id}}) {
                 if ($queued eq $segment) {
                     $in_queue = 1;
                     last;
                 }
             }
+            next if $in_queue;
         }
-        next if $in_queue;
         
         push @uncached_segments, $segment;
     }
     
-    # If there are uncached segments and no active queue, consider queueing them
+    # Queue uncached segments if appropriate
     if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
-        # Calculate total cache size and count
         my $cache_size = 0;
         my $cache_count = 0;
         if ($self->{segment_cache}->{$channel_id}) {
@@ -1279,20 +1217,16 @@ sub extract_segments_from_playlist {
             }
         }
         
-        main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
-                      " uncached segments, current cache: " . $cache_count . " segments (" . 
-                      sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
+        main::log_info(sprintf("New playlist for channel %s has %d uncached segments, current cache: %d segments (%.2f MB)", 
+                              $channel_id, scalar(@uncached_segments), $cache_count, $cache_size / 1024 / 1024));
         
-        # Only queue segments if we're not deferring caching
         if (!$defer_caching) {
-            # Add to queue - let background loop handle caching to avoid blocking
             $self->{segment_queue}->{$channel_id} = \@uncached_segments;
         } else {
             main::log_debug("Deferring segment queueing for channel $channel_id until client requests first segment");
         }
     }
     
-    # Return both segments array and count of uncached segments
     return scalar(@uncached_segments);
 }
 
