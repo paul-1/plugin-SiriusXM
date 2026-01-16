@@ -355,6 +355,8 @@ use constant {
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
+    SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SERVER_COOLDOWN_PERIOD  => 300, # Seconds to wait before testing primary again (5 minutes)
 };
 
 sub new {
@@ -376,6 +378,12 @@ sub new {
         playlist_next_update => {}, # Track next scheduled update time per channel_id
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
+        
+        # HLS server failover tracking
+        current_hls_server => 'PRIMARY',  # Current active server: 'PRIMARY' or 'SECONDARY'
+        server_failure_count => { PRIMARY => 0, SECONDARY => 0 },  # Track consecutive failures
+        server_last_success => { PRIMARY => time(), SECONDARY => 0 },  # Track last successful request
+        server_last_switch => 0,  # Track when we last switched servers
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -391,6 +399,7 @@ sub new {
     );
     
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
+    main::log_info("HLS server initialized to PRIMARY: " . LIVE_PRIMARY_HLS);
     
     return $self;
 }
@@ -436,6 +445,79 @@ sub clear_channel_cookies {
         $self->{ua}->cookie_jar(HTTP::Cookies->new);
         main::log_debug("Cleared global cookies");
     }
+}
+
+# Get the current HLS server URL
+sub get_current_hls_server {
+    my $self = shift;
+    
+    if ($self->{current_hls_server} eq 'SECONDARY') {
+        return LIVE_SECONDARY_HLS;
+    }
+    return LIVE_PRIMARY_HLS;
+}
+
+# Record a successful request to the current server
+sub record_server_success {
+    my $self = shift;
+    
+    my $server = $self->{current_hls_server};
+    $self->{server_failure_count}->{$server} = 0;
+    $self->{server_last_success}->{$server} = time();
+    
+    # If we're on secondary and primary has been idle for cooldown period, test primary
+    if ($server eq 'SECONDARY') {
+        my $now = time();
+        my $time_since_switch = $now - $self->{server_last_switch};
+        
+        if ($time_since_switch >= SERVER_COOLDOWN_PERIOD) {
+            main::log_info("Secondary server stable for " . SERVER_COOLDOWN_PERIOD . "s, will attempt to switch back to primary on next request");
+            # Switch back to primary to test it
+            $self->switch_hls_server('PRIMARY', 'cooldown_period_expired');
+        }
+    }
+}
+
+# Record a failed request to the current server
+sub record_server_failure {
+    my ($self, $error_msg) = @_;
+    
+    my $server = $self->{current_hls_server};
+    $self->{server_failure_count}->{$server}++;
+    
+    my $failure_count = $self->{server_failure_count}->{$server};
+    main::log_warn("HLS server $server failure #$failure_count: $error_msg");
+    
+    # Check if we should switch servers
+    if ($failure_count >= SERVER_FAILURE_THRESHOLD) {
+        my $target_server = $server eq 'PRIMARY' ? 'SECONDARY' : 'PRIMARY';
+        main::log_error("HLS server $server has failed $failure_count consecutive times (threshold: " . 
+                       SERVER_FAILURE_THRESHOLD . "), switching to $target_server");
+        $self->switch_hls_server($target_server, 'failure_threshold_exceeded');
+    }
+}
+
+# Switch to a different HLS server
+sub switch_hls_server {
+    my ($self, $target_server, $reason) = @_;
+    
+    my $old_server = $self->{current_hls_server};
+    
+    if ($old_server eq $target_server) {
+        main::log_debug("Already using $target_server HLS server");
+        return;
+    }
+    
+    $self->{current_hls_server} = $target_server;
+    $self->{server_last_switch} = time();
+    $self->{server_failure_count}->{$target_server} = 0;  # Reset failure count for new server
+    
+    my $old_url = $old_server eq 'PRIMARY' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    my $new_url = $target_server eq 'PRIMARY' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    
+    main::log_info("HLS server switched: $old_server -> $target_server (reason: $reason)");
+    main::log_info("  Old server URL: $old_url");
+    main::log_info("  New server URL: $new_url");
 }
 
 sub is_logged_in {
@@ -845,7 +927,9 @@ sub get_playlist_url {
     for my $playlist_info (@$playlists) {
         if ($playlist_info->{size} eq 'MEDIUM') {
             my $playlist_url = $playlist_info->{url};
-            $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            # Use current active HLS server (with failover support)
+            my $current_server = $self->get_current_hls_server();
+            $playlist_url =~ s/%Live_Primary_HLS%/$current_server/g;
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
@@ -883,9 +967,14 @@ sub get_playlist_variant_url {
     my $response = $self->{ua}->get($uri);
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on playlist variant retrieval");
+        my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval from " . $self->{current_hls_server};
+        main::log_error($error_msg);
+        $self->record_server_failure($error_msg);
         return undef;
     }
+    
+    # Record successful request
+    $self->record_server_success();
     
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
@@ -1531,8 +1620,9 @@ sub get_segment {
         return undef;
     }
     
-    # Construct full segment URL with base path
-    my $url = LIVE_PRIMARY_HLS . "/$base_path/$path";
+    # Construct full segment URL with base path using current active HLS server
+    my $current_server = $self->get_current_hls_server();
+    my $url = $current_server . "/$base_path/$path";
     
     # Set channel context for token retrieval
     $self->set_channel_context($channel_id);
@@ -1550,13 +1640,17 @@ sub get_segment {
     );
     
     main::log_info("Getting segment: $url");
-    main::log_trace("Channel ID: $channel_id, Base path: $base_path");
+    main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: " . $self->{current_hls_server});
     
     my $response = $self->{ua}->get($uri);
     
     if ($response->code == 403 || $response->code == 500) {
+        # Record server failure for these error codes
+        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id from " . $self->{current_hls_server};
+        $self->record_server_failure($error_msg);
+        
         if ($max_attempts > 0) {
-            main::log_warn("Received status code " . $response->code . " on segment for channel: $channel_id, renewing session");
+            main::log_warn("$error_msg, renewing session");
             
             # Try re-authentication first (without clearing cookies)
             main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
@@ -1577,15 +1671,20 @@ sub get_segment {
                 }
             }
         } else {
-            main::log_error("Received status code " . $response->code . " on segment for channel: $channel_id, max attempts exceeded");
+            main::log_error("$error_msg, max attempts exceeded");
             return undef;
         }
     }
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on segment");
+        my $error_msg = "Received status code " . $response->code . " on segment from " . $self->{current_hls_server};
+        main::log_error($error_msg);
+        $self->record_server_failure($error_msg);
         return undef;
     }
+    
+    # Record successful request
+    $self->record_server_success();
     
     return $response->content;
 }
