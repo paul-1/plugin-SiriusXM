@@ -936,18 +936,19 @@ sub get_playlist_variant_url {
 }
 
 # Trim playlist to reduce size from 1800+ segments to a manageable window
-sub trim_playlist {
-    my ($self, $content, $segment_drop, $is_first_load) = @_;
+sub drop_last_segments {
+    my ($self, $content, $segment_drop) = @_;
     
-    # Optimized playlist trimming following Apple HLS specification
-    # Single pass through data, minimal memory allocation
+    # Drop last N segments from playlist (for first load only)
+    # Following Apple HLS specification
+    
+    return $content if $segment_drop <= 0;
     
     my @lines = split /\r?\n/, $content;
-    my $segments_to_keep = 10 + $segment_drop;
     my @segment_starts = ();  # Track start line indices of segments
     my $header_end = -1;
     
-    # Single pass: find header end and all segment start positions
+    # Find header end and all segment start positions
     for my $i (0 .. $#lines) {
         my $line = $lines[$i];
         $line =~ s/^\s+|\s+$//g;
@@ -959,31 +960,23 @@ sub trim_playlist {
     }
     
     my $total_segments = scalar(@segment_starts);
-    return $content if $total_segments <= $segments_to_keep && !$is_first_load;
+    return $content if $total_segments <= $segment_drop;
     
-    # Calculate which segments to include
-    my $start_seg = $total_segments > $segments_to_keep ? $total_segments - $segments_to_keep : 0;
-    my $end_seg;
-    if ($is_first_load) {
-        $end_seg = $total_segments - $segment_drop - 1;
-        $end_seg = $start_seg if $end_seg < $start_seg;
-    } else {
-        $end_seg = $total_segments - 1;
-    }
+    # Keep all segments except the last segment_drop
+    my $segments_to_keep = $total_segments - $segment_drop;
     
-    # Build output: header + selected segments
+    # Build output: header + segments (minus last N)
     my @output;
     push @output, @lines[0 .. $header_end] if $header_end >= 0;
     
-    for my $seg_idx ($start_seg .. $end_seg) {
+    for my $seg_idx (0 .. $segments_to_keep - 1) {
         my $start_line = $segment_starts[$seg_idx];
         my $end_line = $seg_idx < $#segment_starts ? $segment_starts[$seg_idx + 1] - 1 : $#lines;
         push @output, @lines[$start_line .. $end_line];
     }
     
-    main::log_debug(sprintf("Trimmed playlist: %d -> %d segments%s", 
-                           $total_segments, $end_seg - $start_seg + 1,
-                           $is_first_load ? " (first load drop)" : ""));
+    main::log_debug(sprintf("Dropped last %d segments from playlist: %d -> %d segments", 
+                           $segment_drop, $total_segments, $segments_to_keep));
     
     return join("\n", @output);
 }
@@ -1107,29 +1100,17 @@ sub get_playlist {
     # Check if this is the first load for this channel
     my $is_first_load = (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1);
     
-    # Trim the playlist to reduce size (keep only relevant segments)
-    # The average playlist is 1800+ segments, but we only need a small window
-    # Always trim to keep last (10 + segment_drop) segments
-    my $trimmed_content = $self->trim_playlist($content, $segment_drop, 0);
-    
-    # Cache the full trimmed playlist (without end segments dropped)
-    # This ensures subsequent loads get the segments that were hidden on first load
-    $self->{playlist_cache}->{$channel_id} = $trimmed_content;
+    # Cache the full playlist
+    $self->{playlist_cache}->{$channel_id} = $content;
     $self->{playlist_channel_name}->{$channel_id} = $name;
     
     # On first load: drop last segment_drop segments from what we return to client
-    # This helps ffmpeg cache properly, but cache still has full trimmed version
-    my $content_to_return;
-    if ($is_first_load) {
-        $content_to_return = $self->trim_playlist($content, $segment_drop, 1);
+    # This helps ffmpeg cache properly, but cache still has full playlist
+    if ($is_first_load && $segment_drop > 0) {
+        $content = $self->drop_last_segments($content, $segment_drop);
         $self->{playlists}->{$channel_id}->{'First'} = 1;
-        main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full trimmed version)");
-    } else {
-        $content_to_return = $trimmed_content;
+        main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full playlist)");
     }
-
-    # Use the appropriate content for return to client
-    $content = $content_to_return;
 
     # Schedule next playlist update based on new segment count
     # Use the count saved BEFORE any caching started
