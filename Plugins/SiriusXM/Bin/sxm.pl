@@ -346,12 +346,14 @@ use LWP::UserAgent;
 use HTTP::Cookies;
 use HTTP::Request;
 use JSON::XS;
+#use Data::Dumper;
 
 # Constants
 use constant {
     USER_AGENT              => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
     REST_FORMAT             => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
+    LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
 };
 
@@ -439,7 +441,9 @@ sub clear_channel_cookies {
 sub is_logged_in {
     my ($self, $channel_id) = @_;
     my $cookies = $self->get_channel_cookie_jar($channel_id);
-    
+
+    #main::log_trace("Cookies:" . Dumper($cookies));
+
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
     my @cookie_names = ();
@@ -827,9 +831,19 @@ sub get_playlist_url {
         main::log_error("Error parsing JSON response for playlist: $@");
         return undef;
     }
-    
+
+=begin comment
+   Playlist data format is
+  {
+    'size' => 'SMALL',
+    'name' => 'primary',
+    'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+  },
+=end comment
+=cut
+
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'LARGE') {
+        if ($playlist_info->{size} eq 'MEDIUM') {
             my $playlist_url = $playlist_info->{url};
             $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
             
@@ -1080,10 +1094,6 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
-    # Check if caching is enabled (segment_drop >= 1)
-    my $segment_drop = $CONFIG{segment_drop};
-    my $caching_enabled = $segment_drop >= 1;
-    
     # If caching is disabled, return playlist directly without any processing
     if (!$caching_enabled) {
         main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id");
