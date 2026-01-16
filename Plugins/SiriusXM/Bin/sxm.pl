@@ -121,6 +121,7 @@ use HTTP::Daemon;
 use HTTP::Cookies;
 use URI;
 use URI::Escape;
+use IO::Select;
 
 # Data handling modules
 use JSON::XS;
@@ -221,19 +222,21 @@ sub init_logging {
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%M>:%4L: %m%n
         };
     }
 
     # Set the logger with all appenders in one line
-    $log4perl_config = "log4perl.logger.siriusxm.proxy = $log_level, $appenders\n" . $log4perl_config;
+    $log4perl_config = "log4perl.logger.sxm.proxy = $log_level, $appenders\n" . $log4perl_config;
 
     # Initialize Log4Perl directly (not through LMS wrapper)
     Log::Log4perl->init(\$log4perl_config);    
-    
+
+
     # Get logger instance for this process
-    $LOGGER = get_logger('siriusxm.proxy');
-    
+    $Log::Log4perl::caller_depth++;
+    $LOGGER = get_logger('sxm.proxy');
+    $Log::Log4perl::caller_depth--;
     $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
     if ($logfile && -w $logdir) {
         $LOGGER->info("File logging enabled: $logfile");
@@ -244,7 +247,7 @@ sub init_logging {
 
 sub log_message {
     my ($level, $message) = @_;
-    
+
     # Always check if the level should be logged based on CONFIG{verbose}
     return if $level > $CONFIG{verbose};
     
@@ -255,7 +258,7 @@ sub log_message {
         printf "%s <%s>: %s\n", $timestamp, $level_name, $message;
         return;
     }
-    
+    $Log::Log4perl::caller_depth +=2;
     # Use LMS logging system with level mapping
     if ($level == LOG_ERROR) {
         $LOGGER->error($message);
@@ -269,6 +272,7 @@ sub log_message {
         # Map TRACE to DEBUG since LMS only supports up to DEBUG level
         $LOGGER->debug("[TRACE] $message");
     }
+    $Log::Log4perl::caller_depth -=2;
 }
 
 sub log_error { log_message(LOG_ERROR, shift) }
@@ -342,12 +346,14 @@ use LWP::UserAgent;
 use HTTP::Cookies;
 use HTTP::Request;
 use JSON::XS;
+#use Data::Dumper;
 
 # Constants
 use constant {
     USER_AGENT              => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
     REST_FORMAT             => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
+    LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
 };
 
@@ -365,6 +371,11 @@ sub new {
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
         last_segment => {},     # Track last requested segment per channel_id
+        playlist_cache => {},   # Store cached m3u8 content per channel_id
+        playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
+        playlist_next_update => {}, # Track next scheduled update time per channel_id
+        channel_last_activity => {}, # Track last client activity time per channel_id
+        channel_avg_duration => {},  # Track average EXTINF duration per channel_id
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -430,7 +441,9 @@ sub clear_channel_cookies {
 sub is_logged_in {
     my ($self, $channel_id) = @_;
     my $cookies = $self->get_channel_cookie_jar($channel_id);
-    
+
+    #main::log_trace("Cookies:" . Dumper($cookies));
+
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
     my @cookie_names = ();
@@ -818,9 +831,19 @@ sub get_playlist_url {
         main::log_error("Error parsing JSON response for playlist: $@");
         return undef;
     }
-    
+
+=begin comment
+   Playlist data format is
+  {
+    'size' => 'SMALL',
+    'name' => 'primary',
+    'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+  },
+=end comment
+=cut
+
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'LARGE') {
+        if ($playlist_info->{size} eq 'MEDIUM') {
             my $playlist_url = $playlist_info->{url};
             $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
             
@@ -867,9 +890,6 @@ sub get_playlist_variant_url {
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
     
-    # Try to clean up any potential character encoding issues
-    $content =~ s/\r//g;  # Remove carriage returns
-    
     # Check if this is a master playlist with quality variants
     if ($content =~ /#EXT-X-STREAM-INF/) {
         main::log_debug("Master playlist detected in variant URL, selecting quality variant");
@@ -882,16 +902,27 @@ sub get_playlist_variant_url {
         }
     }
     
+    # Parse playlist according to Apple HLS specification
+    # Handle both Unix (\n) and Windows (\r\n) line endings
+    my @lines = split /\r?\n/, $content;
     my $found_lines = 0;
-    for my $line (split /\n/, $content) {
-        chomp($line);  # Remove any trailing newlines
-        $line =~ s/^\s+|\s+$//g;  # Trim whitespace
-        next if $line eq '';  # Skip empty lines
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Skip empty lines (permitted by HLS spec)
+        next if $line eq '';
+        
+        # Skip comments and tags
+        next if $line =~ /^#/;
         
         $found_lines++;
         main::log_trace("Processing line $found_lines: '$line'");
+        
+        # Look for .m3u8 URLs (variant playlists)
         if ($line =~ /\.m3u8$/) {
-            # First variant should be 256k one
+            # Found a variant playlist URL
             my $base_url = $url;
             $base_url =~ s/\/[^\/]+$//;
             my $variant_url = "$base_url/$line";
@@ -904,6 +935,52 @@ sub get_playlist_variant_url {
     return undef;
 }
 
+# Trim playlist to reduce size from 1800+ segments to a manageable window
+sub drop_last_segments {
+    my ($self, $content, $segment_drop) = @_;
+    
+    # Drop last N segments from playlist (for first load only)
+    # Following Apple HLS specification
+    
+    return $content if $segment_drop <= 0;
+    
+    my @lines = split /\r?\n/, $content;
+    my @segment_starts = ();  # Track start line indices of segments
+    my $header_end = -1;
+    
+    # Find header end and all segment start positions
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        $line =~ s/^\s+|\s+$//g;
+        
+        if ($line =~ /^#EXTINF:/) {
+            push @segment_starts, $i;
+            $header_end = $i - 1 if $header_end == -1;
+        }
+    }
+    
+    my $total_segments = scalar(@segment_starts);
+    return $content if $total_segments <= $segment_drop;
+    
+    # Keep all segments except the last segment_drop
+    my $segments_to_keep = $total_segments - $segment_drop;
+    
+    # Build output: header + segments (minus last N)
+    my @output;
+    push @output, @lines[0 .. $header_end] if $header_end >= 0;
+    
+    for my $seg_idx (0 .. $segments_to_keep - 1) {
+        my $start_line = $segment_starts[$seg_idx];
+        my $end_line = $seg_idx < $#segment_starts ? $segment_starts[$seg_idx + 1] - 1 : $#lines;
+        push @output, @lines[$start_line .. $end_line];
+    }
+    
+    main::log_debug(sprintf("Dropped last %d segments from playlist: %d -> %d segments", 
+                           $segment_drop, $total_segments, $segments_to_keep));
+    
+    return join("\n", @output);
+}
+
 sub get_playlist {
     my ($self, $name, $use_cache) = @_;
     $use_cache //= 1;
@@ -912,6 +989,28 @@ sub get_playlist {
     if (!$guid || !$channel_id) {
         main::log_error("No channel found for: $name");
         return undef;
+    }
+    
+    # Check if caching is disabled (segment_drop == 0)
+    my $segment_drop = $CONFIG{segment_drop};
+    my $caching_enabled = $segment_drop >= 1;
+    
+    # Check if we have a cached playlist and it's not time to update yet
+    # Only use cache if caching is enabled
+    my $now = time();
+    if ($caching_enabled && $use_cache && 
+        exists $self->{playlist_cache}->{$channel_id} && 
+        exists $self->{playlist_next_update}->{$channel_id}) {
+        
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now < $next_update) {
+            my $remaining = $next_update - $now;
+            main::log_debug(sprintf("Using cached playlist for channel %s (next update in %.1f seconds)", 
+                                   $channel_id, $remaining));
+            return $self->{playlist_cache}->{$channel_id};
+        } else {
+            main::log_debug("Cached playlist expired for channel $channel_id, fetching new one");
+        }
     }
     
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
@@ -988,34 +1087,47 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
 
-    # Extract and store segment list from the playlist BEFORE modifying it
-    $self->extract_segments_from_playlist($content, $channel_id);
+    # If caching is disabled, return playlist directly without any processing
+    if (!$caching_enabled) {
+        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id");
+        return $content;
+    }
 
-    # Remove segments from the playlist if this is the first time we've seen it
-    # This will make ffmpeg cache a bit more without needing to use command line options
-    my $segment_drop = $CONFIG{segment_drop};
-    if ( $segment_drop > 0 && (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1) ) {
-        my @lines = split /\n/, $content;
-        # Find all lines ending with ".aac"
-        my @aac_lines;
-        for my $i (0 .. $#lines) {
-            if ($lines[$i] =~ /\.aac/) {
-                push @aac_lines, $i;
-            }
-        }
-
-        # Drop the last N segments by finding the cutoff point
-        my @removed_lines;
-        if (@aac_lines > $segment_drop) {
-            # Calculate cutoff line: keep up to the (segment_drop + 1)th .aac line from the end
-            my $cutoff_line = $aac_lines[-($segment_drop + 1)];
-            @removed_lines = @lines[($cutoff_line + 1) .. $#lines];  # Get the lines being removed
-            @lines = @lines[0 .. $cutoff_line];  # Keep only the lines up to that cutoff
-        }
-        my $rlines = join("\n", @removed_lines);
-        main::log_debug("First Playlist, Removed $segment_drop segments: $rlines");
+    # Extract and queue segment list from the playlist BEFORE modifying it
+    # This works on the full playlist for proper caching
+    my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
+    
+    # Check if this is the first load for this channel
+    my $is_first_load = (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1);
+    
+    # Cache the full playlist
+    $self->{playlist_cache}->{$channel_id} = $content;
+    $self->{playlist_channel_name}->{$channel_id} = $name;
+    
+    # On first load: drop last segment_drop segments from what we return to client
+    # This helps ffmpeg cache properly, but cache still has full playlist
+    if ($is_first_load && $segment_drop > 0) {
+        $content = $self->drop_last_segments($content, $segment_drop);
         $self->{playlists}->{$channel_id}->{'First'} = 1;
-        $content = join("\n", @lines);
+        main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full playlist)");
+    }
+
+    # Schedule next playlist update based on new segment count
+    # Use the count saved BEFORE any caching started
+    if ($new_segment_count > 0) {
+        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        
+        my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
+        main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
+                              $channel_id, $delay, $update_time, $new_segment_count));
+    } else {
+        # No new segments, schedule a default update in 6 seconds
+        my $delay = 6;
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
     }
     
     return $content;
@@ -1025,61 +1137,68 @@ sub get_playlist {
 sub extract_segments_from_playlist {
     my ($self, $content, $channel_id) = @_;
     
+    # Optimized segment extraction following Apple HLS specification
+    # URI lines immediately follow #EXTINF tags
+    
+    my @lines = split /\r?\n/, $content;
     my @segments = ();
-    for my $line (split /\n/, $content) {
-        # Match .aac with optional whitespace/control characters at end
-        if ($line =~ /\.aac/) {
-            # Extract just the filename, strip all whitespace
-            $line =~ s/^\s+|\s+$//g;
-            $line =~ s/\r//g;  # Remove any carriage returns
+    my $expecting_uri = 0;
+    
+    for my $line (@lines) {
+        $line =~ s/^\s+|\s+$//g;
+        next if $line eq '';
+        
+        if ($line =~ /^#EXTINF:/) {
+            $expecting_uri = 1;
+        } elsif ($expecting_uri && $line !~ /^#/ && $line =~ /\.aac/) {
             push @segments, $line;
+            $expecting_uri = 0;
         }
     }
     
-    # Store the segment list for this channel
     $self->{playlists}->{$channel_id}->{'segments'} = \@segments;
-    
     main::log_debug("Extracted " . scalar(@segments) . " segments for channel $channel_id");
     
-    # Check if we need to start caching new segments
-    # Only look from the last requested segment to the end
+    # Determine uncached segments based on last requested position
     my $start_index = 0;
+    my $defer_caching = 0;
+    
     if ($self->{last_segment}->{$channel_id}) {
         my $last_seg = $self->{last_segment}->{$channel_id};
         for my $i (0 .. $#segments) {
             if ($segments[$i] eq $last_seg) {
-                $start_index = $i + 1;  # Start from next segment
+                $start_index = $i + 1;
                 last;
             }
         }
+    } else {
+        main::log_debug("No last_segment for channel $channel_id - deferring caching until client requests first segment");
+        $defer_caching = 1;
     }
     
-    # Find segments not yet in cache or queue, starting from last requested
+    # Count uncached segments efficiently
     my @uncached_segments = ();
     for my $i ($start_index .. $#segments) {
         my $segment = $segments[$i];
-        
-        # Skip if already cached
         next if exists $self->{segment_cache}->{$channel_id}->{$segment};
         
-        # Skip if already in queue
-        my $in_queue = 0;
+        # Check queue efficiently
         if ($self->{segment_queue}->{$channel_id}) {
+            my $in_queue = 0;
             for my $queued (@{$self->{segment_queue}->{$channel_id}}) {
                 if ($queued eq $segment) {
                     $in_queue = 1;
                     last;
                 }
             }
+            next if $in_queue;
         }
-        next if $in_queue;
         
         push @uncached_segments, $segment;
     }
     
-    # If there are uncached segments and no active queue, start caching
+    # Queue uncached segments if appropriate
     if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
-        # Calculate total cache size and count
         my $cache_size = 0;
         my $cache_count = 0;
         if ($self->{segment_cache}->{$channel_id}) {
@@ -1089,15 +1208,79 @@ sub extract_segments_from_playlist {
             }
         }
         
-        main::log_info("New playlist for channel $channel_id has " . scalar(@uncached_segments) . 
-                      " uncached segments, current cache: " . $cache_count . " segments (" . 
-                      sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
-        # Add to queue and start caching
-        $self->{segment_queue}->{$channel_id} = \@uncached_segments;
-        $self->cache_next_segment($channel_id);
+        main::log_info(sprintf("New playlist for channel %s has %d uncached segments, current cache: %d segments (%.2f MB)", 
+                              $channel_id, scalar(@uncached_segments), $cache_count, $cache_size / 1024 / 1024));
+        
+        if (!$defer_caching) {
+            $self->{segment_queue}->{$channel_id} = \@uncached_segments;
+        } else {
+            main::log_debug("Deferring segment queueing for channel $channel_id until client requests first segment");
+        }
     }
     
-    return \@segments;
+    return scalar(@uncached_segments);
+}
+
+# Parse EXTINF tags from playlist content to calculate segment durations
+sub parse_extinf_durations {
+    my ($self, $content) = @_;
+    
+    # Parse #EXT-X-TARGETDURATION from playlist header per Apple HLS specification
+    # Format: #EXT-X-TARGETDURATION:<duration>
+    # This tag is REQUIRED in Media Playlists and specifies the maximum segment duration
+    # More reliable than parsing individual #EXTINF tags
+    
+    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Match #EXT-X-TARGETDURATION:<duration>
+        # Duration is an integer (decimal-integer per spec)
+        if ($line =~ /^#EXT-X-TARGETDURATION:\s*(\d+)\s*$/) {
+            my $duration = $1;
+            main::log_debug("Found EXT-X-TARGETDURATION: $duration seconds");
+            return $duration;
+        }
+    }
+    
+    # If no EXT-X-TARGETDURATION found, return default
+    # Note: This shouldn't happen with valid HLS playlists, but we handle it gracefully
+    main::log_debug("No EXT-X-TARGETDURATION found in playlist, using default 10 seconds");
+    return 10;
+}
+
+# Calculate next playlist update time based on new segment count
+sub calculate_playlist_update_delay {
+    my ($self, $content, $new_segment_count, $channel_id) = @_;
+    
+    # Get segment duration from first EXTINF tag
+    my $extinf_duration = $self->parse_extinf_durations($content);
+    
+    # Store the EXTINF duration for this channel for idle timeout checking
+    $self->{channel_avg_duration}->{$channel_id} = $extinf_duration;
+    
+    # Adaptive backoff strategy:
+    # - Start with EXTINF duration as base
+    # - If 1 new segment: backoff by 1.7x (to avoid constant refreshing)
+    # - If >1 new segments: use EXTINF duration (more segments = faster refresh needed)
+    my $delay;
+    if ($new_segment_count == 1) {
+        $delay = $extinf_duration - 1;
+    } else {
+        $delay = $extinf_duration * 1.6;
+    }
+    
+    # Ensure delay is at least 5 seconds and at most 30 seconds
+    $delay = 5 if $delay < 5;
+    $delay = 30 if $delay > 30;
+    
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
+                           $delay, $extinf_duration, $new_segment_count, 
+                           $new_segment_count == 1 ? "backoff 1.7x" : "EXTINF"));
+    
+    return $delay;
 }
 
 # Start precaching remaining segments in the background
@@ -1192,8 +1375,11 @@ sub get_cached_segment {
     # Track this as the last requested segment for this channel
     $self->{last_segment}->{$channel_id} = $segment_path;
     
-    # Check if segment is in cache
-    if (exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
+    # Check if caching is enabled
+    my $caching_enabled = $CONFIG{segment_drop} >= 1;
+    
+    # Check if segment is in cache (only if caching is enabled)
+    if ($caching_enabled && exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
         main::log_info("Using cached segment: $segment_path for channel $channel_id");
         my $data = $self->{segment_cache}->{$channel_id}->{$segment_path};
         
@@ -1211,12 +1397,13 @@ sub get_cached_segment {
         return $data;
     }
     
-    # Not in cache, fetch it and start precaching
-    main::log_debug("Segment not in cache, fetching: $segment_path for channel $channel_id");
+    # Not in cache, fetch it directly
+    main::log_debug("Fetching segment directly: $segment_path for channel $channel_id");
     
     my $data = $self->get_segment($segment_path);
     
-    if ($data) {
+    # Only start precaching if caching is enabled
+    if ($caching_enabled && $data) {
         # Start precaching remaining segments
         $self->precache_segments($channel_id, $segment_path);
     }
@@ -1243,18 +1430,34 @@ sub select_quality_variant {
     
     main::log_debug("Selecting quality variant for: $quality ($desired_bandwidth bps)");
     
-    my @lines = split /\n/, $master_playlist;
+    # Parse master playlist according to Apple HLS specification
+    # #EXT-X-STREAM-INF tags are followed by the URI line
+    my @lines = split /\r?\n/, $master_playlist;  # Handle both Unix and Windows line endings
     my %variants = ();
     
     # Parse master playlist to extract variants with their bandwidths
     for my $i (0..$#lines) {
-        $lines[$i] =~ s/\r?\n$//;
-        if ($lines[$i] =~ /#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
+        my $line = $lines[$i];
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Look for #EXT-X-STREAM-INF tag with BANDWIDTH attribute
+        if ($line =~ /^#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
             my $bandwidth = $1;
-            # Next line should contain the variant URL
-            if ($i + 1 <= $#lines && $lines[$i + 1] !~ /^#/) {
-                my $variant_url = $lines[$i + 1];
-                $variant_url =~ s/\r?\n$//;
+            
+            # Per HLS spec, URI line immediately follows (skip comments/empty lines)
+            for my $j (($i + 1)..$#lines) {
+                my $next_line = $lines[$j];
+                $next_line =~ s/^\s+|\s+$//g;
+                
+                # Skip empty lines
+                next if $next_line eq '';
+                
+                # If it's another tag, something is wrong - break
+                last if $next_line =~ /^#/;
+                
+                # This should be the URI line
+                my $variant_url = $next_line;
                 
                 # Convert relative URL to absolute if needed
                 if ($variant_url !~ /^https?:\/\//) {
@@ -1540,7 +1743,91 @@ sub refresh_channels {
     return $self->get_channels();
 }
 
+# Check and refresh expired playlists
+sub refresh_expired_playlists {
+    my $self = shift;
+    
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
+    
+    my $now = time();
+    my @channels_to_refresh;
+    my @channels_to_clear;
+    
+    # Check all channels with scheduled updates
+    for my $channel_id (keys %{$self->{playlist_next_update}}) {
+        # Check if channel has been idle for too long (4x EXTINF duration)
+        if (exists $self->{channel_last_activity}->{$channel_id} && 
+            exists $self->{channel_avg_duration}->{$channel_id}) {
+            
+            my $last_activity = $self->{channel_last_activity}->{$channel_id};
+            my $avg_duration = $self->{channel_avg_duration}->{$channel_id};
+            my $idle_timeout = $avg_duration * 4;
+            my $idle_time = $now - $last_activity;
+            
+            if ($idle_time >= $idle_timeout) {
+                main::log_info(sprintf("Channel %s idle for %.1fs (timeout: %.1fs, 4x avg duration of %.1fs) - stopping refresh and clearing cache", 
+                                      $channel_id, $idle_time, $idle_timeout, $avg_duration));
+                push @channels_to_clear, $channel_id;
+                next;  # Skip refresh for this channel
+            }
+        }
+        
+        # Check if playlist needs refresh
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now >= $next_update) {
+            push @channels_to_refresh, $channel_id;
+        }
+    }
+    
+    # Clear cache for idle channels
+    for my $channel_id (@channels_to_clear) {
+        $self->clear_channel_cache($channel_id);
+    }
+    
+    # Refresh expired playlists for active channels
+    for my $channel_id (@channels_to_refresh) {
+        main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
+        
+        # Get the channel name from our cached mapping
+        my $channel_name = $self->{playlist_channel_name}->{$channel_id};
+        
+        if ($channel_name) {
+            # Manually clear the playlist cache to avoid expiring authentication
+            delete $self->{playlist_cache}->{$channel_id};
+            delete $self->{playlist_next_update}->{$channel_id};
+            
+            # Fetch new playlist (this will update the cache and schedule next update)
+            eval {
+                $self->get_playlist($channel_name, 1);  # Use cache for auth, but we cleared playlist cache above
+            };
+            if ($@) {
+                main::log_warn("Error refreshing playlist for channel $channel_id: $@");
+            }
+        } else {
+            main::log_warn("Could not find channel name for channel_id $channel_id in cache");
+        }
+    }
+}
 
+# Process segment caching queues for all active channels
+sub process_segment_queues {
+    my $self = shift;
+    
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
+    
+    # Iterate through all channels with segment queues
+    for my $channel_id (keys %{$self->{segment_queue}}) {
+        my $queue = $self->{segment_queue}->{$channel_id};
+        
+        # Skip if queue is empty
+        next unless $queue && @$queue;
+        
+        # Cache a batch of segments for this channel
+        $self->cache_next_segment($channel_id);
+    }
+}
 
 sub get_channel {
     my ($self, $name) = @_;
@@ -1599,6 +1886,38 @@ sub get_simplified_channel_info {
     return undef;
 }
 
+# Clear all cached data for a channel (used when idle timeout exceeded)
+sub clear_channel_cache {
+    my ($self, $channel_id) = @_;
+    
+    main::log_info("Clearing all cached data for idle channel: $channel_id");
+    
+    # Clear playlist cache
+    delete $self->{playlist_cache}->{$channel_id};
+    delete $self->{playlist_channel_name}->{$channel_id};
+    delete $self->{playlist_next_update}->{$channel_id};
+    delete $self->{playlists}->{$channel_id}->{'First'};
+    
+    # Clear segment cache and queue
+    delete $self->{segment_cache}->{$channel_id};
+    delete $self->{segment_queue}->{$channel_id};
+    delete $self->{last_segment}->{$channel_id};
+    
+    # Clear activity tracking
+    delete $self->{channel_last_activity}->{$channel_id};
+    delete $self->{channel_avg_duration}->{$channel_id};
+    
+    main::log_debug("Cleared playlist, segment cache, and activity data for channel $channel_id");
+}
+
+# Update last activity time for a channel
+sub update_channel_activity {
+    my ($self, $channel_id) = @_;
+    
+    $self->{channel_last_activity}->{$channel_id} = time();
+    main::log_trace("Updated activity timestamp for channel $channel_id");
+}
+
 1;
 
 #=============================================================================
@@ -1652,11 +1971,33 @@ sub start_http_daemon {
     main::log_info("HTTP server started on port $port");
     main::log_info("Access channels at: http://127.0.0.1:$port/channel.m3u8");
     
+    # Create IO::Select for non-blocking accept with timeout
+    my $select = IO::Select->new($daemon);
+    my $last_refresh_check = time();
+    my $refresh_check_interval = 1;  # Check for expired playlists every 1 seconds
+    
     while ($main::RUNNING) {
-        main::log_trace("Server loop iteration, waiting for client connection");
+        # Check if any expired playlists need refreshing or segments need caching
+        my $now = time();
+        if ($now - $last_refresh_check >= $refresh_check_interval) {
+            $sxm->refresh_expired_playlists();
+            $sxm->process_segment_queues();
+            $last_refresh_check = $now;
+        }
+        
+        # Wait for client connection with timeout
+#        main::log_trace("Server loop iteration, waiting for client connection");
+        my @ready = $select->can_read(1.0);  # 1 second timeout
+        
+        if (!@ready) {
+            # No client connection within timeout, continue loop
+#            main::log_trace("No client connection within timeout, continuing loop");
+            next;
+        }
+        
         my $client = $daemon->accept();
         if (!$client) {
-            main::log_trace("No client connection, continuing loop");
+#            main::log_trace("No client connection, continuing loop");
             next;
         }
         
@@ -1720,6 +2061,12 @@ sub handle_http_request {
         
         my $data = $sxm->get_playlist($channel);
         if ($data) {
+            # Update activity timestamp for this channel
+            my ($guid, $channel_id) = $sxm->get_channel($channel);
+            if ($channel_id) {
+                $sxm->update_channel_activity($channel_id);
+            }
+            
             my $response = HTTP::Response->new(200);
             $response->content_type('application/x-mpegURL');
             $response->header('Connection', 'close');
@@ -1747,6 +2094,9 @@ sub handle_http_request {
         
         my $data;
         if ($channel_id) {
+            # Update activity timestamp for this channel
+            $sxm->update_channel_activity($channel_id);
+            
             # Use cached segment if available
             $data = $sxm->get_cached_segment($segment_path, $channel_id);
         } else {
