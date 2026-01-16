@@ -356,7 +356,6 @@ use constant {
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
-    SERVER_COOLDOWN_PERIOD  => 300, # Seconds to wait before testing primary again (5 minutes)
 };
 
 sub new {
@@ -379,11 +378,9 @@ sub new {
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
         
-        # HLS server failover tracking
-        current_hls_server => 'PRIMARY',  # Current active server: 'PRIMARY' or 'SECONDARY'
-        server_failure_count => { PRIMARY => 0, SECONDARY => 0 },  # Track consecutive failures
-        server_last_success => { PRIMARY => time(), SECONDARY => 0 },  # Track last successful request
-        server_last_switch => 0,  # Track when we last switched servers
+        # HLS server failover tracking (per channel)
+        channel_server => {},  # Track which server each channel is using: 'primary' or 'secondary'
+        channel_failure_count => {},  # Track consecutive failures per channel
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -399,7 +396,6 @@ sub new {
     );
     
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
-    main::log_info("HLS server initialized to PRIMARY: " . LIVE_PRIMARY_HLS);
     
     return $self;
 }
@@ -447,77 +443,76 @@ sub clear_channel_cookies {
     }
 }
 
-# Get the current HLS server URL
-sub get_current_hls_server {
-    my $self = shift;
+# Get the current HLS server name for a channel (primary or secondary)
+sub get_channel_server {
+    my ($self, $channel_id) = @_;
     
-    if ($self->{current_hls_server} eq 'SECONDARY') {
-        return LIVE_SECONDARY_HLS;
-    }
-    return LIVE_PRIMARY_HLS;
+    # Default to primary for new channels
+    return $self->{channel_server}->{$channel_id} || 'primary';
 }
 
-# Record a successful request to the current server
-sub record_server_success {
-    my $self = shift;
+# Record a successful request for a channel
+sub record_channel_success {
+    my ($self, $channel_id) = @_;
     
-    my $server = $self->{current_hls_server};
-    $self->{server_failure_count}->{$server} = 0;
-    $self->{server_last_success}->{$server} = time();
-    
-    # If we're on secondary and primary has been idle for cooldown period, test primary
-    if ($server eq 'SECONDARY') {
-        my $now = time();
-        my $time_since_switch = $now - $self->{server_last_switch};
-        
-        if ($time_since_switch >= SERVER_COOLDOWN_PERIOD) {
-            main::log_info("Secondary server stable for " . SERVER_COOLDOWN_PERIOD . "s, will attempt to switch back to primary on next request");
-            # Switch back to primary to test it
-            $self->switch_hls_server('PRIMARY', 'cooldown_period_expired');
-        }
-    }
+    # Reset failure count on success
+    $self->{channel_failure_count}->{$channel_id} = 0;
 }
 
-# Record a failed request to the current server
-sub record_server_failure {
-    my ($self, $error_msg) = @_;
+# Record a failed request for a channel and potentially switch servers
+sub record_channel_failure {
+    my ($self, $channel_id, $error_msg) = @_;
     
-    my $server = $self->{current_hls_server};
-    $self->{server_failure_count}->{$server}++;
+    # Increment failure count
+    $self->{channel_failure_count}->{$channel_id} //= 0;
+    $self->{channel_failure_count}->{$channel_id}++;
     
-    my $failure_count = $self->{server_failure_count}->{$server};
-    main::log_warn("HLS server $server failure #$failure_count: $error_msg");
+    my $current_server = $self->get_channel_server($channel_id);
+    my $failure_count = $self->{channel_failure_count}->{$channel_id};
+    
+    main::log_warn("HLS server $current_server failure #$failure_count for channel $channel_id: $error_msg");
     
     # Check if we should switch servers
     if ($failure_count >= SERVER_FAILURE_THRESHOLD) {
-        my $target_server = $server eq 'PRIMARY' ? 'SECONDARY' : 'PRIMARY';
-        main::log_error("HLS server $server has failed $failure_count consecutive times (threshold: " . 
-                       SERVER_FAILURE_THRESHOLD . "), switching to $target_server");
-        $self->switch_hls_server($target_server, 'failure_threshold_exceeded');
+        my $new_server = $current_server eq 'primary' ? 'secondary' : 'primary';
+        main::log_error("Channel $channel_id: $current_server server has failed $failure_count consecutive times (threshold: " . 
+                       SERVER_FAILURE_THRESHOLD . "), switching to $new_server");
+        $self->switch_channel_server($channel_id, $new_server);
     }
 }
 
-# Switch to a different HLS server
-sub switch_hls_server {
-    my ($self, $target_server, $reason) = @_;
+# Switch a channel to a different HLS server
+sub switch_channel_server {
+    my ($self, $channel_id, $new_server) = @_;
     
-    my $old_server = $self->{current_hls_server};
+    my $old_server = $self->get_channel_server($channel_id);
     
-    if ($old_server eq $target_server) {
-        main::log_debug("Already using $target_server HLS server");
+    if ($old_server eq $new_server) {
+        main::log_debug("Channel $channel_id already using $new_server server");
         return;
     }
     
-    $self->{current_hls_server} = $target_server;
-    $self->{server_last_switch} = time();
-    $self->{server_failure_count}->{$target_server} = 0;  # Reset failure count for new server
+    $self->{channel_server}->{$channel_id} = $new_server;
+    $self->{channel_failure_count}->{$channel_id} = 0;  # Reset failure count
     
-    my $old_url = $old_server eq 'PRIMARY' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
-    my $new_url = $target_server eq 'PRIMARY' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    # Clear cached playlist URL to force re-fetch with new server
+    delete $self->{playlists}->{$channel_id}->{'url'};
     
-    main::log_info("HLS server switched: $old_server -> $target_server (reason: $reason)");
-    main::log_info("  Old server URL: $old_url");
-    main::log_info("  New server URL: $new_url");
+    main::log_info("Channel $channel_id: switched from $old_server to $new_server server");
+}
+
+# Reset channel to primary server (called when starting new playback)
+sub reset_channel_server {
+    my ($self, $channel_id) = @_;
+    
+    my $current_server = $self->get_channel_server($channel_id);
+    
+    if ($current_server ne 'primary') {
+        main::log_info("Channel $channel_id: resetting to primary server for new playback session");
+        $self->{channel_server}->{$channel_id} = 'primary';
+        $self->{channel_failure_count}->{$channel_id} = 0;
+        delete $self->{playlists}->{$channel_id}->{'url'};
+    }
 }
 
 sub is_logged_in {
@@ -853,6 +848,11 @@ sub get_playlist_url {
         return $self->{playlists}->{$channel_id}->{'url'};
     }
     
+    # When starting fresh (not using cache), reset to primary server for new playback session
+    if (!$use_cache) {
+        $self->reset_channel_server($channel_id);
+    }
+    
     my $timestamp = sprintf("%.0f", time() * 1000);
     my $iso_time = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
     
@@ -915,21 +915,58 @@ sub get_playlist_url {
     }
 
 =begin comment
-   Playlist data format is
-  {
-    'size' => 'SMALL',
-    'name' => 'primary',
-    'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
-  },
+   Playlist data format includes both primary and secondary servers:
+  [
+    {
+      'size' => 'SMALL',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    },
+    {
+      'size' => 'SMALL',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    }
+  ]
 =end comment
 =cut
 
+    # Determine which server to use for this channel
+    my $desired_server = $self->get_channel_server($channel_id);
+    
+    # Find the appropriate playlist entry (matching both size and server name)
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'MEDIUM') {
+        if ($playlist_info->{size} eq 'MEDIUM' && $playlist_info->{name} eq $desired_server) {
             my $playlist_url = $playlist_info->{url};
-            # Use current active HLS server (with failover support)
-            my $current_server = $self->get_current_hls_server();
-            $playlist_url =~ s/%Live_Primary_HLS%/$current_server/g;
+            
+            # Replace the placeholder with actual server URL
+            if ($desired_server eq 'primary') {
+                $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            } else {
+                $playlist_url =~ s/%Live_Secondary_HLS%/@{[LIVE_SECONDARY_HLS]}/g;
+            }
+            
+            main::log_info("Channel $channel_id: using $desired_server server playlist");
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
@@ -940,7 +977,7 @@ sub get_playlist_url {
         }
     }
     
-    main::log_error("No suitable playlist found for channel: $channel_id");
+    main::log_error("No suitable $desired_server playlist found for channel: $channel_id");
     return undef;
 }
 
@@ -967,14 +1004,15 @@ sub get_playlist_variant_url {
     my $response = $self->{ua}->get($uri);
     
     if (!$response->is_success) {
-        my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval from " . $self->{current_hls_server};
+        my $server = $self->get_channel_server($channel_id);
+        my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval";
         main::log_error($error_msg);
-        $self->record_server_failure($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
     
     # Record successful request
-    $self->record_server_success();
+    $self->record_channel_success($channel_id);
     
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
@@ -1620,9 +1658,10 @@ sub get_segment {
         return undef;
     }
     
-    # Construct full segment URL with base path using current active HLS server
-    my $current_server = $self->get_current_hls_server();
-    my $url = $current_server . "/$base_path/$path";
+    # Construct full segment URL with base path using the server for this channel
+    my $server_name = $self->get_channel_server($channel_id);
+    my $server_url = $server_name eq 'primary' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    my $url = $server_url . "/$base_path/$path";
     
     # Set channel context for token retrieval
     $self->set_channel_context($channel_id);
@@ -1640,14 +1679,14 @@ sub get_segment {
     );
     
     main::log_info("Getting segment: $url");
-    main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: " . $self->{current_hls_server});
+    main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: $server_name");
     
     my $response = $self->{ua}->get($uri);
     
     if ($response->code == 403 || $response->code == 500) {
         # Record server failure for these error codes
-        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id from " . $self->{current_hls_server};
-        $self->record_server_failure($error_msg);
+        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
         
         if ($max_attempts > 0) {
             main::log_warn("$error_msg, renewing session");
@@ -1677,14 +1716,14 @@ sub get_segment {
     }
     
     if (!$response->is_success) {
-        my $error_msg = "Received status code " . $response->code . " on segment from " . $self->{current_hls_server};
+        my $error_msg = "Received status code " . $response->code . " on segment";
         main::log_error($error_msg);
-        $self->record_server_failure($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
     
     # Record successful request
-    $self->record_server_success();
+    $self->record_channel_success($channel_id);
     
     return $response->content;
 }
