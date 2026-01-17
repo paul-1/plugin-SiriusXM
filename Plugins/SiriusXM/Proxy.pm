@@ -76,6 +76,28 @@ sub rotateLogFile {
     }
 }
 
+sub getCachePath {
+    my $class = shift;
+
+    # Get LMS log directory path
+    my $cache_dir;
+    eval {
+        # Try to get log directory from server preferences
+        require Slim::Utils::OSDetect;
+        $cache_dir = Slim::Utils::OSDetect::dirsFor('cache');
+    };
+    if ($@ || !$cache_dir) {
+        # If $cache_dir is not set, use the operating system's TMPDIR
+        $cache_dir = $ENV{TMPDIR} || '/tmp';
+        $log->warn("Could not determine LMS cache directory, using TMPDIR: $cache_dir");
+    }
+
+    my $cache_file = File::Spec->catfile($cache_dir, 'siriusxm', 'sxm.txt');
+    $log->debug("Proxy cache file path: $cache_file");
+
+    return $cache_file;
+}
+
 sub scan_inc_dirs {
     my @inc = @_;
 
@@ -163,9 +185,6 @@ sub startProxy {
     # Get log level for proxy from preferences
     my $proxy_log_level = $prefs->get('proxy_log_level') || 'INFO';
     
-    # Get cookie file path from preferences
-    my $cookie_file = $prefs->get('cookiefile');
-
     # Get log file path and ensure log rotation
     my $log_file = $class->getLogFilePath();
 
@@ -174,7 +193,7 @@ sub startProxy {
     unless (-d $log_dir) {
         eval { 
             require File::Path;
-            File::Path::make_path($log_dir);
+            File::Path::make_path($log_dir, { mode => 0755 });
         };
         if ($@) {
             $log->warn("Could not create log directory $log_dir: $@");
@@ -189,6 +208,22 @@ sub startProxy {
     }
 
     $class->rotateLogFile($log_file);
+
+    my $cookie_file = $class->getCachePath();
+
+    # Ensure cache directory exists and is writable
+    my $cache_dir = dirname($cookie_file);
+    unless (-d $cache_dir) {
+        eval { 
+            require File::Path;
+            File::Path::make_path($cache_dir, { mode => 0755 });
+        };
+        if ($@) {
+            $log->warn("Could not create cache directory $cache_dir: $@");
+            $cookie_file = File::Spec->catfile('/tmp', 'sxm.cache');
+            $log->warn("Using fallback cache file: $cookie_file");
+        }
+    }
 
     # Build proxy command using
     my @proxy_cmd = (
