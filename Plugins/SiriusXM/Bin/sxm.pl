@@ -31,6 +31,7 @@ Usage examples:
     perl sxm.pl myuser mypass -l
     perl sxm.pl user pass -e -p 8888 --verbose DEBUG
     perl sxm.pl user pass --lmsroot /opt/lms -p 8888
+    perl sxm.pl user pass -p 8888 --cookiefile /path/to/cookies.txt
 
 In a player that supports HLS (QuickTime, VLC, ffmpeg, etc) you can access
 a channel at http://127.0.0.1:8888/channel.m3u8 where "channel" is the
