@@ -528,7 +528,6 @@ sub is_logged_in {
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        main::log_trace("Cookie found: $key = " . substr($val, 0, 50) . (length($val) > 50 ? "..." : ""));
         $has_sxmdata = 1 if $key eq 'SXMDATA';
     });
     
@@ -1152,7 +1151,7 @@ sub get_playlist {
     # If we can't get both token and gup_id, this might be due to corrupted cookies
     # Try to authenticate again if they're missing
     if (!$token || !$gup_id) {
-        main::log_debug("Missing token or gup_id for channel $channel_id, attempting authentication");
+        main::log_warn("Missing token or gup_id for channel $channel_id, attempting authentication");
         if ($self->authenticate($channel_id)) {
             # Try again after authentication
             $token = $self->get_sxmak_token($channel_id);
@@ -1182,7 +1181,7 @@ sub get_playlist {
             return $self->get_playlist($name, 0);
         } else {
             # If re-authentication failed, clear potentially corrupted cookies and try once more
-            main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
+            main::log_warn("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
             $self->clear_channel_cookies($channel_id);
             if ($self->authenticate($channel_id)) {
                 return $self->get_playlist($name, 0);
@@ -1216,7 +1215,7 @@ sub get_playlist {
 
     # If caching is disabled, return playlist directly without any processing
     if (!$caching_enabled) {
-        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id");
+        main::log_debug("Caching disabled (Playlist Behind Live = 0) for channel $channel_id");
         return $content;
     }
 
@@ -1390,8 +1389,9 @@ sub calculate_playlist_update_delay {
     
     # Adaptive backoff strategy:
     # - Start with EXTINF duration as base
-    # - If 1 new segment: backoff by 1.7x (to avoid constant refreshing)
-    # - If >1 new segments: use EXTINF duration (more segments = faster refresh needed)
+    # - If 1 new segments: use EXTINF-1 duration
+    # - If >1 new segment: backoff by 1.6xEXTINF
+
     my $delay;
     if ($new_segment_count == 1) {
         $delay = $extinf_duration - 1;
@@ -1405,7 +1405,7 @@ sub calculate_playlist_update_delay {
     
     main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
                            $delay, $extinf_duration, $new_segment_count, 
-                           $new_segment_count == 1 ? "backoff 1.7x" : "EXTINF"));
+                           $new_segment_count == 1 ? "EXTINF" : "backup 1.6"));
     
     return $delay;
 }
@@ -1925,7 +1925,7 @@ sub refresh_expired_playlists {
     
     # Refresh expired playlists for active channels
     for my $channel_id (@channels_to_refresh) {
-        main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
+        main::log_debug("Background refresh: Fetching new playlist for channel $channel_id");
         
         # Get the channel name from our cached mapping
         my $channel_name = $self->{playlist_channel_name}->{$channel_id};
@@ -2260,14 +2260,13 @@ sub handle_http_request {
         # Handle encryption key requests
         main::log_trace("Key request");
         
-        my $key = decode_base64('0Nsco7MAgxowGvkUT8aYag==');
         my $response = HTTP::Response->new(200);
         $response->content_type('text/plain');
         $response->header('Connection', 'close');
-        $response->content($key);
+        $response->content(HLS_AES_KEY);
         eval { $client->send_response($response); };
         if ($@) {
-            main::log_warn("Error sending key response: $@");
+            main::log_warn("Error sending HLS_AES key response: $@");
         }
     }
     elsif ($path =~ /^\/channel\/(.+)$/) {
