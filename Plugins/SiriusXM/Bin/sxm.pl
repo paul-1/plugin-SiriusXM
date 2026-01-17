@@ -193,6 +193,7 @@ sub init_logging {
                 make_path($cache_dir, { mode => 0755 });
             };
             if ($@) {
+                # Use warn here since logging system is not yet initialized
                 warn "Warning: Could not create cache directory $cache_dir: $@\n";
             }
         }
@@ -208,6 +209,7 @@ sub init_logging {
                 make_path($cookie_dir, { mode => 0755 });
             };
             if ($@) {
+                # Use warn here since logging system is not yet initialized
                 warn "Warning: Could not create cookie directory $cookie_dir: $@\n";
             }
         }
@@ -489,6 +491,8 @@ sub analyze_cookies {
         }
     });
     
+    # Return cookie information for potential future use
+    # Currently used mainly for logging, but available for callers who need it
     return \%cookie_info;
 }
 
