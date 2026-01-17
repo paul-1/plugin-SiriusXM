@@ -355,6 +355,7 @@ use constant {
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
+    SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
 };
 
 sub new {
@@ -376,6 +377,10 @@ sub new {
         playlist_next_update => {}, # Track next scheduled update time per channel_id
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
+        
+        # HLS server failover tracking (per channel)
+        channel_server => {},  # Track which server each channel is using: 'primary' or 'secondary'
+        channel_failure_count => {},  # Track consecutive failures per channel
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -438,6 +443,78 @@ sub clear_channel_cookies {
     }
 }
 
+# Get the current HLS server name for a channel (primary or secondary)
+sub get_channel_server {
+    my ($self, $channel_id) = @_;
+    
+    # Default to primary for new channels
+    return $self->{channel_server}->{$channel_id} || 'primary';
+}
+
+# Record a successful request for a channel
+sub record_channel_success {
+    my ($self, $channel_id) = @_;
+    
+    # Reset failure count on success
+    $self->{channel_failure_count}->{$channel_id} = 0;
+}
+
+# Record a failed request for a channel and potentially switch servers
+sub record_channel_failure {
+    my ($self, $channel_id, $error_msg) = @_;
+    
+    # Increment failure count
+    $self->{channel_failure_count}->{$channel_id} //= 0;
+    $self->{channel_failure_count}->{$channel_id}++;
+    
+    my $current_server = $self->get_channel_server($channel_id);
+    my $failure_count = $self->{channel_failure_count}->{$channel_id};
+    
+    main::log_warn("HLS server $current_server failure #$failure_count for channel $channel_id: $error_msg");
+    
+    # Check if we should switch servers
+    if ($failure_count >= SERVER_FAILURE_THRESHOLD) {
+        my $new_server = $current_server eq 'primary' ? 'secondary' : 'primary';
+        main::log_error("Channel $channel_id: $current_server server has failed $failure_count consecutive times (threshold: " . 
+                       SERVER_FAILURE_THRESHOLD . "), switching to $new_server");
+        $self->switch_channel_server($channel_id, $new_server);
+    }
+}
+
+# Switch a channel to a different HLS server
+sub switch_channel_server {
+    my ($self, $channel_id, $new_server) = @_;
+    
+    my $old_server = $self->get_channel_server($channel_id);
+    
+    if ($old_server eq $new_server) {
+        main::log_debug("Channel $channel_id already using $new_server server");
+        return;
+    }
+    
+    $self->{channel_server}->{$channel_id} = $new_server;
+    $self->{channel_failure_count}->{$channel_id} = 0;  # Reset failure count
+    
+    # Clear cached playlist URL to force re-fetch with new server
+    delete $self->{playlists}->{$channel_id}->{'url'};
+    
+    main::log_info("Channel $channel_id: switched from $old_server to $new_server server");
+}
+
+# Reset channel to primary server (called when starting new playback)
+sub reset_channel_server {
+    my ($self, $channel_id) = @_;
+    
+    my $current_server = $self->get_channel_server($channel_id);
+    
+    if ($current_server ne 'primary') {
+        main::log_info("Channel $channel_id: resetting to primary server for new playback session");
+        $self->{channel_server}->{$channel_id} = 'primary';
+        $self->{channel_failure_count}->{$channel_id} = 0;
+        delete $self->{playlists}->{$channel_id}->{'url'};
+    }
+}
+
 sub is_logged_in {
     my ($self, $channel_id) = @_;
     my $cookies = $self->get_channel_cookie_jar($channel_id);
@@ -451,7 +528,6 @@ sub is_logged_in {
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        main::log_trace("Cookie found: $key = " . substr($val, 0, 50) . (length($val) > 50 ? "..." : ""));
         $has_sxmdata = 1 if $key eq 'SXMDATA';
     });
     
@@ -771,6 +847,11 @@ sub get_playlist_url {
         return $self->{playlists}->{$channel_id}->{'url'};
     }
     
+    # When starting fresh (not using cache), reset to primary server for new playback session
+    if (!$use_cache) {
+        $self->reset_channel_server($channel_id);
+    }
+    
     my $timestamp = sprintf("%.0f", time() * 1000);
     my $iso_time = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
     
@@ -833,19 +914,58 @@ sub get_playlist_url {
     }
 
 =begin comment
-   Playlist data format is
-  {
-    'size' => 'SMALL',
-    'name' => 'primary',
-    'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
-  },
+   Playlist data format includes both primary and secondary servers:
+  [
+    {
+      'size' => 'SMALL',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    },
+    {
+      'size' => 'SMALL',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    }
+  ]
 =end comment
 =cut
 
+    # Determine which server to use for this channel
+    my $desired_server = $self->get_channel_server($channel_id);
+    
+    # Find the appropriate playlist entry (matching both size and server name)
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'MEDIUM') {
+        if ($playlist_info->{size} eq 'MEDIUM' && $playlist_info->{name} eq $desired_server) {
             my $playlist_url = $playlist_info->{url};
-            $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            
+            # Replace the placeholder with actual server URL
+            if ($desired_server eq 'primary') {
+                $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            } else {
+                $playlist_url =~ s/%Live_Secondary_HLS%/@{[LIVE_SECONDARY_HLS]}/g;
+            }
+            
+            main::log_info("Channel $channel_id: using $desired_server server playlist");
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
@@ -856,7 +976,7 @@ sub get_playlist_url {
         }
     }
     
-    main::log_error("No suitable playlist found for channel: $channel_id");
+    main::log_error("No suitable $desired_server playlist found for channel: $channel_id");
     return undef;
 }
 
@@ -883,9 +1003,15 @@ sub get_playlist_variant_url {
     my $response = $self->{ua}->get($uri);
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on playlist variant retrieval");
+        my $server = $self->get_channel_server($channel_id);
+        my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval";
+        main::log_error($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
+    
+    # Record successful request
+    $self->record_channel_success($channel_id);
     
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
@@ -1025,7 +1151,7 @@ sub get_playlist {
     # If we can't get both token and gup_id, this might be due to corrupted cookies
     # Try to authenticate again if they're missing
     if (!$token || !$gup_id) {
-        main::log_debug("Missing token or gup_id for channel $channel_id, attempting authentication");
+        main::log_warn("Missing token or gup_id for channel $channel_id, attempting authentication");
         if ($self->authenticate($channel_id)) {
             # Try again after authentication
             $token = $self->get_sxmak_token($channel_id);
@@ -1055,7 +1181,7 @@ sub get_playlist {
             return $self->get_playlist($name, 0);
         } else {
             # If re-authentication failed, clear potentially corrupted cookies and try once more
-            main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
+            main::log_warn("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
             $self->clear_channel_cookies($channel_id);
             if ($self->authenticate($channel_id)) {
                 return $self->get_playlist($name, 0);
@@ -1089,7 +1215,7 @@ sub get_playlist {
 
     # If caching is disabled, return playlist directly without any processing
     if (!$caching_enabled) {
-        main::log_debug("Caching disabled (segment_drop=0) for channel $channel_id");
+        main::log_debug("Caching disabled (Playlist Behind Live = 0) for channel $channel_id");
         return $content;
     }
 
@@ -1263,8 +1389,9 @@ sub calculate_playlist_update_delay {
     
     # Adaptive backoff strategy:
     # - Start with EXTINF duration as base
-    # - If 1 new segment: backoff by 1.7x (to avoid constant refreshing)
-    # - If >1 new segments: use EXTINF duration (more segments = faster refresh needed)
+    # - If 1 new segments: use EXTINF-1 duration
+    # - If >1 new segment: backoff by 1.6xEXTINF
+
     my $delay;
     if ($new_segment_count == 1) {
         $delay = $extinf_duration - 1;
@@ -1278,7 +1405,7 @@ sub calculate_playlist_update_delay {
     
     main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
                            $delay, $extinf_duration, $new_segment_count, 
-                           $new_segment_count == 1 ? "backoff 1.7x" : "EXTINF"));
+                           $new_segment_count == 1 ? "EXTINF" : "backup 1.6"));
     
     return $delay;
 }
@@ -1531,8 +1658,10 @@ sub get_segment {
         return undef;
     }
     
-    # Construct full segment URL with base path
-    my $url = LIVE_PRIMARY_HLS . "/$base_path/$path";
+    # Construct full segment URL with base path using the server for this channel
+    my $server_name = $self->get_channel_server($channel_id);
+    my $server_url = $server_name eq 'primary' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    my $url = $server_url . "/$base_path/$path";
     
     # Set channel context for token retrieval
     $self->set_channel_context($channel_id);
@@ -1550,13 +1679,17 @@ sub get_segment {
     );
     
     main::log_info("Getting segment: $url");
-    main::log_trace("Channel ID: $channel_id, Base path: $base_path");
+    main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: $server_name");
     
     my $response = $self->{ua}->get($uri);
     
     if ($response->code == 403 || $response->code == 500) {
+        # Record server failure for these error codes
+        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
+        
         if ($max_attempts > 0) {
-            main::log_warn("Received status code " . $response->code . " on segment for channel: $channel_id, renewing session");
+            main::log_warn("$error_msg, renewing session");
             
             # Try re-authentication first (without clearing cookies)
             main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
@@ -1577,15 +1710,20 @@ sub get_segment {
                 }
             }
         } else {
-            main::log_error("Received status code " . $response->code . " on segment for channel: $channel_id, max attempts exceeded");
+            main::log_error("$error_msg, max attempts exceeded");
             return undef;
         }
     }
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on segment");
+        my $error_msg = "Received status code " . $response->code . " on segment";
+        main::log_error($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
+    
+    # Record successful request
+    $self->record_channel_success($channel_id);
     
     return $response->content;
 }
@@ -1787,7 +1925,7 @@ sub refresh_expired_playlists {
     
     # Refresh expired playlists for active channels
     for my $channel_id (@channels_to_refresh) {
-        main::log_debug("Background refresh: Playlist expired for channel $channel_id, fetching new one");
+        main::log_debug("Background refresh: Fetching new playlist for channel $channel_id");
         
         # Get the channel name from our cached mapping
         my $channel_name = $self->{playlist_channel_name}->{$channel_id};
@@ -2122,14 +2260,13 @@ sub handle_http_request {
         # Handle encryption key requests
         main::log_trace("Key request");
         
-        my $key = decode_base64('0Nsco7MAgxowGvkUT8aYag==');
         my $response = HTTP::Response->new(200);
         $response->content_type('text/plain');
         $response->header('Connection', 'close');
-        $response->content($key);
+        $response->content(HLS_AES_KEY);
         eval { $client->send_response($response); };
         if ($@) {
-            main::log_warn("Error sending key response: $@");
+            main::log_warn("Error sending HLS_AES key response: $@");
         }
     }
     elsif ($path =~ /^\/channel\/(.+)$/) {
