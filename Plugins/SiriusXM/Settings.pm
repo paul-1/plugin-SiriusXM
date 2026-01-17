@@ -23,7 +23,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality port region enable_metadata proxy_log_level));
+    return ($prefs, qw(username password quality port region enable_metadata proxy_log_level segment_drop));
 }
 
 sub handler {
@@ -89,6 +89,7 @@ sub handler {
         my $old_region = $prefs->get('region');
         my $old_quality = $prefs->get('quality');
         my $old_proxy_log_level = $prefs->get('proxy_log_level');
+        my $old_segment_drop = $prefs->get('segment_drop');
         
         # Save the settings first
         my $result = $class->SUPER::handler($client, $params, $callback, @args);
@@ -100,7 +101,8 @@ sub handler {
             ($params->{pref_port} && $params->{pref_port} ne $old_port) ||
             ($params->{pref_region} && $params->{pref_region} ne $old_region) ||
             ($params->{pref_quality} && $params->{pref_quality} ne $old_quality) ||
-            ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level)
+            ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level) ||
+            (defined $params->{pref_segment_drop} && $params->{pref_segment_drop} ne $old_segment_drop)
         );
         
         if ($need_restart) {
