@@ -190,7 +190,7 @@ sub init_logging {
     if (!defined $CONFIG{cookiefile}) {
         # Use system temp directory as fallback
         my $temp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
-        $CONFIG{cookiefile} = File::Spec->catfile($temp_dir, 'siriusxm-cookies.txt');
+        $CONFIG{cookiefile} = File::Spec->catfile($temp_dir, 'siriusxm', 'sxm');
     }
     
     # Ensure directory for cookiefile exists

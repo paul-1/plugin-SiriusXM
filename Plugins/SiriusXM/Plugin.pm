@@ -42,7 +42,7 @@ sub initPlugin {
     }
     
     # Build default cookie file path
-    my $default_cookiefile = File::Spec->catfile($cache_dir, 'siriusxm-cookies.txt');
+    my $default_cookiefile = File::Spec->catfile($cache_dir, 'siriusxm', 'sxm');
     
     # Initialize preferences with defaults
     $prefs->init({
