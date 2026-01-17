@@ -385,6 +385,7 @@ use constant {
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
 };
 
 sub new {
@@ -474,13 +475,21 @@ sub analyze_cookies {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         
         # Focus on authentication cookies
-        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN' || $key eq 'JSESSIONID' || $key eq 'AWSALB') {
             $cookie_info{$key} = {
                 expires => $expires,
                 discard => $discard,
             };
             
-            if ($expires) {
+            # JSESSIONID typically doesn't have an expiry, estimate it
+            if ($key eq 'JSESSIONID' && !$expires) {
+                # Estimate expiration as SESSION_MAX_LIFE from now
+                my $estimated_expires = $now + SESSION_MAX_LIFE;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($estimated_expires));
+                my $hours = int(SESSION_MAX_LIFE / 3600);
+                main::log_info("Cookie $key ($context): no expiration set, estimated lifetime ~${hours}h (expires ~$expires_str)");
+                $cookie_info{$key}->{estimated_expires} = $estimated_expires;
+            } elsif ($expires) {
                 my $remaining = $expires - $now;
                 my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
                 
@@ -549,8 +558,38 @@ sub get_channel_cookie_jar {
     
     # Create channel-specific cookie jar if it doesn't exist
     if (!exists $self->{channel_cookies}->{$channel_id}) {
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
-        main::log_debug("Created new cookie jar for channel: $channel_id");
+        my $cookie_jar;
+        
+        # Create persistent cookie jar for channel if cookiefile is configured
+        if ($self->{cookiefile}) {
+            # Generate unique filename for this channel
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            $cookie_jar = HTTP::Cookies->new(
+                file => $channel_cookiefile,
+                autosave => 1,
+                ignore_discard => 1,
+            );
+            
+            # Load existing cookies if file exists
+            if (-e $channel_cookiefile) {
+                eval {
+                    $cookie_jar->load();
+                    main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
+                };
+                if ($@) {
+                    main::log_warn("Error loading cookies for channel $channel_id: $@");
+                }
+            }
+        } else {
+            # No persistence - use in-memory cookie jar
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{channel_cookies}->{$channel_id} = $cookie_jar;
+        main::log_debug("Created cookie jar for channel: $channel_id");
     }
     
     return $self->{channel_cookies}->{$channel_id};
@@ -573,12 +612,43 @@ sub clear_channel_cookies {
     my $context = $channel_id ? "channel $channel_id" : "global";
     
     if ($channel_id) {
+        # Delete the channel cookie file if it exists
+        if ($self->{cookiefile}) {
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for $context: $channel_cookiefile");
+            }
+        }
+        
         # Create a fresh cookie jar for this channel
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
+        delete $self->{channel_cookies}->{$channel_id};
+        # It will be recreated on next access via get_channel_cookie_jar
         main::log_debug("Cleared cookies for $context");
     } else {
         # Clear global cookie jar
-        $self->{ua}->cookie_jar(HTTP::Cookies->new);
+        # Delete the global cookie file if it exists
+        if ($self->{cookiefile} && -e $self->{cookiefile}) {
+            unlink($self->{cookiefile});
+            main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+        }
+        
+        # Create a fresh global cookie jar
+        my $cookie_jar;
+        if ($self->{cookiefile}) {
+            $cookie_jar = HTTP::Cookies->new(
+                file => $self->{cookiefile},
+                autosave => 1,
+                ignore_discard => 1,
+            );
+        } else {
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{ua}->cookie_jar($cookie_jar);
         main::log_debug("Cleared global cookies");
     }
 }
