@@ -161,6 +161,9 @@ sub startProxy {
 
     # Get log level for proxy from preferences
     my $proxy_log_level = $prefs->get('proxy_log_level') || 'INFO';
+    
+    # Get cookie file path from preferences
+    my $cookie_file = $prefs->get('cookiefile');
 
     # Get log file path and ensure log rotation
     my $log_file = $class->getLogFilePath();
@@ -211,6 +214,11 @@ sub startProxy {
     if ($proxy_log_level ne 'OFF') {
         push @proxy_cmd, '-v', $proxy_log_level;
         push @proxy_cmd, '--logfile', $log_file;
+    }
+    
+    # Add cookiefile parameter if configured
+    if ($cookie_file) {
+        push @proxy_cmd, '--cookiefile', $cookie_file;
     }
     
     $log->info("Starting proxy: " . join(' ', @proxy_cmd));

@@ -8,6 +8,7 @@ use base qw(Slim::Plugin::OPMLBased);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Strings qw(string);
+use File::Spec;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
@@ -29,6 +30,20 @@ sub initPlugin {
     
     $log->info("Initializing SiriusXM Plugin");
     
+    # Get cache directory for cookie storage
+    my $cache_dir;
+    eval {
+        require Slim::Utils::OSDetect;
+        $cache_dir = Slim::Utils::OSDetect::dirsFor('cache');
+    };
+    if ($@) {
+        $log->warn("Could not get cache directory: $@");
+        $cache_dir = $ENV{TMPDIR} || '/tmp';
+    }
+    
+    # Build default cookie file path
+    my $default_cookiefile = File::Spec->catfile($cache_dir, 'siriusxm-cookies.txt');
+    
     # Initialize preferences with defaults
     $prefs->init({
         username => '',
@@ -37,7 +52,8 @@ sub initPlugin {
         port => '9999',
         region => 'US',
         enable_metadata => 0,
-        proxy_log_level => 'OFF'
+        proxy_log_level => 'OFF',
+        cookiefile => $default_cookiefile
     });
     
  

@@ -183,22 +183,11 @@ sub init_logging {
     my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);
     my $log_level = $level_mapping[$verbose_level] || 'INFO';
     
-    # Set up cache directory and default cookie file if not specified
+    # Set up default cookie file if not specified
     if (!defined $CONFIG{cookiefile}) {
-        my $cache_dir = Slim::Utils::OSDetect::dirsFor('cache');
-        
-        # Create cache directory if it doesn't exist
-        if (!-d $cache_dir) {
-            eval {
-                make_path($cache_dir, { mode => 0755 });
-            };
-            if ($@) {
-                # Use warn here since logging system is not yet initialized
-                warn "Warning: Could not create cache directory $cache_dir: $@\n";
-            }
-        }
-        
-        $CONFIG{cookiefile} = File::Spec->catfile($cache_dir, 'siriusxm-cookies.txt');
+        # Use system temp directory as fallback
+        my $temp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+        $CONFIG{cookiefile} = File::Spec->catfile($temp_dir, 'siriusxm-cookies.txt');
     }
     
     # Ensure directory for cookiefile exists
@@ -496,6 +485,38 @@ sub analyze_cookies {
     return \%cookie_info;
 }
 
+# Check if cookies need renewal (before they expire)
+# Returns true if cookies should be renewed proactively
+sub should_renew_cookies {
+    my ($self, $channel_id) = @_;
+    
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    my $now = time();
+    
+    # Renew if cookies expire within 1 hour (3600 seconds)
+    my $renewal_threshold = 3600;
+    
+    my $should_renew = 0;
+    
+    $cookies->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Check authentication cookies
+        if (($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') && $expires) {
+            my $remaining = $expires - $now;
+            
+            if ($remaining > 0 && $remaining < $renewal_threshold) {
+                my $context = $channel_id ? "channel $channel_id" : "global";
+                my $minutes = int($remaining / 60);
+                main::log_info("Cookie $key ($context) expires in ${minutes}m, scheduling renewal");
+                $should_renew = 1;
+            }
+        }
+    });
+    
+    return $should_renew;
+}
+
 # Get or create cookie jar for a specific channel
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
@@ -577,6 +598,12 @@ sub is_logged_in {
     # Return false if cookie is expired
     if ($sxmdata_expired) {
         main::log_debug("is_logged_in() result for $context: false (cookie expired)");
+        return 0;
+    }
+    
+    # Check if cookies need proactive renewal
+    if ($has_sxmdata && $self->should_renew_cookies($channel_id)) {
+        main::log_info("Cookies approaching expiration for $context, returning false to trigger renewal");
         return 0;
     }
     
