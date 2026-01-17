@@ -52,6 +52,7 @@ sub initPlugin {
         port => '9999',
         region => 'US',
         enable_metadata => 0,
+        segment_drop => 1,
         proxy_log_level => 'OFF',
         cookiefile => $default_cookiefile
     });

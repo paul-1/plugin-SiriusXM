@@ -160,6 +160,7 @@ our %CONFIG = (
     quality      => 'High',
     logfile      => '/var/log/sxm-proxy.log',
     cookiefile   => undef,  # Will be set to default in init_logging if not specified
+    segment_drop => 0,
 );
 
 # Global state
@@ -1840,6 +1841,13 @@ sub parse_arguments {
             } else {
                 die "Invalid quality level: $value. Use: High, Med, Low\n";
             }
+        },
+        'segment-drop=i' => sub {
+            my ($name, $value) = @_;
+            if ($value < 0 || $value > 30) {
+                die "Invalid segment-drop value: $value. Must be between 0 and 30\n";
+            }
+            $CONFIG{segment_drop} = $value;
         },
         'logfile=s'     => \$CONFIG{logfile},
         'cookiefile=s'  => \$CONFIG{cookiefile},

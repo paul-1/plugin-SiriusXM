@@ -112,6 +112,12 @@ PLUGIN_SIRIUSXM_ENABLE_METADATA
 PLUGIN_SIRIUSXM_ENABLE_METADATA_DESC
 	EN	Enable retrieval of song metadata from 3rd party xmplaylists.com. This will lag behind music stream, and is an unofficial metadata source. You may need to restart stream after enabling.
 
+PLUGIN_SIRIUSXM_SEGMENT_DROP
+	EN	Playlist Cache Segments
+
+PLUGIN_SIRIUSXM_SEGMENT_DROP_DESC
+	EN	Set to 0 for no precaching, or Number of additional 10s segments behind live to start. (0-30, default: 1)
+
 PLUGIN_SIRIUSXM_PROXY_LOG_LEVEL
 	EN	Proxy Log Level
 
