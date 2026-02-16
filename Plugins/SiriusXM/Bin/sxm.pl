@@ -403,17 +403,16 @@ sub new {
 # Get or create cookie jar for a specific channel
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
-    
-    # If no channel_id specified, use global cookie jar for backward compatibility
-    return $self->{ua}->cookie_jar unless $channel_id;
-    
-    # Create channel-specific cookie jar if it doesn't exist
-    if (!exists $self->{channel_cookies}->{$channel_id}) {
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
-        main::log_debug("Created new cookie jar for channel: $channel_id");
-    }
-    
-    return $self->{channel_cookies}->{$channel_id};
+
+    # Always reuse the global cookie jar for all channels.
+    # Per-channel cookie jars start empty, forcing a separate login call
+    # for each channel playback request. Rapid back-to-back logins to the
+    # SiriusXM API trigger server-side rate limiting (HTTP 500), which
+    # prevents both channel listing and stream playback from working.
+    # Sharing the global session avoids redundant authentication while
+    # still allowing the existing session-expiry/re-auth logic to handle
+    # token refreshes when needed.
+    return $self->{ua}->cookie_jar;
 }
 
 # Set the user agent to use a specific channel's cookie jar
