@@ -549,6 +549,46 @@ sub should_renew_cookies {
     return $should_renew;
 }
 
+# Copy authentication cookies from global jar to a channel-specific jar
+sub copy_auth_cookies_to_channel {
+    my ($self, $channel_id) = @_;
+    
+    return unless $channel_id;
+    
+    my $global_jar = $self->{ua}->cookie_jar;
+    my $channel_jar = $self->{channel_cookies}->{$channel_id};
+    
+    return unless $global_jar && $channel_jar;
+    
+    my $copied_count = 0;
+    
+    # Scan global jar for authentication cookies
+    $global_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Copy authentication cookies (SXMDATA and SXMAKTOKEN)
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
+            # Set the cookie in the channel jar with all attributes
+            $channel_jar->set_cookie(
+                $version, $key, $val, $path, $domain, $port, 
+                $path_spec, $secure, $expires, $discard, $hash
+            );
+            $copied_count++;
+            main::log_debug("Copied cookie $key from global to channel $channel_id");
+        }
+    });
+    
+    if ($copied_count > 0) {
+        main::log_info("Copied $copied_count authentication cookie(s) from global jar to channel $channel_id");
+        # Force save to disk if persistent
+        if ($self->{cookiefile}) {
+            eval { $channel_jar->save(); };
+        }
+    }
+    
+    return $copied_count;
+}
+
 # Get or create cookie jar for a specific channel
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
@@ -559,13 +599,17 @@ sub get_channel_cookie_jar {
     # Create channel-specific cookie jar if it doesn't exist
     if (!exists $self->{channel_cookies}->{$channel_id}) {
         my $cookie_jar;
+        my $channel_cookiefile;
+        my $file_exists = 0;
         
         # Create persistent cookie jar for channel if cookiefile is configured
         if ($self->{cookiefile}) {
             # Generate unique filename for this channel
-            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile = $self->{cookiefile};
             $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
             $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            $file_exists = -e $channel_cookiefile;
             
             $cookie_jar = HTTP::Cookies->new(
                 file => $channel_cookiefile,
@@ -574,7 +618,7 @@ sub get_channel_cookie_jar {
             );
             
             # Load existing cookies if file exists
-            if (-e $channel_cookiefile) {
+            if ($file_exists) {
                 eval {
                     $cookie_jar->load();
                     main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
@@ -590,6 +634,12 @@ sub get_channel_cookie_jar {
         
         $self->{channel_cookies}->{$channel_id} = $cookie_jar;
         main::log_debug("Created cookie jar for channel: $channel_id");
+        
+        # If this is a new channel (no existing cookie file), copy auth cookies from global jar
+        if (!$file_exists) {
+            main::log_debug("New channel $channel_id detected, checking for authentication cookies to copy");
+            $self->copy_auth_cookies_to_channel($channel_id);
+        }
     }
     
     return $self->{channel_cookies}->{$channel_id};
@@ -651,6 +701,60 @@ sub clear_channel_cookies {
         $self->{ua}->cookie_jar($cookie_jar);
         main::log_debug("Cleared global cookies");
     }
+}
+
+# Clear all cookies (global and all channel-specific)
+sub clear_all_cookies {
+    my ($self) = @_;
+    
+    main::log_info("Clearing all cookies (global and all channels)");
+    
+    my $cleared_channels = 0;
+    
+    # Clear all channel-specific cookie jars
+    if ($self->{cookiefile}) {
+        foreach my $channel_id (keys %{$self->{channel_cookies}}) {
+            # Generate the channel cookie filename
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            # Delete the file if it exists
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for channel $channel_id: $channel_cookiefile");
+            }
+            
+            $cleared_channels++;
+        }
+    }
+    
+    # Remove all channel cookie jars from memory
+    $self->{channel_cookies} = {};
+    
+    # Clear the global cookie jar
+    if ($self->{cookiefile} && -e $self->{cookiefile}) {
+        unlink($self->{cookiefile});
+        main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+    }
+    
+    # Create a fresh global cookie jar
+    my $cookie_jar;
+    if ($self->{cookiefile}) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $self->{cookiefile},
+            autosave => 1,
+            ignore_discard => 1,
+        );
+    } else {
+        $cookie_jar = HTTP::Cookies->new();
+    }
+    
+    $self->{ua}->cookie_jar($cookie_jar);
+    
+    main::log_info("Cleared all cookies: global and $cleared_channels channel(s)");
+    
+    return $cleared_channels + 1;  # Return total count including global
 }
 
 # Get the current HLS server name for a channel (primary or secondary)
@@ -1445,13 +1549,13 @@ sub get_playlist {
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
         } else {
-            # If re-authentication failed, clear potentially corrupted cookies and try once more
-            main::log_warn("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
-            $self->clear_channel_cookies($channel_id);
+            # If re-authentication failed, clear all cookies (auth issue is likely global)
+            main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+            $self->clear_all_cookies();
             if ($self->authenticate($channel_id)) {
                 return $self->get_playlist($name, 0);
             } else {
-                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing cookies");
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
                 return undef;
             }
         }
@@ -1962,15 +2066,15 @@ sub get_segment {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                # If re-authentication failed, clear potentially corrupted cookies and try once more
-                main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
-                $self->clear_channel_cookies($channel_id);
-                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing cookies");
+                # If re-authentication failed, clear all cookies (auth issue is likely global)
+                main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+                $self->clear_all_cookies();
+                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing all cookies");
                 if ($self->authenticate($channel_id)) {
                     main::log_trace("Session renewed successfully for channel: $channel_id after clearing cookies, retrying segment request");
                     return $self->get_segment($path, $max_attempts - 1);
                 } else {
-                    main::log_error("Session renewal failed for channel: $channel_id after clearing cookies");
+                    main::log_error("Session renewal failed for channel: $channel_id after clearing all cookies");
                     return undef;
                 }
             }
@@ -2055,8 +2159,8 @@ sub get_channels {
             # Handle session expiration codes specifically
             if ($message_code == 201 || $message_code == 208) {
                 if (!$reauth_attempted) {
-                    main::log_warn("Session expired (code: $message_code), re-authenticating for channel list");
-                    $self->clear_channel_cookies(undef); # Clear global cookies
+                    main::log_warn("Session expired (code: $message_code), clearing all cookies and re-authenticating");
+                    $self->clear_all_cookies();
                     
                     if ($self->authenticate(undef)) {
                         main::log_info("Successfully re-authenticated for channel list");
