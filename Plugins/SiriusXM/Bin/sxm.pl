@@ -386,6 +386,7 @@ use constant {
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
+    CHANNEL_LIST_TIMEOUT    => 60,   # Extended timeout for large channel/all response (~3MB)
 };
 
 sub new {
@@ -981,21 +982,34 @@ sub post_request {
     
     my $url = sprintf(REST_FORMAT, $method);
     my $json_data = $self->{json}->encode($postdata);
-    
-    main::log_trace("POST request to: $url");
+
+    # Endpoint-specific timeout: channel/all returns a large (~3MB) chunked response
+    # that requires more time than the default 10-second UA timeout.
+    my $timeout = ($url =~ m{/channel/all\b}i) ? CHANNEL_LIST_TIMEOUT : 10;
+    main::log_trace("POST request to: $url (timeout: ${timeout}s)");
+
     # Only sanitize POST data if trace logging is enabled to avoid unnecessary overhead
     if ($main::CONFIG{verbose} >= main::LOG_TRACE) {
         my $sanitized_postdata = main::sanitize_for_logging($postdata);
         my $sanitized_json = $self->{json}->encode($sanitized_postdata);
         main::log_trace("POST data: $sanitized_json");
     }
-    
+
     my $request = HTTP::Request->new(POST => $url);
     $request->content_type('application/json');
     $request->content($json_data);
-    
-    my $response = $self->{ua}->request($request);
-    
+
+    my $old_timeout = $self->{ua}->timeout;
+    $self->{ua}->timeout($timeout);
+    my $response = eval { $self->{ua}->request($request) };
+    my $req_error = $@;
+    $self->{ua}->timeout($old_timeout);
+
+    if ($req_error) {
+        main::log_error("Request error for method '$method': $req_error");
+        return undef;
+    }
+
     # Log response details for trace level
     main::log_trace("Response status: " . $response->status_line);
     if ($response->header('Set-Cookie')) {
