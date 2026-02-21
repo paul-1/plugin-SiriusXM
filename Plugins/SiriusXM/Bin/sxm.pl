@@ -17,6 +17,7 @@ sxm.pl - SiriusXM proxy server
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
         --segment-drop NUM      Number of segments to drop from first playlist (default: 3, max: 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
+        --cookiefile FILE       Cookie storage file (default: <cache_dir>/siriusxm-cookies.txt)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
         -h, --help              Show this help message
 
@@ -31,6 +32,7 @@ Usage examples:
     perl sxm.pl myuser mypass -l
     perl sxm.pl user pass -e -p 8888 --verbose DEBUG
     perl sxm.pl user pass --lmsroot /opt/lms -p 8888
+    perl sxm.pl user pass -p 8888 --cookiefile /path/to/cookies.txt
 
 In a player that supports HLS (QuickTime, VLC, ffmpeg, etc) you can access
 a channel at http://127.0.0.1:8888/channel.m3u8 where "channel" is the
@@ -159,6 +161,7 @@ our %CONFIG = (
     help         => 0,
     quality      => 'High',
     logfile      => '/var/log/sxm-proxy.log',
+    cookiefile   => undef,  # Will be set to default in init_logging if not specified
     segment_drop => 0,
 );
 
@@ -182,6 +185,27 @@ sub init_logging {
     # Map our verbose level to Log4Perl levels
     my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);
     my $log_level = $level_mapping[$verbose_level] || 'INFO';
+    
+    # Set up default cookie file if not specified
+    if (!defined $CONFIG{cookiefile}) {
+        # Use system temp directory as fallback
+        my $temp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+        $CONFIG{cookiefile} = File::Spec->catfile($temp_dir, 'siriusxm', 'sxm');
+    }
+    
+    # Ensure directory for cookiefile exists
+    if ($CONFIG{cookiefile}) {
+        my $cookie_dir = dirname($CONFIG{cookiefile});
+        if (!-d $cookie_dir) {
+            eval {
+                make_path($cookie_dir, { mode => 0755 });
+            };
+            if ($@) {
+                # Use warn here since logging system is not yet initialized
+                warn "Warning: Could not create cookie directory $cookie_dir: $@\n";
+            }
+        }
+    }
     
     # Determine log file location
     if (!$logfile || $logfile eq '/var/log/sxmproxy.log') {
@@ -242,6 +266,11 @@ sub init_logging {
         $LOGGER->info("File logging enabled: $logfile");
     } else {
         $LOGGER->warn("File logging disabled, using console output only");
+    }
+    
+    # Log cookie file location
+    if ($CONFIG{cookiefile}) {
+        $LOGGER->info("Cookie file: $CONFIG{cookiefile}");
     }
 }
 
@@ -356,10 +385,11 @@ use constant {
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
 };
 
 sub new {
-    my ($class, $username, $password, $region) = @_;
+    my ($class, $username, $password, $region, $cookiefile) = @_;
     
     my $self = {
         username  => $username,
@@ -384,20 +414,179 @@ sub new {
  
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
+        cookiefile => $cookiefile,
     };
     
     bless $self, $class;
     
-    # Initialize user agent
+    # Initialize user agent with persistent cookie jar
+    my $cookie_jar;
+    if ($cookiefile) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $cookiefile,
+            autosave => 1,
+            ignore_discard => 1,
+        );
+        
+        # Load existing cookies if file exists
+        if (-e $cookiefile) {
+            eval {
+                $cookie_jar->load();
+                main::log_info("Loaded cookies from: $cookiefile");
+                
+                # Analyze and log cookie information
+                $self->analyze_cookies($cookie_jar, undef);
+            };
+            if ($@) {
+                main::log_warn("Error loading cookies from $cookiefile: $@");
+            }
+        } else {
+            main::log_info("Cookie file will be created at: $cookiefile");
+        }
+    } else {
+        # No persistence - use in-memory cookie jar
+        $cookie_jar = HTTP::Cookies->new();
+        main::log_warn("Cookie persistence disabled - cookies will not be saved");
+    }
+    
     $self->{ua} = LWP::UserAgent->new(
         agent      => USER_AGENT,
-        cookie_jar => HTTP::Cookies->new,
+        cookie_jar => $cookie_jar,
         timeout    => 30,
     );
     
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
     
     return $self;
+}
+
+# Analyze and log cookie expiration information
+sub analyze_cookies {
+    my ($self, $cookies, $channel_id) = @_;
+    
+    # Use the provided cookie jar or get the appropriate one
+    $cookies = $cookies || $self->get_channel_cookie_jar($channel_id);
+    
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    my %cookie_info = ();
+    my $now = time();
+    
+    $cookies->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Focus on authentication cookies
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN' || $key eq 'JSESSIONID' || $key eq 'AWSALB') {
+            $cookie_info{$key} = {
+                expires => $expires,
+                discard => $discard,
+            };
+            
+            # JSESSIONID typically doesn't have an expiry, estimate it
+            if ($key eq 'JSESSIONID' && !$expires) {
+                # Estimate expiration as SESSION_MAX_LIFE from now
+                my $estimated_expires = $now + SESSION_MAX_LIFE;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($estimated_expires));
+                my $hours = int(SESSION_MAX_LIFE / 3600);
+                main::log_info("Cookie $key ($context): no expiration set, estimated lifetime ~${hours}h (expires ~$expires_str)");
+                $cookie_info{$key}->{estimated_expires} = $estimated_expires;
+            } elsif ($expires) {
+                my $remaining = $expires - $now;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
+                
+                if ($remaining > 0) {
+                    my $days = int($remaining / 86400);
+                    my $hours = int(($remaining % 86400) / 3600);
+                    my $minutes = int(($remaining % 3600) / 60);
+                    
+                    main::log_info("Cookie $key ($context): expires $expires_str (in ${days}d ${hours}h ${minutes}m)");
+                } else {
+                    main::log_warn("Cookie $key ($context): EXPIRED at $expires_str");
+                }
+            } else {
+                if ($discard) {
+                    main::log_debug("Cookie $key ($context): session cookie (will be discarded)");
+                } else {
+                    main::log_debug("Cookie $key ($context): no expiration set");
+                }
+            }
+        }
+    });
+    
+    # Return cookie information for potential future use
+    # Currently used mainly for logging, but available for callers who need it
+    return \%cookie_info;
+}
+
+# Check if cookies need renewal (before they expire)
+# Returns true if cookies should be renewed proactively
+sub should_renew_cookies {
+    my ($self, $channel_id) = @_;
+    
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    my $now = time();
+    
+    # Renew if cookies expire within 1 hour (3600 seconds)
+    my $renewal_threshold = 3600;
+    
+    my $should_renew = 0;
+    
+    $cookies->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Check authentication cookies
+        if (($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') && $expires) {
+            my $remaining = $expires - $now;
+            
+            if ($remaining > 0 && $remaining < $renewal_threshold) {
+                my $context = $channel_id ? "channel $channel_id" : "global";
+                my $minutes = int($remaining / 60);
+                main::log_info("Cookie $key ($context) expires in ${minutes}m, scheduling renewal");
+                $should_renew = 1;
+            }
+        }
+    });
+    
+    return $should_renew;
+}
+
+# Copy authentication cookies from global jar to a channel-specific jar
+sub copy_auth_cookies_to_channel {
+    my ($self, $channel_id) = @_;
+    
+    return unless $channel_id;
+    
+    my $global_jar = $self->{ua}->cookie_jar;
+    my $channel_jar = $self->{channel_cookies}->{$channel_id};
+    
+    return unless $global_jar && $channel_jar;
+    
+    my $copied_count = 0;
+    
+    # Scan global jar for authentication cookies
+    $global_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Copy authentication cookies (SXMDATA and SXMAKTOKEN)
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
+            # Set the cookie in the channel jar with all attributes
+            $channel_jar->set_cookie(
+                $version, $key, $val, $path, $domain, $port, 
+                $path_spec, $secure, $expires, $discard, $hash
+            );
+            $copied_count++;
+            main::log_debug("Copied cookie $key from global to channel $channel_id");
+        }
+    });
+    
+    if ($copied_count > 0) {
+        main::log_info("Copied $copied_count authentication cookie(s) from global jar to channel $channel_id");
+        # Force save to disk if persistent
+        if ($self->{cookiefile}) {
+            eval { $channel_jar->save(); };
+        }
+    }
+    
+    return $copied_count;
 }
 
 # Get or create cookie jar for a specific channel
@@ -409,8 +598,48 @@ sub get_channel_cookie_jar {
     
     # Create channel-specific cookie jar if it doesn't exist
     if (!exists $self->{channel_cookies}->{$channel_id}) {
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
-        main::log_debug("Created new cookie jar for channel: $channel_id");
+        my $cookie_jar;
+        my $channel_cookiefile;
+        my $file_exists = 0;
+        
+        # Create persistent cookie jar for channel if cookiefile is configured
+        if ($self->{cookiefile}) {
+            # Generate unique filename for this channel
+            $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            $file_exists = -e $channel_cookiefile;
+            
+            $cookie_jar = HTTP::Cookies->new(
+                file => $channel_cookiefile,
+                autosave => 1,
+                ignore_discard => 1,
+            );
+            
+            # Load existing cookies if file exists
+            if ($file_exists) {
+                eval {
+                    $cookie_jar->load();
+                    main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
+                };
+                if ($@) {
+                    main::log_warn("Error loading cookies for channel $channel_id: $@");
+                }
+            }
+        } else {
+            # No persistence - use in-memory cookie jar
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{channel_cookies}->{$channel_id} = $cookie_jar;
+        main::log_debug("Created cookie jar for channel: $channel_id");
+        
+        # If this is a new channel (no existing cookie file), copy auth cookies from global jar
+        if (!$file_exists) {
+            main::log_debug("New channel $channel_id detected, checking for authentication cookies to copy");
+            $self->copy_auth_cookies_to_channel($channel_id);
+        }
     }
     
     return $self->{channel_cookies}->{$channel_id};
@@ -433,14 +662,99 @@ sub clear_channel_cookies {
     my $context = $channel_id ? "channel $channel_id" : "global";
     
     if ($channel_id) {
+        # Delete the channel cookie file if it exists
+        if ($self->{cookiefile}) {
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for $context: $channel_cookiefile");
+            }
+        }
+        
         # Create a fresh cookie jar for this channel
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
+        delete $self->{channel_cookies}->{$channel_id};
+        # It will be recreated on next access via get_channel_cookie_jar
         main::log_debug("Cleared cookies for $context");
     } else {
         # Clear global cookie jar
-        $self->{ua}->cookie_jar(HTTP::Cookies->new);
+        # Delete the global cookie file if it exists
+        if ($self->{cookiefile} && -e $self->{cookiefile}) {
+            unlink($self->{cookiefile});
+            main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+        }
+        
+        # Create a fresh global cookie jar
+        my $cookie_jar;
+        if ($self->{cookiefile}) {
+            $cookie_jar = HTTP::Cookies->new(
+                file => $self->{cookiefile},
+                autosave => 1,
+                ignore_discard => 1,
+            );
+        } else {
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{ua}->cookie_jar($cookie_jar);
         main::log_debug("Cleared global cookies");
     }
+}
+
+# Clear all cookies (global and all channel-specific)
+sub clear_all_cookies {
+    my ($self) = @_;
+    
+    main::log_info("Clearing all cookies (global and all channels)");
+    
+    my $cleared_channels = 0;
+    
+    # Clear all channel-specific cookie jars
+    if ($self->{cookiefile}) {
+        foreach my $channel_id (keys %{$self->{channel_cookies}}) {
+            # Generate the channel cookie filename
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            # Delete the file if it exists
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for channel $channel_id: $channel_cookiefile");
+            }
+            
+            $cleared_channels++;
+        }
+    }
+    
+    # Remove all channel cookie jars from memory
+    $self->{channel_cookies} = {};
+    
+    # Clear the global cookie jar
+    if ($self->{cookiefile} && -e $self->{cookiefile}) {
+        unlink($self->{cookiefile});
+        main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+    }
+    
+    # Create a fresh global cookie jar
+    my $cookie_jar;
+    if ($self->{cookiefile}) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $self->{cookiefile},
+            autosave => 1,
+            ignore_discard => 1,
+        );
+    } else {
+        $cookie_jar = HTTP::Cookies->new();
+    }
+    
+    $self->{ua}->cookie_jar($cookie_jar);
+    
+    main::log_info("Cleared all cookies: global and $cleared_channels channel(s)");
+    
+    return $cleared_channels + 1;  # Return total count including global
 }
 
 # Get the current HLS server name for a channel (primary or secondary)
@@ -518,21 +832,50 @@ sub reset_channel_server {
 sub is_logged_in {
     my ($self, $channel_id) = @_;
     my $cookies = $self->get_channel_cookie_jar($channel_id);
-
-    #main::log_trace("Cookies:" . Dumper($cookies));
-
+    
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
+    my $sxmdata_expired = 0;
     my @cookie_names = ();
+    my $now = time();
     
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        $has_sxmdata = 1 if $key eq 'SXMDATA';
+        main::log_trace("Cookie found: $key = " . substr($val, 0, 50) . (length($val) > 50 ? "..." : ""));
+        
+        if ($key eq 'SXMDATA') {
+            $has_sxmdata = 1;
+            
+            # Check if cookie is expired
+            if ($expires && $expires < $now) {
+                $sxmdata_expired = 1;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
+                main::log_warn("SXMDATA cookie has expired at $expires_str");
+            } elsif ($expires) {
+                my $remaining = $expires - $now;
+                my $days = int($remaining / 86400);
+                my $hours = int(($remaining % 86400) / 3600);
+                main::log_debug("SXMDATA cookie valid for ${days}d ${hours}h");
+            }
+        }
     });
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_trace("is_logged_in() check for $context - found cookies: " . join(", ", @cookie_names));
+    
+    # Return false if cookie is expired
+    if ($sxmdata_expired) {
+        main::log_debug("is_logged_in() result for $context: false (cookie expired)");
+        return 0;
+    }
+    
+    # Check if cookies need proactive renewal
+    if ($has_sxmdata && $self->should_renew_cookies($channel_id)) {
+        main::log_info("Cookies approaching expiration for $context, returning false to trigger renewal");
+        return 0;
+    }
+    
     main::log_trace("is_logged_in() result for $context: " . ($has_sxmdata ? "true" : "false"));
     
     return $has_sxmdata;
@@ -544,20 +887,42 @@ sub is_session_authenticated {
     
     # Check for AWSALB and JSESSIONID cookies
     my ($has_awsalb, $has_jsessionid) = (0, 0);
+    my ($awsalb_expired, $jsessionid_expired) = (0, 0);
     my @cookie_names = ();
+    my $now = time();
     
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        $has_awsalb = 1 if $key eq 'AWSALB';
-        $has_jsessionid = 1 if $key eq 'JSESSIONID';
+        
+        if ($key eq 'AWSALB') {
+            $has_awsalb = 1;
+            if ($expires && $expires < $now) {
+                $awsalb_expired = 1;
+                main::log_warn("AWSALB cookie has expired");
+            }
+        } elsif ($key eq 'JSESSIONID') {
+            $has_jsessionid = 1;
+            if ($expires && $expires < $now) {
+                $jsessionid_expired = 1;
+                main::log_warn("JSESSIONID cookie has expired");
+            }
+        }
     });
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_trace("is_session_authenticated() check for $context - found cookies: " . join(", ", @cookie_names));
-    main::log_trace("is_session_authenticated() result for $context: " . (($has_awsalb && $has_jsessionid) ? "true" : "false"));
     
-    return $has_awsalb && $has_jsessionid;
+    # Return false if any required cookie is expired
+    if ($awsalb_expired || $jsessionid_expired) {
+        main::log_debug("is_session_authenticated() result for $context: false (cookies expired)");
+        return 0;
+    }
+    
+    my $result = $has_awsalb && $has_jsessionid;
+    main::log_trace("is_session_authenticated() result for $context: " . ($result ? "true" : "false"));
+    
+    return $result;
 }
 
 sub get_request {
@@ -717,6 +1082,8 @@ sub login {
     }
     
     if ($success) {
+        # Analyze cookies after successful login
+        $self->analyze_cookies(undef, $channel_id);
         return 1;
     }
     
@@ -783,6 +1150,8 @@ sub authenticate {
     }
     
     if ($success) {
+        # Analyze cookies after successful authentication
+        $self->analyze_cookies(undef, $channel_id);
         return 1;
     }
     
@@ -1180,13 +1549,13 @@ sub get_playlist {
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
         } else {
-            # If re-authentication failed, clear potentially corrupted cookies and try once more
-            main::log_warn("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
-            $self->clear_channel_cookies($channel_id);
+            # If re-authentication failed, clear all cookies (auth issue is likely global)
+            main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+            $self->clear_all_cookies();
             if ($self->authenticate($channel_id)) {
                 return $self->get_playlist($name, 0);
             } else {
-                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing cookies");
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
                 return undef;
             }
         }
@@ -1697,15 +2066,15 @@ sub get_segment {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                # If re-authentication failed, clear potentially corrupted cookies and try once more
-                main::log_debug("Re-authentication failed, clearing cookies for channel $channel_id and retrying");
-                $self->clear_channel_cookies($channel_id);
-                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing cookies");
+                # If re-authentication failed, clear all cookies (auth issue is likely global)
+                main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+                $self->clear_all_cookies();
+                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing all cookies");
                 if ($self->authenticate($channel_id)) {
                     main::log_trace("Session renewed successfully for channel: $channel_id after clearing cookies, retrying segment request");
                     return $self->get_segment($path, $max_attempts - 1);
                 } else {
-                    main::log_error("Session renewal failed for channel: $channel_id after clearing cookies");
+                    main::log_error("Session renewal failed for channel: $channel_id after clearing all cookies");
                     return undef;
                 }
             }
@@ -1790,8 +2159,8 @@ sub get_channels {
             # Handle session expiration codes specifically
             if ($message_code == 201 || $message_code == 208) {
                 if (!$reauth_attempted) {
-                    main::log_warn("Session expired (code: $message_code), re-authenticating for channel list");
-                    $self->clear_channel_cookies(undef); # Clear global cookies
+                    main::log_warn("Session expired (code: $message_code), clearing all cookies and re-authenticating");
+                    $self->clear_all_cookies();
                     
                     if ($self->authenticate(undef)) {
                         main::log_info("Successfully re-authenticated for channel list");
@@ -2382,6 +2751,7 @@ sub parse_arguments {
             $CONFIG{segment_drop} = $value;
         },
         'logfile=s'     => \$CONFIG{logfile},
+        'cookiefile=s'  => \$CONFIG{cookiefile},
         'lmsroot=s'     => \$CONFIG{lmsroot},
         'help|h'        => \$help_text,
     ) or pod2usage(2);
@@ -2528,9 +2898,9 @@ sub main {
     
     log_info("Starting SiriusXM Perl proxy v$VERSION");
     
-    # Create SiriusXM object
+    # Create SiriusXM object with cookie file
     my $region = $CONFIG{canada} ? 'CA' : 'US';
-    $SIRIUS_XM = SiriusXM->new($CONFIG{username}, $CONFIG{password}, $region);
+    $SIRIUS_XM = SiriusXM->new($CONFIG{username}, $CONFIG{password}, $region, $CONFIG{cookiefile});
     
     if ($CONFIG{list}) {
         list_channels($SIRIUS_XM);

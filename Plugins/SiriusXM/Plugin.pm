@@ -8,6 +8,7 @@ use base qw(Slim::Plugin::OPMLBased);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Strings qw(string);
+use File::Spec;
 
 use Plugins::SiriusXM::API;
 use Plugins::SiriusXM::Settings;
@@ -38,7 +39,7 @@ sub initPlugin {
         region => 'US',
         enable_metadata => 0,
         segment_drop => 1,
-        proxy_log_level => 'OFF'
+        proxy_log_level => 'OFF',
     });
     
  
