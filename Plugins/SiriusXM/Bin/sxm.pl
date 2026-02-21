@@ -2127,6 +2127,13 @@ sub get_channels {
     # Download channel list if necessary - cache indefinitely for playback use
     if (!defined $self->{channels}) {
         main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
+
+        # Extend the process-level alarm for the duration of this fetch.
+        # get_channels can be triggered by ANY proxy request path (m3u8, single
+        # channel info, playlist lookup, etc.) that runs under alarm(10) in the
+        # server loop.  The upstream channel-list response is ~3MB and takes
+        # longer than 10 seconds, so we always need the extended budget here.
+        alarm(CHANNEL_LIST_TIMEOUT);
         
         my $postdata = {
             moduleList => {
@@ -2672,7 +2679,6 @@ sub handle_http_request {
         main::log_debug("Channel info request for: $channel");
         
         if ( $channel eq 'all' ) {
-            alarm(SiriusXM::CHANNEL_LIST_TIMEOUT); # Extend alarm for large channel/all response
             $channel_info = $sxm->refresh_channels();
         } else {
             $channel_info = $sxm->get_simplified_channel_info($channel);
