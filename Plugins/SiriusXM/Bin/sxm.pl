@@ -967,9 +967,10 @@ sub get_request {
 }
 
 sub post_request {
-    my ($self, $method, $postdata, $authenticate, $channel_id) = @_;
+    my ($self, $method, $postdata, $authenticate, $channel_id, $timeout) = @_;
     $authenticate //= 1;
-    
+    $timeout      //= 10;
+
     if ($authenticate) {
         # Set channel context for authentication
         $self->set_channel_context($channel_id);
@@ -983,9 +984,6 @@ sub post_request {
     my $url = sprintf(REST_FORMAT, $method);
     my $json_data = $self->{json}->encode($postdata);
 
-    # Endpoint-specific timeout: channel/all returns a large (~3MB) chunked response
-    # that requires more time than the default 10-second UA timeout.
-    my $timeout = ($url =~ m{/channel/all\b}i) ? CHANNEL_LIST_TIMEOUT : 10;
     main::log_trace("POST request to: $url (timeout: ${timeout}s)");
 
     # Only sanitize POST data if trace logging is enabled to avoid unnecessary overhead
@@ -2137,7 +2135,7 @@ sub get_channels {
             }
         };
         
-        my $data = $self->post_request('get', $postdata, 1, undef);  # Use global authentication for channel listing
+        my $data = $self->post_request('get', $postdata, 1, undef, CHANNEL_LIST_TIMEOUT);  # Use global authentication and extended timeout for channel listing
         if (!$data) {
             main::log_error('Unable to get channel list - no data returned from server');
             if ($retry_count < $max_retries) {
