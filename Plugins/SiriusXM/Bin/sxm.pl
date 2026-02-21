@@ -2660,6 +2660,7 @@ sub handle_http_request {
         main::log_debug("Channel info request for: $channel");
         
         if ( $channel eq 'all' ) {
+            alarm(SiriusXM::CHANNEL_LIST_TIMEOUT); # Extend alarm for large channel/all response
             $channel_info = $sxm->refresh_channels();
         } else {
             $channel_info = $sxm->get_simplified_channel_info($channel);
