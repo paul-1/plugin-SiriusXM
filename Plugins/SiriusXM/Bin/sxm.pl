@@ -969,13 +969,23 @@ sub get_request {
 sub post_request {
     my ($self, $method, $postdata, $authenticate, $channel_id, $timeout) = @_;
     $authenticate //= 1;
-    $timeout      //= 10;
+    # Default to the current UA timeout so callers that don't specify one inherit
+    # whatever their caller already set (e.g. auth sub-requests inside a 60s
+    # channel-list fetch will inherit 60s rather than always using 10s).
+    $timeout //= $self->{ua}->timeout;
+
+    # Apply the per-request UA timeout BEFORE authentication so that any
+    # nested post_request calls made by authenticate()/login() also run under
+    # the same budget (e.g. 60s for channel/all, not the hard-coded 10s).
+    my $old_timeout = $self->{ua}->timeout;
+    $self->{ua}->timeout($timeout);
 
     if ($authenticate) {
         # Set channel context for authentication
         $self->set_channel_context($channel_id);
         
         if (!$self->is_session_authenticated($channel_id) && !$self->authenticate($channel_id)) {
+            $self->{ua}->timeout($old_timeout);
             main::log_error('Unable to authenticate');
             return undef;
         }
@@ -997,8 +1007,6 @@ sub post_request {
     $request->content_type('application/json');
     $request->content($json_data);
 
-    my $old_timeout = $self->{ua}->timeout;
-    $self->{ua}->timeout($timeout);
     my $response = eval { $self->{ua}->request($request) };
     my $req_error = $@;
     $self->{ua}->timeout($old_timeout);
@@ -2526,11 +2534,17 @@ sub start_http_daemon {
         eval {
             local $SIG{ALRM} = sub { die "timeout" };
             local $SIG{PIPE} = 'IGNORE'; # Ignore broken pipe for this client
-            alarm(10); # Reduced timeout to 10 seconds
+            alarm(10); # Default timeout for most requests
             
             # Handle only one request per connection to avoid holding connections open
             my $request = $client->get_request();
             if ($request) {
+                # /channel/all fetches a large (~3MB) upstream response; extend the
+                # alarm before dispatching so the full budget is available throughout
+                # handle_http_request (including any authentication sub-requests).
+                if ($request->uri->path eq '/channel/all') {
+                    alarm(SiriusXM::CHANNEL_LIST_TIMEOUT);
+                }
                 handle_http_request($client, $request, $sxm);
             }
             
