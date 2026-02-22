@@ -6,9 +6,12 @@ use warnings;
 use JSON::XS;
 use HTTP::Request;
 use LWP::UserAgent;
+use File::Spec;
+use File::Basename qw(dirname);
 use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Cache;
+use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 
 my $log = logger('plugin.siriusxm');
@@ -17,6 +20,9 @@ my $cache = Slim::Utils::Cache->new();
 
 # Cache timeout in seconds
 use constant CACHE_TIMEOUT => 86400; # 24 hours (1 day)
+
+# Disk cache filename for channel data
+use constant CHANNEL_DISK_CACHE_FILE => 'channels.json';
 
 # Track in-flight channel requests to prevent concurrent calls
 my %channel_fetch_callbacks = ();
@@ -34,6 +40,8 @@ sub cleanup {
     $cache->remove('siriusxm_channel_info');
     $cache->remove('siriusxm_processed_channels');
     $cache->remove('siriusxm_auth_token');
+    # Cancel any scheduled background refresh
+    Slim::Utils::Timers::killTimers(undef, \&_backgroundRefreshChannels);
     # Clear any pending callbacks
     %channel_fetch_callbacks = ();
 }
@@ -44,6 +52,195 @@ sub invalidateChannelCache {
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_channel_info');
     $cache->remove('siriusxm_processed_channels');
+
+    # Also remove the disk cache so stale data isn't reloaded on restart
+    my $cache_file = $class->getChannelCachePath();
+    if (-f $cache_file) {
+        unlink($cache_file);
+        $log->debug("Removed channel disk cache: $cache_file");
+    }
+}
+
+sub getChannelCachePath {
+    my $class = shift;
+
+    my $cache_dir;
+    eval {
+        require Slim::Utils::OSDetect;
+        $cache_dir = Slim::Utils::OSDetect::dirsFor('cache');
+    };
+    if ($@ || !$cache_dir) {
+        $cache_dir = $ENV{TMPDIR} || '/tmp';
+        $log->warn("Could not determine LMS cache directory, using TMPDIR: $cache_dir");
+    }
+
+    return File::Spec->catfile($cache_dir, 'siriusxm', CHANNEL_DISK_CACHE_FILE);
+}
+
+sub loadChannelDiskCache {
+    my $class = shift;
+
+    my $cache_file = $class->getChannelCachePath();
+    unless (-f $cache_file) {
+        $log->debug("No channel disk cache found at $cache_file");
+        return undef;
+    }
+
+    open(my $fh, '<', $cache_file) or do {
+        $log->warn("Could not open channel disk cache $cache_file: $!");
+        return undef;
+    };
+    local $/;
+    my $content = <$fh>;
+    close($fh);
+
+    my $cached;
+    eval { $cached = decode_json($content) };
+    if ($@) {
+        $log->warn("Could not parse channel disk cache: $@");
+        return undef;
+    }
+
+    unless ($cached->{expires} && $cached->{data}) {
+        $log->warn("Channel disk cache is missing required fields");
+        return undef;
+    }
+
+    return $cached;
+}
+
+sub saveChannelDiskCache {
+    my ($class, $data) = @_;
+
+    my $cache_file = $class->getChannelCachePath();
+    my $cache_dir  = dirname($cache_file);
+
+    unless (-d $cache_dir) {
+        eval {
+            require File::Path;
+            File::Path::make_path($cache_dir, { mode => 0755 });
+        };
+        if ($@) {
+            $log->warn("Could not create cache directory $cache_dir: $@");
+            return 0;
+        }
+    }
+
+    my $cache_entry = {
+        expires => time() + CACHE_TIMEOUT,
+        data    => $data,
+    };
+
+    eval {
+        open(my $fh, '>', $cache_file) or die "Cannot open $cache_file: $!";
+        print $fh encode_json($cache_entry);
+        close($fh);
+    };
+    if ($@) {
+        $log->error("Failed to save channel disk cache: $@");
+        return 0;
+    }
+
+    $log->info("Channel data saved to disk cache: $cache_file");
+    return 1;
+}
+
+# Load channel cache from disk on startup and schedule background refresh.
+sub initChannelCache {
+    my $class = shift;
+
+    $log->debug("Initializing channel cache from disk");
+
+    my $disk_cache = $class->loadChannelDiskCache();
+
+    if ($disk_cache && $disk_cache->{data}) {
+        my $categories = $disk_cache->{data};
+
+        # Populate memory cache from disk so requests are served immediately
+        $cache->set('siriusxm_processed_channels', $categories, CACHE_TIMEOUT);
+        my $menu_items = $class->buildCategoryMenu($categories);
+        $cache->set('siriusxm_channels',      $menu_items,  CACHE_TIMEOUT);
+        $cache->set('siriusxm_channel_info',  $categories,  CACHE_TIMEOUT);
+
+        $log->info("Channel cache loaded from disk on startup");
+
+        my $now    = time();
+        my $expires = $disk_cache->{expires} || 0;
+
+        if ($expires > $now) {
+            my $delay = $expires - $now;
+            $log->debug("Channel disk cache valid for $delay more seconds, scheduling refresh at expiry");
+            $class->scheduleChannelRefresh($delay);
+        } else {
+            # Cache is expired but we still serve stale data; refresh soon
+            $log->info("Channel disk cache is expired, scheduling background refresh");
+            $class->scheduleChannelRefresh(30);
+        }
+    } else {
+        # No disk cache available; fetch after proxy has had time to start
+        $log->debug("No channel disk cache found, scheduling initial fetch");
+        $class->scheduleChannelRefresh(30);
+    }
+}
+
+# Schedule (or reschedule) the background channel refresh timer.
+sub scheduleChannelRefresh {
+    my ($class, $delay) = @_;
+    $delay //= CACHE_TIMEOUT;
+
+    Slim::Utils::Timers::killTimers(undef, \&_backgroundRefreshChannels);
+    $log->debug("Scheduling channel cache background refresh in $delay seconds");
+    Slim::Utils::Timers::setTimer(undef, time() + $delay, \&_backgroundRefreshChannels);
+}
+
+# Background timer callback – refreshes channel data without clearing stale cache.
+sub _backgroundRefreshChannels {
+    $log->info("Starting background refresh of channel cache");
+
+    my $port = $prefs->get('port') || '9999';
+    my $url  = "http://localhost:$port/channel/all";
+
+    my $http = Slim::Networking::SimpleAsyncHTTP->new(
+        sub {
+            my $response = shift;
+            my $content  = $response->content;
+
+            my $channels_data;
+            eval { $channels_data = decode_json($content) };
+            if ($@) {
+                $log->error("Background refresh: Failed to parse channel data: $@");
+                Plugins::SiriusXM::API->scheduleChannelRefresh(3600);
+                return;
+            }
+
+            Plugins::SiriusXM::APImetadata->fetchStationListings(sub {
+                my $station_lookup = shift || {};
+                my $categories = Plugins::SiriusXM::API->processChannelData($channels_data, $station_lookup);
+
+                # Persist to disk first
+                Plugins::SiriusXM::API->saveChannelDiskCache($categories);
+
+                # Update in-memory caches
+                $cache->set('siriusxm_processed_channels', $categories,                       CACHE_TIMEOUT);
+                $cache->set('siriusxm_channel_info',       $categories,                       CACHE_TIMEOUT);
+                $cache->set('siriusxm_channels',
+                    Plugins::SiriusXM::API->buildCategoryMenu($categories), CACHE_TIMEOUT);
+
+                $log->info("Background channel cache refresh complete");
+
+                # Schedule the next refresh
+                Plugins::SiriusXM::API->scheduleChannelRefresh(CACHE_TIMEOUT);
+            });
+        },
+        sub {
+            my ($http_obj, $error) = @_;
+            $log->error("Background channel refresh failed: $error");
+            Plugins::SiriusXM::API->scheduleChannelRefresh(3600);
+        },
+        { timeout => 30 }
+    );
+
+    $http->get($url);
 }
 
 =begin comment
@@ -279,6 +476,9 @@ sub getChannels {
                 # Cache the menu structure
                 $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
                 $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
+
+                # Persist to disk so the listing survives server restarts
+                $class->saveChannelDiskCache($categories);
                 
                 $log->info("Retrieved and processed channels into menu structure");
                 

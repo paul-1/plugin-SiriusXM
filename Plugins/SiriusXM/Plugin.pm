@@ -56,6 +56,9 @@ sub initPlugin {
     
     # Initialize the API module
     Plugins::SiriusXM::API->init();
+
+    # Load channel listing from disk cache and schedule background refresh
+    Plugins::SiriusXM::API->initChannelCache();
     
     # Add to music services menu
     Slim::Menu::TrackInfo->registerInfoProvider( siriusxm => (
