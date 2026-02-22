@@ -3042,7 +3042,20 @@ sub start_server {
     }
     
     log_info("Authentication successful - starting server");
-    
+
+    # Ensure channel list is available at startup.
+    # get_channels() fetches from the API when:
+    #   - The cache file does not exist ($self->{channels} is undef)
+    #   - The cache file was corrupt ($self->{channels} is undef)
+    # For an expired cache, channels were pre-loaded by load_channel_cache() and the
+    # background refresh in the server loop will fetch updated data asynchronously.
+    my $channels = $sxm->get_channels();
+    if (!$channels || !@$channels) {
+        log_warn("Unable to load channel list at startup - channels will be retried on demand");
+    } else {
+        log_info("Channel list ready at startup: " . scalar(@$channels) . " channels");
+    }
+
     # Start HTTP daemon
     eval {
         SiriusHandler::start_http_daemon($sxm, $CONFIG{port});
