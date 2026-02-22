@@ -375,6 +375,8 @@ use LWP::UserAgent;
 use HTTP::Cookies;
 use HTTP::Request;
 use JSON::XS;
+use File::Basename;
+use File::Spec;
 #use Data::Dumper;
 
 # Constants
@@ -386,6 +388,7 @@ use constant {
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
+    CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
 
 sub new {
@@ -411,7 +414,11 @@ sub new {
         # HLS server failover tracking (per channel)
         channel_server => {},  # Track which server each channel is using: 'primary' or 'secondary'
         channel_failure_count => {},  # Track consecutive failures per channel
- 
+
+        # Channel list disk cache
+        channel_cache_file    => undef,  # Path to channel list cache file (channels.json)
+        channel_cache_expires => 0,      # Unix timestamp when channel cache expires (0 = expired)
+
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
         cookiefile => $cookiefile,
@@ -456,7 +463,17 @@ sub new {
     );
     
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
-    
+
+    # Set up channel cache file path (same directory as cookie file)
+    if ($cookiefile) {
+        my $cache_dir = dirname($cookiefile);
+        $self->{channel_cache_file} = File::Spec->catfile($cache_dir, 'channels.json');
+        main::log_debug("Channel cache file: $self->{channel_cache_file}");
+
+        # Load channel list from disk cache at startup
+        $self->load_channel_cache();
+    }
+
     return $self;
 }
 
@@ -2097,6 +2114,150 @@ sub get_segment {
     return $response->content;
 }
 
+# Load channel list from disk cache
+# Returns 1 if channels were loaded (even if expired), 0 on failure
+sub load_channel_cache {
+    my ($self) = @_;
+
+    return 0 unless $self->{channel_cache_file} && -e $self->{channel_cache_file};
+
+    my $now = time();
+    eval {
+        open(my $fh, '<', $self->{channel_cache_file}) or die "Cannot open: $!";
+        my $content = do { local $/; <$fh> };
+        close($fh);
+
+        my $cache_data = $self->{json}->decode($content);
+
+        unless ($cache_data->{expires_at} && $cache_data->{channels} &&
+                ref($cache_data->{channels}) eq 'ARRAY' && @{$cache_data->{channels}} > 0) {
+            main::log_warn("Channel cache file is missing required fields or is empty");
+            return;
+        }
+
+        my $channel_count = scalar(@{$cache_data->{channels}});
+
+        if ($cache_data->{expires_at} <= $now) {
+            # Cache is expired – load it anyway so we can serve data during background refresh
+            my $expired_at = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($cache_data->{expires_at}));
+            main::log_info("Loaded $channel_count channels from expired cache (expired: $expired_at) – background refresh will run");
+            $self->{channels}             = $cache_data->{channels};
+            $self->{channel_cache_expires} = 0;  # Trigger immediate background refresh
+        } else {
+            my $remaining = $cache_data->{expires_at} - $now;
+            my $hours   = int($remaining / 3600);
+            my $minutes = int(($remaining % 3600) / 60);
+            main::log_info("Loaded $channel_count channels from cache (expires in ${hours}h ${minutes}m)");
+            $self->{channels}             = $cache_data->{channels};
+            $self->{channel_cache_expires} = $cache_data->{expires_at};
+        }
+    };
+    if ($@) {
+        main::log_warn("Error loading channel cache from $self->{channel_cache_file}: $@");
+        return 0;
+    }
+
+    return defined($self->{channels}) ? 1 : 0;
+}
+
+# Save channel list to disk cache with expiry timestamp
+sub save_channel_cache {
+    my ($self) = @_;
+
+    return unless $self->{channel_cache_file} && defined $self->{channels} && @{$self->{channels}} > 0;
+
+    my $now        = time();
+    my $expires_at = $now + CHANNEL_CACHE_TTL;
+
+    eval {
+        my $cache_data = {
+            fetched_at => $now,
+            expires_at => $expires_at,
+            channels   => $self->{channels},
+        };
+
+        open(my $fh, '>', $self->{channel_cache_file}) or die "Cannot open: $!";
+        print $fh $self->{json}->encode($cache_data);
+        close($fh);
+
+        my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires_at));
+        main::log_info("Saved " . scalar(@{$self->{channels}}) .
+                       " channels to cache $self->{channel_cache_file} (expires: $expires_str)");
+        $self->{channel_cache_expires} = $expires_at;
+    };
+    if ($@) {
+        main::log_warn("Error saving channel cache to $self->{channel_cache_file}: $@");
+    }
+}
+
+# Background refresh: fetch fresh channel list from API when the cache has expired.
+# The old channel data continues to be served while the refresh runs.
+sub refresh_channel_cache_if_expired {
+    my ($self) = @_;
+
+    # Only run if we already have channel data (so old data can be served during refresh)
+    return unless defined $self->{channels};
+
+    # Only run when the cache has expired
+    return unless time() >= $self->{channel_cache_expires};
+
+    main::log_info("Channel cache expired – fetching fresh channel list in background...");
+
+    # Temporarily advance the expiry so repeated loop iterations don't pile up.
+    # If the refresh fails we will retry in 5 minutes.
+    $self->{channel_cache_expires} = time() + 300;
+
+    my $old_channels = $self->{channels};
+
+    eval {
+        $self->set_channel_context(undef);
+
+        my $postdata = {
+            moduleList => {
+                modules => [{
+                    moduleArea => 'Discovery',
+                    moduleType => 'ChannelListing',
+                    moduleRequest => {
+                        consumeRequests => [],
+                        resultTemplate  => 'responsive',
+                        alerts          => [],
+                        profileInfos    => [],
+                    },
+                }],
+            },
+        };
+
+        my $data = $self->post_request('get', $postdata, 1, undef);
+        unless ($data) {
+            main::log_warn("Background channel refresh: no data returned by server – keeping existing channel list");
+            return;
+        }
+
+        my $channels;
+        eval {
+            $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
+        };
+
+        unless (defined $channels && ref($channels) eq 'ARRAY' && @$channels > 0) {
+            main::log_warn("Background channel refresh: invalid or empty response – keeping existing channel list");
+            return;
+        }
+
+        # Replace the in-memory channel list with fresh data
+        $self->{channels} = $channels;
+        main::log_info("Background channel refresh complete: " . scalar(@$channels) . " channels loaded");
+
+        # Persist the fresh list and update expiry
+        $self->save_channel_cache();
+    };
+
+    if ($@) {
+        main::log_warn("Background channel refresh error: $@ – keeping existing channel list, retry in 5 minutes");
+        # Preserve old channel data if the refresh blew away $self->{channels}
+        $self->{channels} //= $old_channels;
+    }
+}
+
 sub get_channels {
     my $self = shift;
     my $retry_count = shift || 0;
@@ -2234,6 +2395,9 @@ sub get_channels {
         # Only cache successful, non-empty results
         $self->{channels} = $channels;
         main::log_info("Loaded " . @{$self->{channels}} . " channels");
+
+        # Persist to disk cache so future startups can load without hitting the API
+        $self->save_channel_cache();
     }
     
     return $self->{channels};
@@ -2489,6 +2653,7 @@ sub start_http_daemon {
         if ($now - $last_refresh_check >= $refresh_check_interval) {
             $sxm->refresh_expired_playlists();
             $sxm->process_segment_queues();
+            $sxm->refresh_channel_cache_if_expired();
             $last_refresh_check = $now;
         }
         
