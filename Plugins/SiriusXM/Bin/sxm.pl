@@ -2811,7 +2811,7 @@ sub handle_http_request {
         main::log_debug("Channel info request for: $channel");
         
         if ( $channel eq 'all' ) {
-            $channel_info = $sxm->refresh_channels();
+            $channel_info = $sxm->get_channels();
         } else {
             $channel_info = $sxm->get_simplified_channel_info($channel);
         }
