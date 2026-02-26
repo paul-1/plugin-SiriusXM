@@ -2207,6 +2207,18 @@ sub refresh_channel_cache_if_expired {
     # If the refresh fails we will retry in 5 minutes.
     $self->{channel_cache_expires} = time() + 300;
 
+    # Check global session cookies before hitting the API.
+    # If they are expired, re-authenticate first so the channel fetch doesn't fail silently.
+    if (!$self->is_session_authenticated(undef)) {
+        main::log_info("Background channel refresh: global session cookies expired, re-authenticating...");
+        $self->set_channel_context(undef);
+        if (!$self->authenticate(undef)) {
+            main::log_warn("Background channel refresh: re-authentication failed – keeping existing channel list, retry in 5 minutes");
+            return;
+        }
+        main::log_info("Background channel refresh: re-authentication successful, proceeding with refresh");
+    }
+
     my $old_channels = $self->{channels};
 
     eval {
