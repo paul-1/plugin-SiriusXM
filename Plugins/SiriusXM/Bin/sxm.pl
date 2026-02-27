@@ -401,7 +401,6 @@ sub new {
         playlists => {},
         channels  => undef,
         channel_base_paths => {},
-        channel_cookies => {},  # Store per-channel cookie jars
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
         last_segment => {},     # Track last requested segment per channel_id
@@ -566,100 +565,10 @@ sub should_renew_cookies {
     return $should_renew;
 }
 
-# Copy authentication cookies from global jar to a channel-specific jar
-sub copy_auth_cookies_to_channel {
-    my ($self, $channel_id) = @_;
-    
-    return unless $channel_id;
-    
-    my $global_jar = $self->{ua}->cookie_jar;
-    my $channel_jar = $self->{channel_cookies}->{$channel_id};
-    
-    return unless $global_jar && $channel_jar;
-    
-    my $copied_count = 0;
-    
-    # Scan global jar for authentication cookies
-    $global_jar->scan(sub {
-        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
-        
-        # Copy authentication cookies (SXMDATA and SXMAKTOKEN)
-        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
-            # Set the cookie in the channel jar with all attributes
-            $channel_jar->set_cookie(
-                $version, $key, $val, $path, $domain, $port, 
-                $path_spec, $secure, $expires, $discard, $hash
-            );
-            $copied_count++;
-            main::log_debug("Copied cookie $key from global to channel $channel_id");
-        }
-    });
-    
-    if ($copied_count > 0) {
-        main::log_info("Copied $copied_count authentication cookie(s) from global jar to channel $channel_id");
-        # Force save to disk if persistent
-        if ($self->{cookiefile}) {
-            eval { $channel_jar->save(); };
-        }
-    }
-    
-    return $copied_count;
-}
-
-# Get or create cookie jar for a specific channel
+# Get the global cookie jar (single cookie jar used for all channels)
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
-    
-    # If no channel_id specified, use global cookie jar for backward compatibility
-    return $self->{ua}->cookie_jar unless $channel_id;
-    
-    # Create channel-specific cookie jar if it doesn't exist
-    if (!exists $self->{channel_cookies}->{$channel_id}) {
-        my $cookie_jar;
-        my $channel_cookiefile;
-        my $file_exists = 0;
-        
-        # Create persistent cookie jar for channel if cookiefile is configured
-        if ($self->{cookiefile}) {
-            # Generate unique filename for this channel
-            $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            $file_exists = -e $channel_cookiefile;
-            
-            $cookie_jar = HTTP::Cookies->new(
-                file => $channel_cookiefile,
-                autosave => 1,
-                ignore_discard => 1,
-            );
-            
-            # Load existing cookies if file exists
-            if ($file_exists) {
-                eval {
-                    $cookie_jar->load();
-                    main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
-                };
-                if ($@) {
-                    main::log_warn("Error loading cookies for channel $channel_id: $@");
-                }
-            }
-        } else {
-            # No persistence - use in-memory cookie jar
-            $cookie_jar = HTTP::Cookies->new();
-        }
-        
-        $self->{channel_cookies}->{$channel_id} = $cookie_jar;
-        main::log_debug("Created cookie jar for channel: $channel_id");
-        
-        # If this is a new channel (no existing cookie file), copy auth cookies from global jar
-        if (!$file_exists) {
-            main::log_debug("New channel $channel_id detected, checking for authentication cookies to copy");
-            $self->copy_auth_cookies_to_channel($channel_id);
-        }
-    }
-    
-    return $self->{channel_cookies}->{$channel_id};
+    return $self->{ua}->cookie_jar;
 }
 
 # Set the user agent to use a specific channel's cookie jar
@@ -672,82 +581,39 @@ sub set_channel_context {
     main::log_trace("Set cookie context for channel: " . ($channel_id || 'global'));
 }
 
-# Clear all cookies for a specific channel (or global if no channel_id)
+# Clear the global cookie jar
 sub clear_channel_cookies {
     my ($self, $channel_id) = @_;
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     
-    if ($channel_id) {
-        # Delete the channel cookie file if it exists
-        if ($self->{cookiefile}) {
-            my $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            if (-e $channel_cookiefile) {
-                unlink($channel_cookiefile);
-                main::log_debug("Deleted cookie file for $context: $channel_cookiefile");
-            }
-        }
-        
-        # Create a fresh cookie jar for this channel
-        delete $self->{channel_cookies}->{$channel_id};
-        # It will be recreated on next access via get_channel_cookie_jar
-        main::log_debug("Cleared cookies for $context");
-    } else {
-        # Clear global cookie jar
-        # Delete the global cookie file if it exists
-        if ($self->{cookiefile} && -e $self->{cookiefile}) {
-            unlink($self->{cookiefile});
-            main::log_debug("Deleted global cookie file: $self->{cookiefile}");
-        }
-        
-        # Create a fresh global cookie jar
-        my $cookie_jar;
-        if ($self->{cookiefile}) {
-            $cookie_jar = HTTP::Cookies->new(
-                file => $self->{cookiefile},
-                autosave => 1,
-                ignore_discard => 1,
-            );
-        } else {
-            $cookie_jar = HTTP::Cookies->new();
-        }
-        
-        $self->{ua}->cookie_jar($cookie_jar);
-        main::log_debug("Cleared global cookies");
+    # Delete the global cookie file if it exists
+    if ($self->{cookiefile} && -e $self->{cookiefile}) {
+        unlink($self->{cookiefile});
+        main::log_debug("Deleted global cookie file: $self->{cookiefile}");
     }
+    
+    # Create a fresh global cookie jar
+    my $cookie_jar;
+    if ($self->{cookiefile}) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $self->{cookiefile},
+            autosave => 1,
+            ignore_discard => 1,
+        );
+    } else {
+        $cookie_jar = HTTP::Cookies->new();
+    }
+    
+    $self->{ua}->cookie_jar($cookie_jar);
+    main::log_debug("Cleared cookies for $context");
 }
 
 # Clear all cookies (global and all channel-specific)
 sub clear_all_cookies {
     my ($self) = @_;
     
-    main::log_info("Clearing all cookies (global and all channels)");
-    
-    my $cleared_channels = 0;
-    
-    # Clear all channel-specific cookie jars
-    if ($self->{cookiefile}) {
-        foreach my $channel_id (keys %{$self->{channel_cookies}}) {
-            # Generate the channel cookie filename
-            my $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            # Delete the file if it exists
-            if (-e $channel_cookiefile) {
-                unlink($channel_cookiefile);
-                main::log_debug("Deleted cookie file for channel $channel_id: $channel_cookiefile");
-            }
-            
-            $cleared_channels++;
-        }
-    }
-    
-    # Remove all channel cookie jars from memory
-    $self->{channel_cookies} = {};
+    main::log_info("Clearing all cookies");
     
     # Clear the global cookie jar
     if ($self->{cookiefile} && -e $self->{cookiefile}) {
@@ -769,9 +635,9 @@ sub clear_all_cookies {
     
     $self->{ua}->cookie_jar($cookie_jar);
     
-    main::log_info("Cleared all cookies: global and $cleared_channels channel(s)");
+    main::log_info("Cleared all cookies");
     
-    return $cleared_channels + 1;  # Return total count including global
+    return 1;
 }
 
 # Get the current HLS server name for a channel (primary or secondary)
