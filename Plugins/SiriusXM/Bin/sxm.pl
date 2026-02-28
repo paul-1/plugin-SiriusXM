@@ -419,6 +419,9 @@ sub new {
         channel_cache_file    => undef,  # Path to channel list cache file (channels.json)
         channel_cache_expires => 0,      # Unix timestamp when channel cache expires (0 = expired)
 
+        # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
+        jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
+
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
         cookiefile => $cookiefile,
@@ -1169,6 +1172,14 @@ sub authenticate {
     if ($success) {
         # Analyze cookies after successful authentication
         $self->analyze_cookies(undef, $channel_id);
+
+        # Track when the global JSESSIONID will expire.
+        # The cookie carries no explicit timestamp so we calculate it ourselves.
+        if (!defined $channel_id) {
+            $self->{jsessionid_expires} = time() + SESSION_MAX_LIFE;
+            my $exp_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($self->{jsessionid_expires}));
+            main::log_debug("Tracked JSESSIONID expiry (global): $exp_str (~" . int(SESSION_MAX_LIFE/3600) . "h)");
+        }
         return 1;
     }
     
@@ -2137,6 +2148,22 @@ sub load_channel_cache {
 
         my $channel_count = scalar(@{$cache_data->{channels}});
 
+        # Restore tracked JSESSIONID expiry (persisted so it survives restarts).
+        # Default to 0 (expired) if not present (older cache files or first run).
+        if ($cache_data->{jsessionid_expires}) {
+            $self->{jsessionid_expires} = $cache_data->{jsessionid_expires};
+            my $j_remaining = $self->{jsessionid_expires} - $now;
+            if ($j_remaining > 0) {
+                my $j_min = int($j_remaining / 60);
+                main::log_debug("Restored tracked JSESSIONID expiry: valid for ${j_min}m");
+            } else {
+                main::log_debug("Restored tracked JSESSIONID expiry: already expired, re-auth will run");
+            }
+        } else {
+            $self->{jsessionid_expires} = 0;
+            main::log_debug("No tracked JSESSIONID expiry in cache, re-auth will run on next refresh");
+        }
+
         if ($cache_data->{expires_at} <= $now) {
             # Cache is expired – load it anyway so we can serve data during background refresh
             my $expired_at = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($cache_data->{expires_at}));
@@ -2171,9 +2198,10 @@ sub save_channel_cache {
 
     eval {
         my $cache_data = {
-            fetched_at => $now,
-            expires_at => $expires_at,
-            channels   => $self->{channels},
+            fetched_at         => $now,
+            expires_at         => $expires_at,
+            jsessionid_expires => $self->{jsessionid_expires} || 0,
+            channels           => $self->{channels},
         };
 
         open(my $fh, '>', $self->{channel_cache_file}) or die "Cannot open: $!";
@@ -2207,16 +2235,22 @@ sub refresh_channel_cache_if_expired {
     # If the refresh fails we will retry in 5 minutes.
     $self->{channel_cache_expires} = time() + 300;
 
-    # Always re-authenticate before making the channel API call.
-    # is_session_authenticated() cannot reliably detect expired sessions because
-    # JSESSIONID has no explicit expiry timestamp; the server invalidates it silently.
-    # Unconditionally calling authenticate() ensures we always have a live session,
-    # mirroring what start_server() does on every startup.
-    main::log_debug("Background channel refresh: refreshing session before channel fetch...");
-    $self->set_channel_context(undef);
-    if (!$self->authenticate(undef)) {
-        main::log_warn("Background channel refresh: re-authentication failed – keeping existing channel list, retry in 5 minutes");
-        return;
+    # Only re-authenticate when our tracked JSESSIONID expiry has passed.
+    # JSESSIONID carries no explicit cookie timestamp; we set jsessionid_expires ourselves
+    # in authenticate() and persist it in channels.json so it survives restarts.
+    if (time() >= $self->{jsessionid_expires}) {
+        my $hours = int(SESSION_MAX_LIFE / 3600);
+        main::log_info("Background channel refresh: JSESSIONID expired (tracked lifetime ~${hours}h), re-authenticating...");
+        $self->set_channel_context(undef);
+        if (!$self->authenticate(undef)) {
+            main::log_warn("Background channel refresh: re-authentication failed – keeping existing channel list, retry in 5 minutes");
+            return;
+        }
+        # jsessionid_expires is updated by authenticate() on success
+    } else {
+        my $remaining = int(($self->{jsessionid_expires} - time()) / 60);
+        main::log_debug("Background channel refresh: JSESSIONID valid for ${remaining}m, skipping re-auth");
+        $self->set_channel_context(undef);
     }
 
     my $old_channels = $self->{channels};
