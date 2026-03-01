@@ -15,7 +15,9 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
+        --segment-drop NUM      Number of segments to drop from first playlist (default: 3, max: 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
+        --cookiefile FILE       Cookie storage file (default: <cache_dir>/siriusxm-cookies.txt)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
         -h, --help              Show this help message
 
@@ -30,6 +32,7 @@ Usage examples:
     perl sxm.pl myuser mypass -l
     perl sxm.pl user pass -e -p 8888 --verbose DEBUG
     perl sxm.pl user pass --lmsroot /opt/lms -p 8888
+    perl sxm.pl user pass -p 8888 --cookiefile /path/to/cookies.txt
 
 In a player that supports HLS (QuickTime, VLC, ffmpeg, etc) you can access
 a channel at http://127.0.0.1:8888/channel.m3u8 where "channel" is the
@@ -62,7 +65,7 @@ use constant HAS_AIO      => 0;
 use constant LOCALFILE    => 0;
 use constant NOMYSB       => 1;
 
-our $VERSION = '1.0.0';
+our $VERSION = '1.1.0';
 our $REVISION    = undef;
 our $BUILDDATE   = undef;
 
@@ -120,6 +123,7 @@ use HTTP::Daemon;
 use HTTP::Cookies;
 use URI;
 use URI::Escape;
+use IO::Select;
 
 # Data handling modules
 use JSON::XS;
@@ -146,7 +150,7 @@ use constant {
 };
 
 # Global configuration
-my %CONFIG = (
+our %CONFIG = (
     username     => '',
     password     => '',
     port         => 9999,
@@ -157,6 +161,8 @@ my %CONFIG = (
     help         => 0,
     quality      => 'High',
     logfile      => '/var/log/sxm-proxy.log',
+    cookiefile   => undef,  # Will be set to default in init_logging if not specified
+    segment_drop => 0,
 );
 
 # Global state
@@ -179,6 +185,27 @@ sub init_logging {
     # Map our verbose level to Log4Perl levels
     my @level_mapping = qw(ERROR WARN INFO DEBUG DEBUG);
     my $log_level = $level_mapping[$verbose_level] || 'INFO';
+    
+    # Set up default cookie file if not specified
+    if (!defined $CONFIG{cookiefile}) {
+        # Use system temp directory as fallback
+        my $temp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+        $CONFIG{cookiefile} = File::Spec->catfile($temp_dir, 'siriusxm', 'sxm');
+    }
+    
+    # Ensure directory for cookiefile exists
+    if ($CONFIG{cookiefile}) {
+        my $cookie_dir = dirname($CONFIG{cookiefile});
+        if (!-d $cookie_dir) {
+            eval {
+                make_path($cookie_dir, { mode => 0755 });
+            };
+            if ($@) {
+                # Use warn here since logging system is not yet initialized
+                warn "Warning: Could not create cookie directory $cookie_dir: $@\n";
+            }
+        }
+    }
     
     # Determine log file location
     if (!$logfile || $logfile eq '/var/log/sxmproxy.log') {
@@ -219,30 +246,37 @@ sub init_logging {
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%c>: %m%n
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%M>:%4L: %m%n
         };
     }
 
     # Set the logger with all appenders in one line
-    $log4perl_config = "log4perl.logger.siriusxm.proxy = $log_level, $appenders\n" . $log4perl_config;
+    $log4perl_config = "log4perl.logger.sxm.proxy = $log_level, $appenders\n" . $log4perl_config;
 
     # Initialize Log4Perl directly (not through LMS wrapper)
     Log::Log4perl->init(\$log4perl_config);    
-    
+
+
     # Get logger instance for this process
-    $LOGGER = get_logger('siriusxm.proxy');
-    
+    $Log::Log4perl::caller_depth++;
+    $LOGGER = get_logger('sxm.proxy');
+    $Log::Log4perl::caller_depth--;
     $LOGGER->info("SiriusXM Proxy logging initialized with level: $log_level");
     if ($logfile && -w $logdir) {
         $LOGGER->info("File logging enabled: $logfile");
     } else {
         $LOGGER->warn("File logging disabled, using console output only");
     }
+    
+    # Log cookie file location
+    if ($CONFIG{cookiefile}) {
+        $LOGGER->info("Cookie file: $CONFIG{cookiefile}");
+    }
 }
 
 sub log_message {
     my ($level, $message) = @_;
-    
+
     # Always check if the level should be logged based on CONFIG{verbose}
     return if $level > $CONFIG{verbose};
     
@@ -253,7 +287,7 @@ sub log_message {
         printf "%s <%s>: %s\n", $timestamp, $level_name, $message;
         return;
     }
-    
+    $Log::Log4perl::caller_depth +=2;
     # Use LMS logging system with level mapping
     if ($level == LOG_ERROR) {
         $LOGGER->error($message);
@@ -267,6 +301,7 @@ sub log_message {
         # Map TRACE to DEBUG since LMS only supports up to DEBUG level
         $LOGGER->debug("[TRACE] $message");
     }
+    $Log::Log4perl::caller_depth -=2;
 }
 
 sub log_error { log_message(LOG_ERROR, shift) }
@@ -274,6 +309,36 @@ sub log_warn  { log_message(LOG_WARN,  shift) }
 sub log_info  { log_message(LOG_INFO,  shift) }
 sub log_debug { log_message(LOG_DEBUG, shift) }
 sub log_trace { log_message(LOG_TRACE, shift) }
+
+# Sanitize sensitive data for safe logging
+sub sanitize_for_logging {
+    my ($data) = @_;
+    
+    # Handle different data types
+    if (ref($data) eq 'HASH') {
+        my %sanitized = %$data;  # Create a copy
+        
+        # Recursively sanitize hash values
+        for my $key (keys %sanitized) {
+            if ($key =~ /^password$/i) {
+                # Mask password fields
+                $sanitized{$key} = '*****';
+            } else {
+                # Recursively sanitize nested structures
+                $sanitized{$key} = sanitize_for_logging($sanitized{$key});
+            }
+        }
+        return \%sanitized;
+    }
+    elsif (ref($data) eq 'ARRAY') {
+        # Recursively sanitize array elements
+        return [map { sanitize_for_logging($_) } @$data];
+    }
+    else {
+        # Return scalars as-is
+        return $data;
+    }
+}
 
 #=============================================================================
 # Signal handling
@@ -310,16 +375,24 @@ use LWP::UserAgent;
 use HTTP::Cookies;
 use HTTP::Request;
 use JSON::XS;
+use File::Basename;
+use File::Spec;
+#use Data::Dumper;
 
 # Constants
 use constant {
-    USER_AGENT       => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
-    REST_FORMAT      => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
-    LIVE_PRIMARY_HLS => 'https://siriusxm-priprodlive.akamaized.net',
+    USER_AGENT              => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/604.5.6 (KHTML, like Gecko) Version/11.0.3 Safari/604.5.6',
+    REST_FORMAT             => 'https://player.siriusxm.com/rest/v2/experience/modules/%s',
+    LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
+    LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
+    SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
+    SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
+    CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
 
 sub new {
-    my ($class, $username, $password, $region) = @_;
+    my ($class, $username, $password, $region, $cookiefile) = @_;
     
     my $self = {
         username  => $username,
@@ -329,22 +402,211 @@ sub new {
         channels  => undef,
         channel_base_paths => {},
         channel_cookies => {},  # Store per-channel cookie jars
+        segment_cache => {},    # Store cached segments per channel_id
+        segment_queue => {},    # Track segments to be cached per channel_id
+        last_segment => {},     # Track last requested segment per channel_id
+        playlist_cache => {},   # Store cached m3u8 content per channel_id
+        playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
+        playlist_next_update => {}, # Track next scheduled update time per channel_id
+        channel_last_activity => {}, # Track last client activity time per channel_id
+        channel_avg_duration => {},  # Track average EXTINF duration per channel_id
+        
+        # HLS server failover tracking (per channel)
+        channel_server => {},  # Track which server each channel is using: 'primary' or 'secondary'
+        channel_failure_count => {},  # Track consecutive failures per channel
+
+        # Channel list disk cache
+        channel_cache_file    => undef,  # Path to channel list cache file (channels.json)
+        channel_cache_expires => 0,      # Unix timestamp when channel cache expires (0 = expired)
+
+        # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
+        jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
+
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
+        cookiefile => $cookiefile,
     };
     
     bless $self, $class;
     
-    # Initialize user agent
+    # Initialize user agent with persistent cookie jar
+    my $cookie_jar;
+    if ($cookiefile) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $cookiefile,
+            autosave => 1,
+            ignore_discard => 1,
+        );
+        
+        # Load existing cookies if file exists
+        if (-e $cookiefile) {
+            eval {
+                $cookie_jar->load();
+                main::log_info("Loaded cookies from: $cookiefile");
+                
+                # Analyze and log cookie information
+                $self->analyze_cookies($cookie_jar, undef);
+            };
+            if ($@) {
+                main::log_warn("Error loading cookies from $cookiefile: $@");
+            }
+        } else {
+            main::log_info("Cookie file will be created at: $cookiefile");
+        }
+    } else {
+        # No persistence - use in-memory cookie jar
+        $cookie_jar = HTTP::Cookies->new();
+        main::log_warn("Cookie persistence disabled - cookies will not be saved");
+    }
+    
     $self->{ua} = LWP::UserAgent->new(
         agent      => USER_AGENT,
-        cookie_jar => HTTP::Cookies->new,
+        cookie_jar => $cookie_jar,
         timeout    => 30,
     );
     
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
-    
+
+    # Set up channel cache file path (same directory as cookie file)
+    if ($cookiefile) {
+        my $cache_dir = dirname($cookiefile);
+        $self->{channel_cache_file} = File::Spec->catfile($cache_dir, 'channels.json');
+        main::log_debug("Channel cache file: $self->{channel_cache_file}");
+
+        # Load channel list from disk cache at startup
+        $self->load_channel_cache();
+    }
+
     return $self;
+}
+
+# Analyze and log cookie expiration information
+sub analyze_cookies {
+    my ($self, $cookies, $channel_id) = @_;
+    
+    # Use the provided cookie jar or get the appropriate one
+    $cookies = $cookies || $self->get_channel_cookie_jar($channel_id);
+    
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    my %cookie_info = ();
+    my $now = time();
+    
+    $cookies->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Focus on authentication cookies
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN' || $key eq 'JSESSIONID' || $key eq 'AWSALB') {
+            $cookie_info{$key} = {
+                expires => $expires,
+                discard => $discard,
+            };
+            
+            # JSESSIONID typically doesn't have an expiry, estimate it
+            if ($key eq 'JSESSIONID' && !$expires) {
+                # Estimate expiration as SESSION_MAX_LIFE from now
+                my $estimated_expires = $now + SESSION_MAX_LIFE;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($estimated_expires));
+                my $hours = int(SESSION_MAX_LIFE / 3600);
+                main::log_info("Cookie $key ($context): no expiration set, estimated lifetime ~${hours}h (expires ~$expires_str)");
+                $cookie_info{$key}->{estimated_expires} = $estimated_expires;
+            } elsif ($expires) {
+                my $remaining = $expires - $now;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
+                
+                if ($remaining > 0) {
+                    my $days = int($remaining / 86400);
+                    my $hours = int(($remaining % 86400) / 3600);
+                    my $minutes = int(($remaining % 3600) / 60);
+                    
+                    main::log_info("Cookie $key ($context): expires $expires_str (in ${days}d ${hours}h ${minutes}m)");
+                } else {
+                    main::log_warn("Cookie $key ($context): EXPIRED at $expires_str");
+                }
+            } else {
+                if ($discard) {
+                    main::log_debug("Cookie $key ($context): session cookie (will be discarded)");
+                } else {
+                    main::log_debug("Cookie $key ($context): no expiration set");
+                }
+            }
+        }
+    });
+    
+    # Return cookie information for potential future use
+    # Currently used mainly for logging, but available for callers who need it
+    return \%cookie_info;
+}
+
+# Check if cookies need renewal (before they expire)
+# Returns true if cookies should be renewed proactively
+sub should_renew_cookies {
+    my ($self, $channel_id) = @_;
+    
+    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    my $now = time();
+    
+    # Renew if cookies expire within 1 hour (3600 seconds)
+    my $renewal_threshold = 3600;
+    
+    my $should_renew = 0;
+    
+    $cookies->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Check authentication cookies
+        if (($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') && $expires) {
+            my $remaining = $expires - $now;
+            
+            if ($remaining > 0 && $remaining < $renewal_threshold) {
+                my $context = $channel_id ? "channel $channel_id" : "global";
+                my $minutes = int($remaining / 60);
+                main::log_info("Cookie $key ($context) expires in ${minutes}m, scheduling renewal");
+                $should_renew = 1;
+            }
+        }
+    });
+    
+    return $should_renew;
+}
+
+# Copy authentication cookies from global jar to a channel-specific jar
+sub copy_auth_cookies_to_channel {
+    my ($self, $channel_id) = @_;
+    
+    return unless $channel_id;
+    
+    my $global_jar = $self->{ua}->cookie_jar;
+    my $channel_jar = $self->{channel_cookies}->{$channel_id};
+    
+    return unless $global_jar && $channel_jar;
+    
+    my $copied_count = 0;
+    
+    # Scan global jar for authentication cookies
+    $global_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        
+        # Copy authentication cookies (SXMDATA and SXMAKTOKEN)
+        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
+            # Set the cookie in the channel jar with all attributes
+            $channel_jar->set_cookie(
+                $version, $key, $val, $path, $domain, $port, 
+                $path_spec, $secure, $expires, $discard, $hash
+            );
+            $copied_count++;
+            main::log_debug("Copied cookie $key from global to channel $channel_id");
+        }
+    });
+    
+    if ($copied_count > 0) {
+        main::log_info("Copied $copied_count authentication cookie(s) from global jar to channel $channel_id");
+        # Force save to disk if persistent
+        if ($self->{cookiefile}) {
+            eval { $channel_jar->save(); };
+        }
+    }
+    
+    return $copied_count;
 }
 
 # Get or create cookie jar for a specific channel
@@ -356,8 +618,48 @@ sub get_channel_cookie_jar {
     
     # Create channel-specific cookie jar if it doesn't exist
     if (!exists $self->{channel_cookies}->{$channel_id}) {
-        $self->{channel_cookies}->{$channel_id} = HTTP::Cookies->new;
-        main::log_debug("Created new cookie jar for channel: $channel_id");
+        my $cookie_jar;
+        my $channel_cookiefile;
+        my $file_exists = 0;
+        
+        # Create persistent cookie jar for channel if cookiefile is configured
+        if ($self->{cookiefile}) {
+            # Generate unique filename for this channel
+            $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            $file_exists = -e $channel_cookiefile;
+            
+            $cookie_jar = HTTP::Cookies->new(
+                file => $channel_cookiefile,
+                autosave => 1,
+                ignore_discard => 1,
+            );
+            
+            # Load existing cookies if file exists
+            if ($file_exists) {
+                eval {
+                    $cookie_jar->load();
+                    main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
+                };
+                if ($@) {
+                    main::log_warn("Error loading cookies for channel $channel_id: $@");
+                }
+            }
+        } else {
+            # No persistence - use in-memory cookie jar
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{channel_cookies}->{$channel_id} = $cookie_jar;
+        main::log_debug("Created cookie jar for channel: $channel_id");
+        
+        # If this is a new channel (no existing cookie file), copy auth cookies from global jar
+        if (!$file_exists) {
+            main::log_debug("New channel $channel_id detected, checking for authentication cookies to copy");
+            $self->copy_auth_cookies_to_channel($channel_id);
+        }
     }
     
     return $self->{channel_cookies}->{$channel_id};
@@ -373,23 +675,227 @@ sub set_channel_context {
     main::log_trace("Set cookie context for channel: " . ($channel_id || 'global'));
 }
 
+# Clear all cookies for a specific channel (or global if no channel_id)
+sub clear_channel_cookies {
+    my ($self, $channel_id) = @_;
+    
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    
+    if ($channel_id) {
+        # Delete the channel cookie file if it exists
+        if ($self->{cookiefile}) {
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for $context: $channel_cookiefile");
+            }
+        }
+        
+        # Create a fresh cookie jar for this channel
+        delete $self->{channel_cookies}->{$channel_id};
+        # It will be recreated on next access via get_channel_cookie_jar
+        main::log_debug("Cleared cookies for $context");
+    } else {
+        # Clear global cookie jar
+        # Delete the global cookie file if it exists
+        if ($self->{cookiefile} && -e $self->{cookiefile}) {
+            unlink($self->{cookiefile});
+            main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+        }
+        
+        # Create a fresh global cookie jar
+        my $cookie_jar;
+        if ($self->{cookiefile}) {
+            $cookie_jar = HTTP::Cookies->new(
+                file => $self->{cookiefile},
+                autosave => 1,
+                ignore_discard => 1,
+            );
+        } else {
+            $cookie_jar = HTTP::Cookies->new();
+        }
+        
+        $self->{ua}->cookie_jar($cookie_jar);
+        main::log_debug("Cleared global cookies");
+    }
+}
+
+# Clear all cookies (global and all channel-specific)
+sub clear_all_cookies {
+    my ($self) = @_;
+    
+    main::log_info("Clearing all cookies (global and all channels)");
+    
+    my $cleared_channels = 0;
+    
+    # Clear all channel-specific cookie jars
+    if ($self->{cookiefile}) {
+        foreach my $channel_id (keys %{$self->{channel_cookies}}) {
+            # Generate the channel cookie filename
+            my $channel_cookiefile = $self->{cookiefile};
+            $channel_cookiefile =~ s/\.txt$//;
+            $channel_cookiefile .= "-channel-${channel_id}.txt";
+            
+            # Delete the file if it exists
+            if (-e $channel_cookiefile) {
+                unlink($channel_cookiefile);
+                main::log_debug("Deleted cookie file for channel $channel_id: $channel_cookiefile");
+            }
+            
+            $cleared_channels++;
+        }
+    }
+    
+    # Remove all channel cookie jars from memory
+    $self->{channel_cookies} = {};
+    
+    # Clear the global cookie jar
+    if ($self->{cookiefile} && -e $self->{cookiefile}) {
+        unlink($self->{cookiefile});
+        main::log_debug("Deleted global cookie file: $self->{cookiefile}");
+    }
+    
+    # Create a fresh global cookie jar
+    my $cookie_jar;
+    if ($self->{cookiefile}) {
+        $cookie_jar = HTTP::Cookies->new(
+            file => $self->{cookiefile},
+            autosave => 1,
+            ignore_discard => 1,
+        );
+    } else {
+        $cookie_jar = HTTP::Cookies->new();
+    }
+    
+    $self->{ua}->cookie_jar($cookie_jar);
+    
+    main::log_info("Cleared all cookies: global and $cleared_channels channel(s)");
+    
+    return $cleared_channels + 1;  # Return total count including global
+}
+
+# Get the current HLS server name for a channel (primary or secondary)
+sub get_channel_server {
+    my ($self, $channel_id) = @_;
+    
+    # Default to primary for new channels
+    return $self->{channel_server}->{$channel_id} || 'primary';
+}
+
+# Record a successful request for a channel
+sub record_channel_success {
+    my ($self, $channel_id) = @_;
+    
+    # Reset failure count on success
+    $self->{channel_failure_count}->{$channel_id} = 0;
+}
+
+# Record a failed request for a channel and potentially switch servers
+sub record_channel_failure {
+    my ($self, $channel_id, $error_msg) = @_;
+    
+    # Increment failure count
+    $self->{channel_failure_count}->{$channel_id} //= 0;
+    $self->{channel_failure_count}->{$channel_id}++;
+    
+    my $current_server = $self->get_channel_server($channel_id);
+    my $failure_count = $self->{channel_failure_count}->{$channel_id};
+    
+    main::log_warn("HLS server $current_server failure #$failure_count for channel $channel_id: $error_msg");
+    
+    # Check if we should switch servers
+    if ($failure_count >= SERVER_FAILURE_THRESHOLD) {
+        my $new_server = $current_server eq 'primary' ? 'secondary' : 'primary';
+        main::log_error("Channel $channel_id: $current_server server has failed $failure_count consecutive times (threshold: " . 
+                       SERVER_FAILURE_THRESHOLD . "), switching to $new_server");
+        $self->switch_channel_server($channel_id, $new_server);
+    }
+}
+
+# Switch a channel to a different HLS server
+sub switch_channel_server {
+    my ($self, $channel_id, $new_server) = @_;
+    
+    my $old_server = $self->get_channel_server($channel_id);
+    
+    if ($old_server eq $new_server) {
+        main::log_debug("Channel $channel_id already using $new_server server");
+        return;
+    }
+    
+    $self->{channel_server}->{$channel_id} = $new_server;
+    $self->{channel_failure_count}->{$channel_id} = 0;  # Reset failure count
+    
+    # Clear cached playlist URL to force re-fetch with new server
+    delete $self->{playlists}->{$channel_id}->{'url'};
+    
+    main::log_info("Channel $channel_id: switched from $old_server to $new_server server");
+}
+
+# Reset channel to primary server (called when starting new playback)
+sub reset_channel_server {
+    my ($self, $channel_id) = @_;
+    
+    my $current_server = $self->get_channel_server($channel_id);
+    
+    if ($current_server ne 'primary') {
+        main::log_info("Channel $channel_id: resetting to primary server for new playback session");
+        $self->{channel_server}->{$channel_id} = 'primary';
+        $self->{channel_failure_count}->{$channel_id} = 0;
+        delete $self->{playlists}->{$channel_id}->{'url'};
+    }
+}
+
 sub is_logged_in {
     my ($self, $channel_id) = @_;
     my $cookies = $self->get_channel_cookie_jar($channel_id);
     
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
+    my $sxmdata_expired = 0;
     my @cookie_names = ();
+    my $now = time();
     
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
         main::log_trace("Cookie found: $key = " . substr($val, 0, 50) . (length($val) > 50 ? "..." : ""));
-        $has_sxmdata = 1 if $key eq 'SXMDATA';
+        
+        if ($key eq 'SXMDATA') {
+            $has_sxmdata = 1;
+            
+            # Check if cookie is expired
+            if ($expires && $expires < $now) {
+                $sxmdata_expired = 1;
+                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
+                main::log_warn("SXMDATA cookie has expired at $expires_str");
+            } elsif ($expires) {
+                my $remaining = $expires - $now;
+                my $days = int($remaining / 86400);
+                my $hours = int(($remaining % 86400) / 3600);
+                main::log_debug("SXMDATA cookie valid for ${days}d ${hours}h");
+            }
+        }
     });
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_trace("is_logged_in() check for $context - found cookies: " . join(", ", @cookie_names));
+    
+    # Return false if cookie is expired
+    if ($sxmdata_expired) {
+        main::log_debug("is_logged_in() result for $context: false (cookie expired)");
+        return 0;
+    }
+    
+    # Check if cookies need proactive renewal
+    if ($has_sxmdata && $self->should_renew_cookies($channel_id)) {
+        main::log_info("Cookies approaching expiration for $context, returning false to trigger renewal");
+        return 0;
+    }
+    
     main::log_trace("is_logged_in() result for $context: " . ($has_sxmdata ? "true" : "false"));
     
     return $has_sxmdata;
@@ -401,20 +907,42 @@ sub is_session_authenticated {
     
     # Check for AWSALB and JSESSIONID cookies
     my ($has_awsalb, $has_jsessionid) = (0, 0);
+    my ($awsalb_expired, $jsessionid_expired) = (0, 0);
     my @cookie_names = ();
+    my $now = time();
     
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        $has_awsalb = 1 if $key eq 'AWSALB';
-        $has_jsessionid = 1 if $key eq 'JSESSIONID';
+        
+        if ($key eq 'AWSALB') {
+            $has_awsalb = 1;
+            if ($expires && $expires < $now) {
+                $awsalb_expired = 1;
+                main::log_warn("AWSALB cookie has expired");
+            }
+        } elsif ($key eq 'JSESSIONID') {
+            $has_jsessionid = 1;
+            if ($expires && $expires < $now) {
+                $jsessionid_expired = 1;
+                main::log_warn("JSESSIONID cookie has expired");
+            }
+        }
     });
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_trace("is_session_authenticated() check for $context - found cookies: " . join(", ", @cookie_names));
-    main::log_trace("is_session_authenticated() result for $context: " . (($has_awsalb && $has_jsessionid) ? "true" : "false"));
     
-    return $has_awsalb && $has_jsessionid;
+    # Return false if any required cookie is expired
+    if ($awsalb_expired || $jsessionid_expired) {
+        main::log_debug("is_session_authenticated() result for $context: false (cookies expired)");
+        return 0;
+    }
+    
+    my $result = $has_awsalb && $has_jsessionid;
+    main::log_trace("is_session_authenticated() result for $context: " . ($result ? "true" : "false"));
+    
+    return $result;
 }
 
 sub get_request {
@@ -475,7 +1003,12 @@ sub post_request {
     my $json_data = $self->{json}->encode($postdata);
     
     main::log_trace("POST request to: $url");
-    main::log_trace("POST data: $json_data");
+    # Only sanitize POST data if trace logging is enabled to avoid unnecessary overhead
+    if ($main::CONFIG{verbose} >= main::LOG_TRACE) {
+        my $sanitized_postdata = main::sanitize_for_logging($postdata);
+        my $sanitized_json = $self->{json}->encode($sanitized_postdata);
+        main::log_trace("POST data: $sanitized_json");
+    }
     
     my $request = HTTP::Request->new(POST => $url);
     $request->content_type('application/json');
@@ -569,6 +1102,8 @@ sub login {
     }
     
     if ($success) {
+        # Analyze cookies after successful login
+        $self->analyze_cookies(undef, $channel_id);
         return 1;
     }
     
@@ -635,6 +1170,16 @@ sub authenticate {
     }
     
     if ($success) {
+        # Analyze cookies after successful authentication
+        $self->analyze_cookies(undef, $channel_id);
+
+        # Track when the global JSESSIONID will expire.
+        # The cookie carries no explicit timestamp so we calculate it ourselves.
+        if (!defined $channel_id) {
+            $self->{jsessionid_expires} = time() + SESSION_MAX_LIFE;
+            my $exp_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($self->{jsessionid_expires}));
+            main::log_debug("Tracked JSESSIONID expiry (global): $exp_str (~" . int(SESSION_MAX_LIFE/3600) . "h)");
+        }
         return 1;
     }
     
@@ -676,7 +1221,10 @@ sub get_gup_id {
                 $gup_id = $data->{gupId};
             };
             if ($@) {
-                main::log_warn("Error parsing SXMDATA cookie: $@");
+                my $context = $channel_id ? "channel $channel_id" : "global";
+                main::log_warn("Error parsing SXMDATA cookie for $context: $@");
+                main::log_debug("Clearing corrupted cookies for $context to force fresh authentication");
+                $self->clear_channel_cookies($channel_id);
             }
         }
     });
@@ -691,9 +1239,14 @@ sub get_playlist_url {
     $use_cache //= 1;
     $max_attempts //= 5;
     
-    if ($use_cache && exists $self->{playlists}->{$channel_id}) {
+    if ($use_cache && exists $self->{playlists}->{$channel_id}->{'url'}) {
         main::log_trace("Using cached playlist for channel: $channel_id");
-        return $self->{playlists}->{$channel_id};
+        return $self->{playlists}->{$channel_id}->{'url'};
+    }
+    
+    # When starting fresh (not using cache), reset to primary server for new playback session
+    if (!$use_cache) {
+        $self->reset_channel_server($channel_id);
     }
     
     my $timestamp = sprintf("%.0f", time() * 1000);
@@ -756,22 +1309,71 @@ sub get_playlist_url {
         main::log_error("Error parsing JSON response for playlist: $@");
         return undef;
     }
+
+=begin comment
+   Playlist data format includes both primary and secondary servers:
+  [
+    {
+      'size' => 'SMALL',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'primary',
+      'url' => '%Live_Primary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    },
+    {
+      'size' => 'SMALL',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_small_v3.m3u8'
+    },
+    {
+      'size' => 'MEDIUM',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_medium_v3.m3u8'
+    },
+    {
+      'size' => 'LARGE',
+      'name' => 'secondary',
+      'url' => '%Live_Secondary_HLS%/AAC_Data/9450/9450_variant_large_v3.m3u8'
+    }
+  ]
+=end comment
+=cut
+
+    # Determine which server to use for this channel
+    my $desired_server = $self->get_channel_server($channel_id);
     
+    # Find the appropriate playlist entry (matching both size and server name)
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'LARGE') {
+        if ($playlist_info->{size} eq 'MEDIUM' && $playlist_info->{name} eq $desired_server) {
             my $playlist_url = $playlist_info->{url};
-            $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            
+            # Replace the placeholder with actual server URL
+            if ($desired_server eq 'primary') {
+                $playlist_url =~ s/%Live_Primary_HLS%/@{[LIVE_PRIMARY_HLS]}/g;
+            } else {
+                $playlist_url =~ s/%Live_Secondary_HLS%/@{[LIVE_SECONDARY_HLS]}/g;
+            }
+            
+            main::log_info("Channel $channel_id: using $desired_server server playlist");
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
-                $self->{playlists}->{$channel_id} = $variant_url;
+                $self->{playlists}->{$channel_id}->{'url'} = $variant_url;
                 main::log_debug("Cached playlist URL for channel: $channel_id");
                 return $variant_url;
             }
         }
     }
     
-    main::log_error("No suitable playlist found for channel: $channel_id");
+    main::log_error("No suitable $desired_server playlist found for channel: $channel_id");
     return undef;
 }
 
@@ -798,15 +1400,18 @@ sub get_playlist_variant_url {
     my $response = $self->{ua}->get($uri);
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on playlist variant retrieval");
+        my $server = $self->get_channel_server($channel_id);
+        my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval";
+        main::log_error($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
     
+    # Record successful request
+    $self->record_channel_success($channel_id);
+    
     my $content = $response->decoded_content;
     main::log_trace("Playlist variant content received:\n$content");
-    
-    # Try to clean up any potential character encoding issues
-    $content =~ s/\r//g;  # Remove carriage returns
     
     # Check if this is a master playlist with quality variants
     if ($content =~ /#EXT-X-STREAM-INF/) {
@@ -820,16 +1425,27 @@ sub get_playlist_variant_url {
         }
     }
     
+    # Parse playlist according to Apple HLS specification
+    # Handle both Unix (\n) and Windows (\r\n) line endings
+    my @lines = split /\r?\n/, $content;
     my $found_lines = 0;
-    for my $line (split /\n/, $content) {
-        chomp($line);  # Remove any trailing newlines
-        $line =~ s/^\s+|\s+$//g;  # Trim whitespace
-        next if $line eq '';  # Skip empty lines
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Skip empty lines (permitted by HLS spec)
+        next if $line eq '';
+        
+        # Skip comments and tags
+        next if $line =~ /^#/;
         
         $found_lines++;
         main::log_trace("Processing line $found_lines: '$line'");
+        
+        # Look for .m3u8 URLs (variant playlists)
         if ($line =~ /\.m3u8$/) {
-            # First variant should be 256k one
+            # Found a variant playlist URL
             my $base_url = $url;
             $base_url =~ s/\/[^\/]+$//;
             my $variant_url = "$base_url/$line";
@@ -842,6 +1458,52 @@ sub get_playlist_variant_url {
     return undef;
 }
 
+# Trim playlist to reduce size from 1800+ segments to a manageable window
+sub drop_last_segments {
+    my ($self, $content, $segment_drop) = @_;
+    
+    # Drop last N segments from playlist (for first load only)
+    # Following Apple HLS specification
+    
+    return $content if $segment_drop <= 0;
+    
+    my @lines = split /\r?\n/, $content;
+    my @segment_starts = ();  # Track start line indices of segments
+    my $header_end = -1;
+    
+    # Find header end and all segment start positions
+    for my $i (0 .. $#lines) {
+        my $line = $lines[$i];
+        $line =~ s/^\s+|\s+$//g;
+        
+        if ($line =~ /^#EXTINF:/) {
+            push @segment_starts, $i;
+            $header_end = $i - 1 if $header_end == -1;
+        }
+    }
+    
+    my $total_segments = scalar(@segment_starts);
+    return $content if $total_segments <= $segment_drop;
+    
+    # Keep all segments except the last segment_drop
+    my $segments_to_keep = $total_segments - $segment_drop;
+    
+    # Build output: header + segments (minus last N)
+    my @output;
+    push @output, @lines[0 .. $header_end] if $header_end >= 0;
+    
+    for my $seg_idx (0 .. $segments_to_keep - 1) {
+        my $start_line = $segment_starts[$seg_idx];
+        my $end_line = $seg_idx < $#segment_starts ? $segment_starts[$seg_idx + 1] - 1 : $#lines;
+        push @output, @lines[$start_line .. $end_line];
+    }
+    
+    main::log_debug(sprintf("Dropped last %d segments from playlist: %d -> %d segments", 
+                           $segment_drop, $total_segments, $segments_to_keep));
+    
+    return join("\n", @output);
+}
+
 sub get_playlist {
     my ($self, $name, $use_cache) = @_;
     $use_cache //= 1;
@@ -852,6 +1514,28 @@ sub get_playlist {
         return undef;
     }
     
+    # Check if caching is disabled (segment_drop == 0)
+    my $segment_drop = $CONFIG{segment_drop};
+    my $caching_enabled = $segment_drop >= 1;
+    
+    # Check if we have a cached playlist and it's not time to update yet
+    # Only use cache if caching is enabled
+    my $now = time();
+    if ($caching_enabled && $use_cache && 
+        exists $self->{playlist_cache}->{$channel_id} && 
+        exists $self->{playlist_next_update}->{$channel_id}) {
+        
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now < $next_update) {
+            my $remaining = $next_update - $now;
+            main::log_debug(sprintf("Using cached playlist for channel %s (next update in %.1f seconds)", 
+                                   $channel_id, $remaining));
+            return $self->{playlist_cache}->{$channel_id};
+        } else {
+            main::log_debug("Cached playlist expired for channel $channel_id, fetching new one");
+        }
+    }
+    
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
     return undef unless $url;
     
@@ -860,6 +1544,17 @@ sub get_playlist {
     
     my $token = $self->get_sxmak_token($channel_id);
     my $gup_id = $self->get_gup_id($channel_id);
+    
+    # If we can't get both token and gup_id, this might be due to corrupted cookies
+    # Try to authenticate again if they're missing
+    if (!$token || !$gup_id) {
+        main::log_warn("Missing token or gup_id for channel $channel_id, attempting authentication");
+        if ($self->authenticate($channel_id)) {
+            # Try again after authentication
+            $token = $self->get_sxmak_token($channel_id);
+            $gup_id = $self->get_gup_id($channel_id);
+        }
+    }
     
     return undef unless $token && $gup_id;
     
@@ -875,14 +1570,22 @@ sub get_playlist {
     
     my $response = $self->{ua}->get($uri);
     
-    if ($response->code == 403) {
-        main::log_warn("Received status code 403 on playlist for channel: $channel_id, renewing session");
-        # Re-authenticate for this specific channel and retry
+    if ($response->code == 403 || $response->code == 500) {
+        main::log_warn("Received status code " . $response->code . " on playlist for channel: $channel_id, renewing session");
+        
+        # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
         } else {
-            main::log_error("Failed to re-authenticate for channel: $channel_id");
-            return undef;
+            # If re-authentication failed, clear all cookies (auth issue is likely global)
+            main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+            $self->clear_all_cookies();
+            if ($self->authenticate($channel_id)) {
+                return $self->get_playlist($name, 0);
+            } else {
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
+                return undef;
+            }
         }
     }
     
@@ -906,21 +1609,330 @@ sub get_playlist {
     main::log_trace("Processing playlist - Base URL: $base_url");
     main::log_trace("Processing playlist - Base path: $base_path");
     main::log_trace("Stored base path for channel $channel_id: $base_path");
+
+    # If caching is disabled, return playlist directly without any processing
+    if (!$caching_enabled) {
+        main::log_debug("Caching disabled (Playlist Behind Live = 0) for channel $channel_id");
+        return $content;
+    }
+
+    # Extract and queue segment list from the playlist BEFORE modifying it
+    # This works on the full playlist for proper caching
+    my $new_segment_count = $self->extract_segments_from_playlist($content, $channel_id);
     
-    my @lines = split /\n/, $content;
-    my $modified_segments = 0;
-    for my $i (0..$#lines) {
-        $lines[$i] =~ s/\r?\n$//;
-        if ($lines[$i] =~ /\.aac$/) {
-            my $original = $lines[$i];
-            $lines[$i] = "$base_path/$lines[$i]";
-            $modified_segments++;
-            main::log_trace("Modified segment: '$original' -> '$lines[$i]'");
+    # Check if this is the first load for this channel
+    my $is_first_load = (not exists $self->{playlists}->{$channel_id}->{'First'} or $self->{playlists}->{$channel_id}->{'First'} != 1);
+    
+    # Cache the full playlist
+    $self->{playlist_cache}->{$channel_id} = $content;
+    $self->{playlist_channel_name}->{$channel_id} = $name;
+    
+    # On first load: drop last segment_drop segments from what we return to client
+    # This helps ffmpeg cache properly, but cache still has full playlist
+    if ($is_first_load && $segment_drop > 0) {
+        $content = $self->drop_last_segments($content, $segment_drop);
+        $self->{playlists}->{$channel_id}->{'First'} = 1;
+        main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full playlist)");
+    }
+
+    # Schedule next playlist update based on new segment count
+    # Use the count saved BEFORE any caching started
+    if ($new_segment_count > 0) {
+        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        
+        my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
+        main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
+                              $channel_id, $delay, $update_time, $new_segment_count));
+    } else {
+        # No new segments, schedule a default update in 6 seconds
+        my $delay = 6;
+        my $next_update = time() + $delay;
+        $self->{playlist_next_update}->{$channel_id} = $next_update;
+        main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+    }
+    
+    return $content;
+}
+
+# Extract segment paths from a playlist
+sub extract_segments_from_playlist {
+    my ($self, $content, $channel_id) = @_;
+    
+    # Optimized segment extraction following Apple HLS specification
+    # URI lines immediately follow #EXTINF tags
+    
+    my @lines = split /\r?\n/, $content;
+    my @segments = ();
+    my $expecting_uri = 0;
+    
+    for my $line (@lines) {
+        $line =~ s/^\s+|\s+$//g;
+        next if $line eq '';
+        
+        if ($line =~ /^#EXTINF:/) {
+            $expecting_uri = 1;
+        } elsif ($expecting_uri && $line !~ /^#/ && $line =~ /\.aac/) {
+            push @segments, $line;
+            $expecting_uri = 0;
         }
     }
     
-    main::log_trace("Modified $modified_segments segments with base path");
-    return join("\n", @lines);
+    $self->{playlists}->{$channel_id}->{'segments'} = \@segments;
+    main::log_debug("Extracted " . scalar(@segments) . " segments for channel $channel_id");
+    
+    # Determine uncached segments based on last requested position
+    my $start_index = 0;
+    my $defer_caching = 0;
+    
+    if ($self->{last_segment}->{$channel_id}) {
+        my $last_seg = $self->{last_segment}->{$channel_id};
+        for my $i (0 .. $#segments) {
+            if ($segments[$i] eq $last_seg) {
+                $start_index = $i + 1;
+                last;
+            }
+        }
+    } else {
+        main::log_debug("No last_segment for channel $channel_id - deferring caching until client requests first segment");
+        $defer_caching = 1;
+    }
+    
+    # Count uncached segments efficiently
+    my @uncached_segments = ();
+    for my $i ($start_index .. $#segments) {
+        my $segment = $segments[$i];
+        next if exists $self->{segment_cache}->{$channel_id}->{$segment};
+        
+        # Check queue efficiently
+        if ($self->{segment_queue}->{$channel_id}) {
+            my $in_queue = 0;
+            for my $queued (@{$self->{segment_queue}->{$channel_id}}) {
+                if ($queued eq $segment) {
+                    $in_queue = 1;
+                    last;
+                }
+            }
+            next if $in_queue;
+        }
+        
+        push @uncached_segments, $segment;
+    }
+    
+    # Queue uncached segments if appropriate
+    if (@uncached_segments && (!$self->{segment_queue}->{$channel_id} || !@{$self->{segment_queue}->{$channel_id}})) {
+        my $cache_size = 0;
+        my $cache_count = 0;
+        if ($self->{segment_cache}->{$channel_id}) {
+            for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
+                $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+                $cache_count++;
+            }
+        }
+        
+        main::log_info(sprintf("New playlist for channel %s has %d uncached segments, current cache: %d segments (%.2f MB)", 
+                              $channel_id, scalar(@uncached_segments), $cache_count, $cache_size / 1024 / 1024));
+        
+        if (!$defer_caching) {
+            $self->{segment_queue}->{$channel_id} = \@uncached_segments;
+        } else {
+            main::log_debug("Deferring segment queueing for channel $channel_id until client requests first segment");
+        }
+    }
+    
+    return scalar(@uncached_segments);
+}
+
+# Parse EXTINF tags from playlist content to calculate segment durations
+sub parse_extinf_durations {
+    my ($self, $content) = @_;
+    
+    # Parse #EXT-X-TARGETDURATION from playlist header per Apple HLS specification
+    # Format: #EXT-X-TARGETDURATION:<duration>
+    # This tag is REQUIRED in Media Playlists and specifies the maximum segment duration
+    # More reliable than parsing individual #EXTINF tags
+    
+    my @lines = split /\r?\n/, $content;  # Handle both Unix and Windows line endings
+    
+    for my $line (@lines) {
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Match #EXT-X-TARGETDURATION:<duration>
+        # Duration is an integer (decimal-integer per spec)
+        if ($line =~ /^#EXT-X-TARGETDURATION:\s*(\d+)\s*$/) {
+            my $duration = $1;
+            main::log_debug("Found EXT-X-TARGETDURATION: $duration seconds");
+            return $duration;
+        }
+    }
+    
+    # If no EXT-X-TARGETDURATION found, return default
+    # Note: This shouldn't happen with valid HLS playlists, but we handle it gracefully
+    main::log_debug("No EXT-X-TARGETDURATION found in playlist, using default 10 seconds");
+    return 10;
+}
+
+# Calculate next playlist update time based on new segment count
+sub calculate_playlist_update_delay {
+    my ($self, $content, $new_segment_count, $channel_id) = @_;
+    
+    # Get segment duration from first EXTINF tag
+    my $extinf_duration = $self->parse_extinf_durations($content);
+    
+    # Store the EXTINF duration for this channel for idle timeout checking
+    $self->{channel_avg_duration}->{$channel_id} = $extinf_duration;
+    
+    # Adaptive backoff strategy:
+    # - Start with EXTINF duration as base
+    # - If 1 new segments: use EXTINF-1 duration
+    # - If >1 new segment: backoff by 1.6xEXTINF
+
+    my $delay;
+    if ($new_segment_count == 1) {
+        $delay = $extinf_duration - 1;
+    } else {
+        $delay = $extinf_duration * 1.6;
+    }
+    
+    # Ensure delay is at least 5 seconds and at most 30 seconds
+    $delay = 5 if $delay < 5;
+    $delay = 30 if $delay > 30;
+    
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
+                           $delay, $extinf_duration, $new_segment_count, 
+                           $new_segment_count == 1 ? "EXTINF" : "backup 1.6"));
+    
+    return $delay;
+}
+
+# Start precaching remaining segments in the background
+sub precache_segments {
+    my ($self, $channel_id, $current_segment) = @_;
+    
+    # Get the segment list for this channel
+    my $segments = $self->{playlists}->{$channel_id}->{'segments'};
+    return unless $segments && @$segments;
+    
+    # Find the index of the current segment
+    my $current_index = -1;
+    for my $i (0 .. $#$segments) {
+        if ($segments->[$i] eq $current_segment) {
+            $current_index = $i;
+            last;
+        }
+    }
+    
+    if ($current_index < 0) {
+        main::log_warn("Current segment $current_segment not found in playlist for channel $channel_id");
+        return;
+    }
+    
+    # Get remaining segments after the current one
+    my @remaining_segments = @{$segments}[($current_index + 1) .. $#$segments];
+    
+    if (@remaining_segments) {
+        # Calculate total cache size and count
+        my $cache_size = 0;
+        my $cache_count = 0;
+        if ($self->{segment_cache}->{$channel_id}) {
+            for my $cached_seg (keys %{$self->{segment_cache}->{$channel_id}}) {
+                $cache_size += length($self->{segment_cache}->{$channel_id}->{$cached_seg});
+                $cache_count++;
+            }
+        }
+        
+        main::log_info("Starting precache of " . scalar(@remaining_segments) . 
+                      " segments for channel $channel_id, current cache: " . $cache_count . " segments (" . 
+                      sprintf("%.2f MB", $cache_size / 1024 / 1024) . ")");
+        main::log_debug("Segments to cache: " . join(", ", @remaining_segments));
+        
+        # Store the queue of segments to cache
+        $self->{segment_queue}->{$channel_id} = \@remaining_segments;
+        
+        # Cache the first segment immediately in the background
+        $self->cache_next_segment($channel_id);
+    } else {
+        main::log_debug("No remaining segments to precache for channel $channel_id");
+    }
+}
+
+# Cache the next segment in the queue for a channel
+sub cache_next_segment {
+    my ($self, $channel_id) = @_;
+    
+    my $queue = $self->{segment_queue}->{$channel_id};
+    return unless $queue && @$queue;
+    
+    # Cache up to SEGMENT_CACHE_BATCH_SIZE segments at a time to avoid blocking while making progress
+    my $cached_count = 0;
+    
+    while ($cached_count < SEGMENT_CACHE_BATCH_SIZE && @$queue) {
+        # Get the next segment to cache
+        my $segment_path = shift @$queue;
+        
+        main::log_debug("Caching segment: $segment_path for channel $channel_id");
+        
+        # Fetch the segment
+        my $segment_data = $self->get_segment($segment_path);
+        
+        if ($segment_data) {
+            # Store in cache
+            $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
+            main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+            $cached_count++;
+        } else {
+            main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+        }
+    }
+    
+    # Log progress
+    my $remaining = scalar(@$queue);
+    main::log_debug("Cached $cached_count segments for channel $channel_id, $remaining remaining segments to cache");
+}
+
+# Get a segment from cache or fetch it
+sub get_cached_segment {
+    my ($self, $segment_path, $channel_id) = @_;
+    
+    # Track this as the last requested segment for this channel
+    $self->{last_segment}->{$channel_id} = $segment_path;
+    
+    # Check if caching is enabled
+    my $caching_enabled = $CONFIG{segment_drop} >= 1;
+    
+    # Check if segment is in cache (only if caching is enabled)
+    if ($caching_enabled && exists $self->{segment_cache}->{$channel_id}->{$segment_path}) {
+        main::log_info("Using cached segment: $segment_path for channel $channel_id");
+        my $data = $self->{segment_cache}->{$channel_id}->{$segment_path};
+        
+        # Drop the segment from cache after use
+        delete $self->{segment_cache}->{$channel_id}->{$segment_path};
+        
+        # Get the number of remaining cached segments for this channel
+        my $remaining_segments = scalar keys %{$self->{segment_cache}->{$channel_id}};
+        # Optionally log or output the count of remaining segments
+        main::log_debug("Dropped cached segment: $segment_path, Segments in cache: $remaining_segments");
+        
+        # Start caching the next segment in the queue
+        $self->cache_next_segment($channel_id);
+        
+        return $data;
+    }
+    
+    # Not in cache, fetch it directly
+    main::log_debug("Fetching segment directly: $segment_path for channel $channel_id");
+    
+    my $data = $self->get_segment($segment_path);
+    
+    # Only start precaching if caching is enabled
+    if ($caching_enabled && $data) {
+        # Start precaching remaining segments
+        $self->precache_segments($channel_id, $segment_path);
+    }
+    
+    return $data;
 }
 
 sub select_quality_variant {
@@ -942,18 +1954,34 @@ sub select_quality_variant {
     
     main::log_debug("Selecting quality variant for: $quality ($desired_bandwidth bps)");
     
-    my @lines = split /\n/, $master_playlist;
+    # Parse master playlist according to Apple HLS specification
+    # #EXT-X-STREAM-INF tags are followed by the URI line
+    my @lines = split /\r?\n/, $master_playlist;  # Handle both Unix and Windows line endings
     my %variants = ();
     
     # Parse master playlist to extract variants with their bandwidths
     for my $i (0..$#lines) {
-        $lines[$i] =~ s/\r?\n$//;
-        if ($lines[$i] =~ /#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
+        my $line = $lines[$i];
+        # Trim whitespace per HLS spec
+        $line =~ s/^\s+|\s+$//g;
+        
+        # Look for #EXT-X-STREAM-INF tag with BANDWIDTH attribute
+        if ($line =~ /^#EXT-X-STREAM-INF:.*BANDWIDTH=(\d+)/) {
             my $bandwidth = $1;
-            # Next line should contain the variant URL
-            if ($i + 1 <= $#lines && $lines[$i + 1] !~ /^#/) {
-                my $variant_url = $lines[$i + 1];
-                $variant_url =~ s/\r?\n$//;
+            
+            # Per HLS spec, URI line immediately follows (skip comments/empty lines)
+            for my $j (($i + 1)..$#lines) {
+                my $next_line = $lines[$j];
+                $next_line =~ s/^\s+|\s+$//g;
+                
+                # Skip empty lines
+                next if $next_line eq '';
+                
+                # If it's another tag, something is wrong - break
+                last if $next_line =~ /^#/;
+                
+                # This should be the URI line
+                my $variant_url = $next_line;
                 
                 # Convert relative URL to absolute if needed
                 if ($variant_url !~ /^https?:\/\//) {
@@ -1027,8 +2055,10 @@ sub get_segment {
         return undef;
     }
     
-    # Construct full segment URL with base path
-    my $url = LIVE_PRIMARY_HLS . "/$base_path/$path";
+    # Construct full segment URL with base path using the server for this channel
+    my $server_name = $self->get_channel_server($channel_id);
+    my $server_url = $server_name eq 'primary' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
+    my $url = $server_url . "/$base_path/$path";
     
     # Set channel context for token retrieval
     $self->set_channel_context($channel_id);
@@ -1046,41 +2076,244 @@ sub get_segment {
     );
     
     main::log_info("Getting segment: $url");
-    main::log_trace("Channel ID: $channel_id, Base path: $base_path");
+    main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: $server_name");
     
     my $response = $self->{ua}->get($uri);
     
-    if ($response->code == 403) {
+    if ($response->code == 403 || $response->code == 500) {
+        # Record server failure for these error codes
+        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
+        
         if ($max_attempts > 0) {
-            main::log_warn("Received status code 403 on segment for channel: $channel_id, renewing session");
+            main::log_warn("$error_msg, renewing session");
+            
+            # Try re-authentication first (without clearing cookies)
             main::log_trace("Attempting to authenticate for channel: $channel_id to get new session tokens");
             if ($self->authenticate($channel_id)) {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                main::log_error("Session renewal failed for channel: $channel_id");
-                return undef;
+                # If re-authentication failed, clear all cookies (auth issue is likely global)
+                main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
+                $self->clear_all_cookies();
+                main::log_trace("Attempting to authenticate for channel: $channel_id after clearing all cookies");
+                if ($self->authenticate($channel_id)) {
+                    main::log_trace("Session renewed successfully for channel: $channel_id after clearing cookies, retrying segment request");
+                    return $self->get_segment($path, $max_attempts - 1);
+                } else {
+                    main::log_error("Session renewal failed for channel: $channel_id after clearing all cookies");
+                    return undef;
+                }
             }
         } else {
-            main::log_error("Received status code 403 on segment for channel: $channel_id, max attempts exceeded");
+            main::log_error("$error_msg, max attempts exceeded");
             return undef;
         }
     }
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on segment");
+        my $error_msg = "Received status code " . $response->code . " on segment";
+        main::log_error($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
+    
+    # Record successful request
+    $self->record_channel_success($channel_id);
     
     return $response->content;
 }
 
+# Load channel list from disk cache
+# Returns 1 if channels were loaded (even if expired), 0 on failure
+sub load_channel_cache {
+    my ($self) = @_;
+
+    return 0 unless $self->{channel_cache_file} && -e $self->{channel_cache_file};
+
+    my $now = time();
+    eval {
+        open(my $fh, '<', $self->{channel_cache_file}) or die "Cannot open: $!";
+        my $content = do { local $/; <$fh> };
+        close($fh);
+
+        my $cache_data = $self->{json}->decode($content);
+
+        unless ($cache_data->{expires_at} && $cache_data->{channels} &&
+                ref($cache_data->{channels}) eq 'ARRAY' && @{$cache_data->{channels}} > 0) {
+            main::log_warn("Channel cache file is missing required fields or is empty");
+            return;
+        }
+
+        my $channel_count = scalar(@{$cache_data->{channels}});
+
+        # Restore tracked JSESSIONID expiry (persisted so it survives restarts).
+        # Default to 0 (expired) if not present (older cache files or first run).
+        if ($cache_data->{jsessionid_expires}) {
+            $self->{jsessionid_expires} = $cache_data->{jsessionid_expires};
+            my $j_remaining = $self->{jsessionid_expires} - $now;
+            if ($j_remaining > 0) {
+                my $j_min = int($j_remaining / 60);
+                main::log_debug("Restored tracked JSESSIONID expiry: valid for ${j_min}m");
+            } else {
+                main::log_debug("Restored tracked JSESSIONID expiry: already expired, re-auth will run");
+            }
+        } else {
+            $self->{jsessionid_expires} = 0;
+            main::log_debug("No tracked JSESSIONID expiry in cache, re-auth will run on next refresh");
+        }
+
+        if ($cache_data->{expires_at} <= $now) {
+            # Cache is expired – load it anyway so we can serve data during background refresh
+            my $expired_at = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($cache_data->{expires_at}));
+            main::log_info("Loaded $channel_count channels from expired cache (expired: $expired_at) – background refresh will run");
+            $self->{channels}             = $cache_data->{channels};
+            $self->{channel_cache_expires} = 0;  # Trigger immediate background refresh
+        } else {
+            my $remaining = $cache_data->{expires_at} - $now;
+            my $hours   = int($remaining / 3600);
+            my $minutes = int(($remaining % 3600) / 60);
+            main::log_info("Loaded $channel_count channels from cache (expires in ${hours}h ${minutes}m)");
+            $self->{channels}             = $cache_data->{channels};
+            $self->{channel_cache_expires} = $cache_data->{expires_at};
+        }
+    };
+    if ($@) {
+        main::log_warn("Error loading channel cache from $self->{channel_cache_file}: $@");
+        return 0;
+    }
+
+    return defined($self->{channels}) ? 1 : 0;
+}
+
+# Save channel list to disk cache with expiry timestamp
+sub save_channel_cache {
+    my ($self) = @_;
+
+    return unless $self->{channel_cache_file} && defined $self->{channels} && @{$self->{channels}} > 0;
+
+    my $now        = time();
+    my $expires_at = $now + CHANNEL_CACHE_TTL;
+
+    eval {
+        my $cache_data = {
+            fetched_at         => $now,
+            expires_at         => $expires_at,
+            jsessionid_expires => $self->{jsessionid_expires} || 0,
+            channels           => $self->{channels},
+        };
+
+        open(my $fh, '>', $self->{channel_cache_file}) or die "Cannot open: $!";
+        print $fh $self->{json}->encode($cache_data);
+        close($fh);
+
+        my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires_at));
+        main::log_info("Saved " . scalar(@{$self->{channels}}) .
+                       " channels to cache $self->{channel_cache_file} (expires: $expires_str)");
+        $self->{channel_cache_expires} = $expires_at;
+    };
+    if ($@) {
+        main::log_warn("Error saving channel cache to $self->{channel_cache_file}: $@");
+    }
+}
+
+# Background refresh: fetch fresh channel list from API when the cache has expired.
+# The old channel data continues to be served while the refresh runs.
+sub refresh_channel_cache_if_expired {
+    my ($self) = @_;
+
+    # Only run if we already have channel data (so old data can be served during refresh)
+    return unless defined $self->{channels};
+
+    # Only run when the cache has expired
+    return unless time() >= $self->{channel_cache_expires};
+
+    main::log_info("Channel cache expired – fetching fresh channel list in background...");
+
+    # Temporarily advance the expiry so repeated loop iterations don't pile up.
+    # If the refresh fails we will retry in 5 minutes.
+    $self->{channel_cache_expires} = time() + 300;
+
+    # Only re-authenticate when our tracked JSESSIONID expiry has passed.
+    # JSESSIONID carries no explicit cookie timestamp; we set jsessionid_expires ourselves
+    # in authenticate() and persist it in channels.json so it survives restarts.
+    if (time() >= $self->{jsessionid_expires}) {
+        my $hours = int(SESSION_MAX_LIFE / 3600);
+        main::log_info("Background channel refresh: JSESSIONID expired (tracked lifetime ~${hours}h), re-authenticating...");
+        $self->set_channel_context(undef);
+        if (!$self->authenticate(undef)) {
+            main::log_warn("Background channel refresh: re-authentication failed – keeping existing channel list, retry in 5 minutes");
+            return;
+        }
+        # jsessionid_expires is updated by authenticate() on success
+    } else {
+        my $remaining = int(($self->{jsessionid_expires} - time()) / 60);
+        main::log_debug("Background channel refresh: JSESSIONID valid for ${remaining}m, skipping re-auth");
+        $self->set_channel_context(undef);
+    }
+
+    my $old_channels = $self->{channels};
+
+    eval {
+        $self->set_channel_context(undef);
+
+        my $postdata = {
+            moduleList => {
+                modules => [{
+                    moduleArea => 'Discovery',
+                    moduleType => 'ChannelListing',
+                    moduleRequest => {
+                        consumeRequests => [],
+                        resultTemplate  => 'responsive',
+                        alerts          => [],
+                        profileInfos    => [],
+                    },
+                }],
+            },
+        };
+
+        my $data = $self->post_request('get', $postdata, 1, undef);
+        unless ($data) {
+            main::log_warn("Background channel refresh: no data returned by server – keeping existing channel list");
+            return;
+        }
+
+        my $channels;
+        eval {
+            $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
+        };
+
+        unless (defined $channels && ref($channels) eq 'ARRAY' && @$channels > 0) {
+            main::log_warn("Background channel refresh: invalid or empty response – keeping existing channel list");
+            return;
+        }
+
+        # Replace the in-memory channel list with fresh data
+        $self->{channels} = $channels;
+        main::log_info("Background channel refresh complete: " . scalar(@$channels) . " channels loaded");
+
+        # Persist the fresh list and update expiry
+        $self->save_channel_cache();
+    };
+
+    if ($@) {
+        main::log_warn("Background channel refresh error: $@ – keeping existing channel list, retry in 5 minutes");
+        # Preserve old channel data if the refresh blew away $self->{channels}
+        $self->{channels} //= $old_channels;
+    }
+}
+
 sub get_channels {
     my $self = shift;
+    my $retry_count = shift || 0;
+    my $reauth_attempted = shift || 0; # Track if we've attempted reauthorization
+    my $max_retries = 1; # Reduce from 3 to 1 simple retry
+    my $retry_delay = 2; # Use fixed delay of 2 seconds
     
-    # Download channel list if necessary
+    # Download channel list if necessary - cache indefinitely for playback use
     if (!defined $self->{channels}) {
-        main::log_debug("Fetching channel list");
+        main::log_debug("Fetching channel list" . ($retry_count > 0 ? " (retry $retry_count/$max_retries)" : ""));
         
         my $postdata = {
             moduleList => {
@@ -1099,22 +2332,218 @@ sub get_channels {
         
         my $data = $self->post_request('get', $postdata, 1, undef);  # Use global authentication for channel listing
         if (!$data) {
-            main::log_error('Unable to get channel list');
+            main::log_error('Unable to get channel list - no data returned from server');
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
+            }
+            main::log_error("Failed to get channel list after $max_retries retries");
+
+            # Add trace logging to dump server response
+            main::log_error("Channel list response received: " . $self->{json}->encode($data));
+        
             return [];
         }
         
+        # Check for API response status - only code 100 indicates success
+        my ($status, $message, $message_code);
         eval {
-            $self->{channels} = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
+            $status = $data->{ModuleListResponse}->{status};
+            if (exists $data->{ModuleListResponse}->{messages} && 
+                ref($data->{ModuleListResponse}->{messages}) eq 'ARRAY' &&
+                @{$data->{ModuleListResponse}->{messages}} > 0) {
+                $message = $data->{ModuleListResponse}->{messages}->[0]->{message};
+                $message_code = $data->{ModuleListResponse}->{messages}->[0]->{code};
+            }
+        };
+        if ($@) {
+            main::log_debug("No status messages found in channel list response, proceeding with channel parsing");
+        }
+        
+        # Check for successful response (code 100) - anything else is an error
+        if (defined $message_code && $message_code != 100) {
+            # Handle session expiration codes specifically
+            if ($message_code == 201 || $message_code == 208) {
+                if (!$reauth_attempted) {
+                    main::log_warn("Session expired (code: $message_code), clearing all cookies and re-authenticating");
+                    $self->clear_all_cookies();
+                    
+                    if ($self->authenticate(undef)) {
+                        main::log_info("Successfully re-authenticated for channel list");
+                        # Reset retry count and try again with fresh authentication
+                        return $self->get_channels(0, 1); # reauth_attempted = 1
+                    } else {
+                        main::log_error("Failed to re-authenticate for channel list");
+                        return [];
+                    }
+                } else {
+                    main::log_error("Session expired after re-authentication attempt, giving up");
+                    return [];
+                }
+            } else {
+                # Handle other error codes
+                main::log_error("API returned error code $message_code: $message");
+                if ($retry_count < $max_retries) {
+                    main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                    sleep($retry_delay);
+                    return $self->get_channels($retry_count + 1, $reauth_attempted);
+                }
+                main::log_error("Failed to get channel list after $max_retries retries due to API error");
+                return [];
+            }
+        }
+        
+        my $channels;
+        eval {
+            $channels = $data->{ModuleListResponse}->{moduleList}->{modules}->[0]->{moduleResponse}->{contentData}->{channelListing}->{channels};
         };
         if ($@) {
             main::log_error("Error parsing JSON response for channels: $@");
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
+            }
+            main::log_error("Failed to parse channel data after $max_retries retries");
             return [];
         }
         
+        # Ensure channels is defined and is an array reference
+        if (!defined $channels || ref($channels) ne 'ARRAY') {
+            main::log_error("Channel data is not in expected format - received: " . (defined $channels ? ref($channels) : 'undef'));
+            main::log_error("Channel data received: " . $self->{json}->encode($data));
+            
+            # Simple retry only (session expiration already handled above)
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
+            }
+            
+            main::log_error("Channel data format invalid after $max_retries retries");
+            return [];
+        }
+        
+        # Check if we got an empty channel list
+        if (@$channels == 0) {
+            main::log_warn("Server returned empty channel list");
+            if ($retry_count < $max_retries) {
+                main::log_info("Retrying channel fetch in $retry_delay seconds...");
+                sleep($retry_delay);
+                return $self->get_channels($retry_count + 1, $reauth_attempted);
+            }
+            main::log_error("Received empty channel list after $max_retries retries");
+            # Don't cache empty results - let subsequent calls retry
+            return [];
+        }
+        
+        # Only cache successful, non-empty results
+        $self->{channels} = $channels;
         main::log_info("Loaded " . @{$self->{channels}} . " channels");
+
+        # Persist to disk cache so future startups can load without hitting the API
+        $self->save_channel_cache();
     }
     
     return $self->{channels};
+}
+
+sub refresh_channels {
+    my $self = shift;
+    
+    # Clear cached channels to force refresh
+    main::log_debug("Refreshing channel data (clearing cache)");
+    delete $self->{channels};
+    
+    # Fetch fresh channel data
+    return $self->get_channels();
+}
+
+# Check and refresh expired playlists
+sub refresh_expired_playlists {
+    my $self = shift;
+    
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
+    
+    my $now = time();
+    my @channels_to_refresh;
+    my @channels_to_clear;
+    
+    # Check all channels with scheduled updates
+    for my $channel_id (keys %{$self->{playlist_next_update}}) {
+        # Check if channel has been idle for too long (4x EXTINF duration)
+        if (exists $self->{channel_last_activity}->{$channel_id} && 
+            exists $self->{channel_avg_duration}->{$channel_id}) {
+            
+            my $last_activity = $self->{channel_last_activity}->{$channel_id};
+            my $avg_duration = $self->{channel_avg_duration}->{$channel_id};
+            my $idle_timeout = $avg_duration * 4;
+            my $idle_time = $now - $last_activity;
+            
+            if ($idle_time >= $idle_timeout) {
+                main::log_info(sprintf("Channel %s idle for %.1fs (timeout: %.1fs, 4x avg duration of %.1fs) - stopping refresh and clearing cache", 
+                                      $channel_id, $idle_time, $idle_timeout, $avg_duration));
+                push @channels_to_clear, $channel_id;
+                next;  # Skip refresh for this channel
+            }
+        }
+        
+        # Check if playlist needs refresh
+        my $next_update = $self->{playlist_next_update}->{$channel_id};
+        if ($now >= $next_update) {
+            push @channels_to_refresh, $channel_id;
+        }
+    }
+    
+    # Clear cache for idle channels
+    for my $channel_id (@channels_to_clear) {
+        $self->clear_channel_cache($channel_id);
+    }
+    
+    # Refresh expired playlists for active channels
+    for my $channel_id (@channels_to_refresh) {
+        main::log_debug("Background refresh: Fetching new playlist for channel $channel_id");
+        
+        # Get the channel name from our cached mapping
+        my $channel_name = $self->{playlist_channel_name}->{$channel_id};
+        
+        if ($channel_name) {
+            # Manually clear the playlist cache to avoid expiring authentication
+            delete $self->{playlist_cache}->{$channel_id};
+            delete $self->{playlist_next_update}->{$channel_id};
+            
+            # Fetch new playlist (this will update the cache and schedule next update)
+            eval {
+                $self->get_playlist($channel_name, 1);  # Use cache for auth, but we cleared playlist cache above
+            };
+            if ($@) {
+                main::log_warn("Error refreshing playlist for channel $channel_id: $@");
+            }
+        } else {
+            main::log_warn("Could not find channel name for channel_id $channel_id in cache");
+        }
+    }
+}
+
+# Process segment caching queues for all active channels
+sub process_segment_queues {
+    my $self = shift;
+    
+    # Skip if caching is disabled
+    return unless $CONFIG{segment_drop} >= 1;
+    
+    # Iterate through all channels with segment queues
+    for my $channel_id (keys %{$self->{segment_queue}}) {
+        my $queue = $self->{segment_queue}->{$channel_id};
+        
+        # Skip if queue is empty
+        next unless $queue && @$queue;
+        
+        # Cache a batch of segments for this channel
+        $self->cache_next_segment($channel_id);
+    }
 }
 
 sub get_channel {
@@ -1174,6 +2603,38 @@ sub get_simplified_channel_info {
     return undef;
 }
 
+# Clear all cached data for a channel (used when idle timeout exceeded)
+sub clear_channel_cache {
+    my ($self, $channel_id) = @_;
+    
+    main::log_info("Clearing all cached data for idle channel: $channel_id");
+    
+    # Clear playlist cache
+    delete $self->{playlist_cache}->{$channel_id};
+    delete $self->{playlist_channel_name}->{$channel_id};
+    delete $self->{playlist_next_update}->{$channel_id};
+    delete $self->{playlists}->{$channel_id}->{'First'};
+    
+    # Clear segment cache and queue
+    delete $self->{segment_cache}->{$channel_id};
+    delete $self->{segment_queue}->{$channel_id};
+    delete $self->{last_segment}->{$channel_id};
+    
+    # Clear activity tracking
+    delete $self->{channel_last_activity}->{$channel_id};
+    delete $self->{channel_avg_duration}->{$channel_id};
+    
+    main::log_debug("Cleared playlist, segment cache, and activity data for channel $channel_id");
+}
+
+# Update last activity time for a channel
+sub update_channel_activity {
+    my ($self, $channel_id) = @_;
+    
+    $self->{channel_last_activity}->{$channel_id} = time();
+    main::log_trace("Updated activity timestamp for channel $channel_id");
+}
+
 1;
 
 #=============================================================================
@@ -1227,11 +2688,34 @@ sub start_http_daemon {
     main::log_info("HTTP server started on port $port");
     main::log_info("Access channels at: http://127.0.0.1:$port/channel.m3u8");
     
+    # Create IO::Select for non-blocking accept with timeout
+    my $select = IO::Select->new($daemon);
+    my $last_refresh_check = time();
+    my $refresh_check_interval = 1;  # Check for expired playlists every 1 seconds
+    
     while ($main::RUNNING) {
-        main::log_trace("Server loop iteration, waiting for client connection");
+        # Check if any expired playlists need refreshing or segments need caching
+        my $now = time();
+        if ($now - $last_refresh_check >= $refresh_check_interval) {
+            $sxm->refresh_expired_playlists();
+            $sxm->process_segment_queues();
+            $sxm->refresh_channel_cache_if_expired();
+            $last_refresh_check = $now;
+        }
+        
+        # Wait for client connection with timeout
+#        main::log_trace("Server loop iteration, waiting for client connection");
+        my @ready = $select->can_read(1.0);  # 1 second timeout
+        
+        if (!@ready) {
+            # No client connection within timeout, continue loop
+#            main::log_trace("No client connection within timeout, continuing loop");
+            next;
+        }
+        
         my $client = $daemon->accept();
         if (!$client) {
-            main::log_trace("No client connection, continuing loop");
+#            main::log_trace("No client connection, continuing loop");
             next;
         }
         
@@ -1295,6 +2779,12 @@ sub handle_http_request {
         
         my $data = $sxm->get_playlist($channel);
         if ($data) {
+            # Update activity timestamp for this channel
+            my ($guid, $channel_id) = $sxm->get_channel($channel);
+            if ($channel_id) {
+                $sxm->update_channel_activity($channel_id);
+            }
+            
             my $response = HTTP::Response->new(200);
             $response->content_type('application/x-mpegURL');
             $response->header('Connection', 'close');
@@ -1314,7 +2804,25 @@ sub handle_http_request {
         
         main::log_debug("Segment request: $segment_path");
         
-        my $data = $sxm->get_segment($segment_path);
+        # Extract channel_id from segment path
+        my $channel_id;
+        if ($segment_path =~ /^([^_]+)_/) {
+            $channel_id = $1;
+        }
+        
+        my $data;
+        if ($channel_id) {
+            # Update activity timestamp for this channel
+            $sxm->update_channel_activity($channel_id);
+            
+            # Use cached segment if available
+            $data = $sxm->get_cached_segment($segment_path, $channel_id);
+        } else {
+            # Fallback to direct fetch if we can't extract channel_id
+            main::log_warn("Could not extract channel_id from segment path: $segment_path");
+            $data = $sxm->get_segment($segment_path);
+        }
+        
         if ($data) {
             my $response = HTTP::Response->new(200);
             $response->content_type('audio/x-aac');
@@ -1332,14 +2840,13 @@ sub handle_http_request {
         # Handle encryption key requests
         main::log_trace("Key request");
         
-        my $key = decode_base64('0Nsco7MAgxowGvkUT8aYag==');
         my $response = HTTP::Response->new(200);
         $response->content_type('text/plain');
         $response->header('Connection', 'close');
-        $response->content($key);
+        $response->content(HLS_AES_KEY);
         eval { $client->send_response($response); };
         if ($@) {
-            main::log_warn("Error sending key response: $@");
+            main::log_warn("Error sending HLS_AES key response: $@");
         }
     }
     elsif ($path =~ /^\/channel\/(.+)$/) {
@@ -1447,7 +2954,15 @@ sub parse_arguments {
                 die "Invalid quality level: $value. Use: High, Med, Low\n";
             }
         },
+        'segment-drop=i' => sub {
+            my ($name, $value) = @_;
+            if ($value < 0 || $value > 30) {
+                die "Invalid segment-drop value: $value. Must be between 0 and 30\n";
+            }
+            $CONFIG{segment_drop} = $value;
+        },
         'logfile=s'     => \$CONFIG{logfile},
+        'cookiefile=s'  => \$CONFIG{cookiefile},
         'lmsroot=s'     => \$CONFIG{lmsroot},
         'help|h'        => \$help_text,
     ) or pod2usage(2);
@@ -1573,7 +3088,20 @@ sub start_server {
     }
     
     log_info("Authentication successful - starting server");
-    
+
+    # Ensure channel list is available at startup.
+    # get_channels() fetches from the API when:
+    #   - The cache file does not exist ($self->{channels} is undef)
+    #   - The cache file was corrupt ($self->{channels} is undef)
+    # For an expired cache, channels were pre-loaded by load_channel_cache() and the
+    # background refresh in the server loop will fetch updated data asynchronously.
+    my $channels = $sxm->get_channels();
+    if (!$channels || !@$channels) {
+        log_warn("Unable to load channel list at startup - channels will be retried on demand");
+    } else {
+        log_info("Channel list ready at startup: " . scalar(@$channels) . " channels");
+    }
+
     # Start HTTP daemon
     eval {
         SiriusHandler::start_http_daemon($sxm, $CONFIG{port});
@@ -1594,9 +3122,9 @@ sub main {
     
     log_info("Starting SiriusXM Perl proxy v$VERSION");
     
-    # Create SiriusXM object
+    # Create SiriusXM object with cookie file
     my $region = $CONFIG{canada} ? 'CA' : 'US';
-    $SIRIUS_XM = SiriusXM->new($CONFIG{username}, $CONFIG{password}, $region);
+    $SIRIUS_XM = SiriusXM->new($CONFIG{username}, $CONFIG{password}, $region, $CONFIG{cookiefile});
     
     if ($CONFIG{list}) {
         list_channels($SIRIUS_XM);

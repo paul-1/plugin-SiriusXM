@@ -9,6 +9,7 @@ use Slim::Utils::Log;
 use Slim::Utils::Prefs;
 use Slim::Utils::Strings qw(string);
 use Plugins::SiriusXM::API;
+use Plugins::SiriusXM::Proxy;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
@@ -22,7 +23,7 @@ sub page {
 }
 
 sub prefs {
-    return ($prefs, qw(username password quality port region enable_metadata proxy_log_level));
+    return ($prefs, qw(username password quality port region enable_metadata proxy_log_level segment_drop));
 }
 
 sub handler {
@@ -34,8 +35,8 @@ sub handler {
     if ($params->{checkStatus}) {
         $log->debug("Check Status button pressed");
         
-        if (Plugins::SiriusXM::Plugin->isProxyRunning()) {
-            my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+        if (Plugins::SiriusXM::Proxy->isProxyRunning()) {
+            my $pid = Plugins::SiriusXM::Proxy->getProxyPid();
             $log->info("(PID: $pid)");
             if ($pid) {
                 $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_STATUS_CHECKED') . " (PID: $pid)";
@@ -54,15 +55,15 @@ sub handler {
         $log->debug("Restart Proxy button pressed");
         
         # Stop current proxy if running
-        Plugins::SiriusXM::Plugin->stopProxy();
+        Plugins::SiriusXM::Proxy->stopProxy();
         
         # Give it a moment to shut down
         sleep(2);
         
         # Start proxy if credentials are available
         if ($prefs->get('username') && $prefs->get('password')) {
-            if (Plugins::SiriusXM::Plugin->startProxy()) {
-                my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+            if (Plugins::SiriusXM::Proxy->startProxy()) {
+                my $pid = Plugins::SiriusXM::Proxy->getProxyPid();
                 if ($pid) {
                     $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTART_SUCCESS') . " (PID: $pid)";
                 } else {
@@ -88,6 +89,7 @@ sub handler {
         my $old_region = $prefs->get('region');
         my $old_quality = $prefs->get('quality');
         my $old_proxy_log_level = $prefs->get('proxy_log_level');
+        my $old_segment_drop = $prefs->get('segment_drop');
         
         # Save the settings first
         my $result = $class->SUPER::handler($client, $params, $callback, @args);
@@ -99,20 +101,21 @@ sub handler {
             ($params->{pref_port} && $params->{pref_port} ne $old_port) ||
             ($params->{pref_region} && $params->{pref_region} ne $old_region) ||
             ($params->{pref_quality} && $params->{pref_quality} ne $old_quality) ||
-            ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level)
+            ($params->{pref_proxy_log_level} && $params->{pref_proxy_log_level} ne $old_proxy_log_level) ||
+            (defined $params->{pref_segment_drop} && $params->{pref_segment_drop} ne $old_segment_drop)
         );
         
         if ($need_restart) {
             $log->info("Settings changed, restarting proxy");
             
             # Restart proxy with new settings
-            Plugins::SiriusXM::Plugin->stopProxy();
+            Plugins::SiriusXM::Proxy->stopProxy();
             
             # Give it a moment to shut down
             sleep(2);
             
             if ($params->{pref_username} && $params->{pref_password}) {
-                if (Plugins::SiriusXM::Plugin->startProxy()) {
+                if (Plugins::SiriusXM::Proxy->startProxy()) {
                     $params->{warning} = string('PLUGIN_SIRIUSXM_PROXY_RESTARTED');
                     # Test authentication right after starting proxy if credentials are provided
                     Plugins::SiriusXM::API->authenticate(sub {
@@ -147,14 +150,14 @@ sub beforeRender {
     my ($class, $params) = @_;
     
     # Add proxy status information
-    my $is_running = Plugins::SiriusXM::Plugin->isProxyRunning();
+    my $is_running = Plugins::SiriusXM::Proxy->isProxyRunning();
     $params->{proxy_status} = $is_running ? 
         string('PLUGIN_SIRIUSXM_PROXY_RUNNING') : 
         string('PLUGIN_SIRIUSXM_PROXY_STOPPED');
     
     # Add process ID if proxy is running
     if ($is_running) {
-        my $pid = Plugins::SiriusXM::Plugin->getProxyPid();
+        my $pid = Plugins::SiriusXM::Proxy->getProxyPid();
         $params->{proxy_pid} = $pid if $pid;
     }
     

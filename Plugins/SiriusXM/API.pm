@@ -18,6 +18,9 @@ my $cache = Slim::Utils::Cache->new();
 # Cache timeout in seconds
 use constant CACHE_TIMEOUT => 86400; # 24 hours (1 day)
 
+# Track in-flight channel requests to prevent concurrent calls
+my %channel_fetch_callbacks = ();
+
 sub init {
     my $class = shift;
     $log->debug("Initializing SiriusXM API");
@@ -29,7 +32,10 @@ sub cleanup {
     # Clear any cached data
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_channel_info');
+    $cache->remove('siriusxm_processed_channels');
     $cache->remove('siriusxm_auth_token');
+    # Clear any pending callbacks
+    %channel_fetch_callbacks = ();
 }
 
 sub invalidateChannelCache {
@@ -37,7 +43,164 @@ sub invalidateChannelCache {
     $log->info("Invalidating channel cache due to playback failure");
     $cache->remove('siriusxm_channels');
     $cache->remove('siriusxm_channel_info');
+    $cache->remove('siriusxm_processed_channels');
 }
+
+=begin comment
+
+Schema for json returned from getChannels
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Channel",
+  "type": "object",
+  "properties": {
+    "adBreakDuration": {
+      "type": "string"
+    },
+    "adRepEnabled": {
+      "type": "boolean"
+    },
+    "aodShowCount": {
+      "type": "integer"
+    },
+    "categories": {
+      "type": "object",
+      "properties": {
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "categoryGuid": { "type": "string" },
+              "isPrimary": { "type": "boolean" },
+              "key": { "type": "string" },
+              "name": { "type": "string" },
+              "order": { "type": "integer" },
+              "shortName": { "type": "string" }
+            },
+            "required": [
+              "categoryGuid",
+              "isPrimary",
+              "key",
+              "name",
+              "order",
+              "shortName"
+            ]
+          }
+        }
+      },
+      "required": ["categories"]
+    },
+    "channelContentType": { "type": "string" },
+    "channelGuid": { "type": "string" },
+    "channelId": { "type": "string" },
+    "channelNumber": { "type": "string" },
+    "clientBufferDuration": { "type": "integer" },
+    "darkBackgroundColor": { "type": "string" },
+    "disableRecommendations": { "type": "boolean" },
+    "esid": { "type": "string" },
+    "fastEnabled": { "type": "boolean" },
+    "geoRestrictions": { "type": "string" },
+    "images": {
+      "type": "object",
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "height": { "type": "integer" },
+              "name": { "type": "string" },
+              "relativeUrl": { "type": "string" },
+              "url": { "type": "string" },
+              "width": { "type": "integer" },
+              "satId": { "type": "integer" },
+              "satVersion": { "type": "integer" }
+            },
+            "required": [
+              "height",
+              "name",
+              "relativeUrl",
+              "url",
+              "width"
+            ]
+          }
+        }
+      },
+      "required": ["images"]
+    },
+    "inactivityTimeout": { "type": "integer" },
+    "ipOnly": { "type": "boolean" },
+    "isAvailable": { "type": "boolean" },
+    "isBizMature": { "type": "boolean" },
+    "isFavorite": { "type": "boolean" },
+    "isMature": { "type": "boolean" },
+    "isMySxm": { "type": "boolean" },
+    "isPersonalized": { "type": "boolean" },
+    "isPlayByPlay": { "type": "boolean" },
+    "lightBackgroundColor": { "type": "string" },
+    "liveVideoEligible": { "type": "boolean" },
+    "mediumDescription": { "type": "string" },
+    "name": { "type": "string" },
+    "pivotEnabled": { "type": "boolean" },
+    "satOnly": { "type": "boolean" },
+    "shortDescription": { "type": "string" },
+    "shortName": { "type": "string" },
+    "siriusChannelNumber": { "type": "string" },
+    "sortOrder": { "type": "integer" },
+    "spanishContent": { "type": "boolean" },
+    "streamingName": { "type": "string" },
+    "subscribed": { "type": "boolean" },
+    "url": { "type": "string" },
+    "xmChannelNumber": { "type": "string" },
+    "xmServiceId": { "type": "string" }
+  },
+  "required": [
+    "adBreakDuration",
+    "adRepEnabled",
+    "aodShowCount",
+    "categories",
+    "channelContentType",
+    "channelGuid",
+    "channelId",
+    "channelNumber",
+    "clientBufferDuration",
+    "darkBackgroundColor",
+    "disableRecommendations",
+    "esid",
+    "fastEnabled",
+    "geoRestrictions",
+    "images",
+    "inactivityTimeout",
+    "ipOnly",
+    "isAvailable",
+    "isBizMature",
+    "isFavorite",
+    "isMature",
+    "isMySxm",
+    "isPersonalized",
+    "isPlayByPlay",
+    "lightBackgroundColor",
+    "liveVideoEligible",
+    "mediumDescription",
+    "name",
+    "pivotEnabled",
+    "satOnly",
+    "shortDescription",
+    "shortName",
+    "siriusChannelNumber",
+    "sortOrder",
+    "spanishContent",
+    "streamingName",
+    "subscribed",
+    "url",
+    "xmChannelNumber",
+    "xmServiceId"
+  ]
+}
+=end comment
+
+=cut
 
 sub getChannels {
     my ($class, $client, $cb) = @_;
@@ -51,6 +214,27 @@ sub getChannels {
         $cb->($cached);
         return;
     }
+    
+    # Check if we have completely processed channel data in cache
+    # This includes both proxy data and station mappings
+    my $cached_processed = $cache->get('siriusxm_processed_channels');
+    if ($cached_processed) {
+        $log->debug("Using cached processed channel data");
+        my $menu_items = $class->buildCategoryMenu($cached_processed);
+        $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+        $cb->($menu_items);
+        return;
+    }
+    
+    # Check if we're already fetching channels
+    if (exists $channel_fetch_callbacks{'in_progress'}) {
+        $log->debug("Channel fetch already in progress, queuing callback");
+        push @{$channel_fetch_callbacks{'in_progress'}}, $cb if $cb;
+        return;
+    }
+    
+    # Initialize the callback queue
+    $channel_fetch_callbacks{'in_progress'} = $cb ? [$cb] : [];
     
     my $port = $prefs->get('port') || '9999';
     my $url = "http://localhost:$port/channel/all";
@@ -72,22 +256,38 @@ sub getChannels {
             
             if ($@) {
                 $log->error("Failed to parse channel data from proxy: $@");
-                $cb->([]);
+                # Call all queued callbacks with empty result
+                for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                    $callback->([]) if $callback;
+                }
+                delete $channel_fetch_callbacks{'in_progress'};
                 return;
             }
             
             # Process and organize channels by category
-            my $categories = $class->processChannelData($channels_data);
-            
-            # Build hierarchical menu structure
-            my $menu_items = $class->buildCategoryMenu($categories);
-            
-            # Cache both the menu structure and the processed channel data separately
-            $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
-            $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
-            
-            $log->info("Retrieved and processed channels into menu structure");
-            $cb->($menu_items);
+            # First fetch station listings from xmplaylist.com for accurate mappings
+            Plugins::SiriusXM::APImetadata->fetchStationListings(sub {
+                my $station_lookup = shift || {};
+                my $categories = $class->processChannelData($channels_data, $station_lookup);
+                
+                # Cache the completely processed channel data with station mappings
+                $cache->set('siriusxm_processed_channels', $categories, CACHE_TIMEOUT);
+                
+                # Build hierarchical menu structure
+                my $menu_items = $class->buildCategoryMenu($categories);
+                
+                # Cache the menu structure
+                $cache->set('siriusxm_channels', $menu_items, CACHE_TIMEOUT);
+                $cache->set('siriusxm_channel_info', $categories, CACHE_TIMEOUT);
+                
+                $log->info("Retrieved and processed channels into menu structure");
+                
+                # Call all queued callbacks with the result
+                for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                    $callback->($menu_items) if $callback;
+                }
+                delete $channel_fetch_callbacks{'in_progress'};
+            });
         },
         sub {
             my ($http, $error) = @_;
@@ -95,8 +295,13 @@ sub getChannels {
             
             # Invalidate cache since proxy communication failed
             $cache->remove('siriusxm_channels');
+            $cache->remove('siriusxm_processed_channels');
             
-            $cb->([]);
+            # Call all queued callbacks with empty result
+            for my $callback (@{$channel_fetch_callbacks{'in_progress'} || []}) {
+                $callback->([]) if $callback;
+            }
+            delete $channel_fetch_callbacks{'in_progress'};
         },
         {
             timeout => 30,
@@ -257,10 +462,11 @@ sub normalizeChannelName {
 
 
 sub processChannelData {
-    my ($class, $raw_channels) = @_;
+    my ($class, $raw_channels, $station_lookup) = @_;
     
     return [] unless $raw_channels && ref($raw_channels) eq 'ARRAY';
     
+    $station_lookup ||= {};  # Default to empty hash if not provided
     my %categories = ();
     
     # Process channels and organize by primary category
@@ -268,7 +474,16 @@ sub processChannelData {
         next unless $channel->{channelId} && $channel->{name};
         
         my $channel_name = $channel->{name};
-        my $xmp_name = $class->normalizeChannelName($channel_name);
+        my $sirius_number = $channel->{siriusChannelNumber} || $channel->{channelNumber} || '';
+        
+        # Get xmplaylist name from station lookup if available
+        my $xmp_name;
+        if ($sirius_number && $station_lookup->{$sirius_number}) {
+            $xmp_name = $station_lookup->{$sirius_number};
+            $log->debug("Using xmplaylist deeplink for channel $sirius_number: $xmp_name");
+        } else {
+            $log->debug("No xmplaylist metadata available for channel $sirius_number ($channel_name), will use channel artwork");
+        }
 
         # Find the primary category
         my $primary_category = 'Other';  # Default fallback
@@ -353,6 +568,92 @@ sub searchChannels {
         $log->debug("Found " . scalar(@search_results) . " search results");
         $cb->(\@search_results);
     });
+}
+
+sub getChannelsSortedByNumber {
+    my ($class, $client, $cb) = @_;
+    
+    $log->debug("Getting channels sorted by channel number");
+    
+    # Check cache first for the processed data
+    my $cached_processed = $cache->get('siriusxm_processed_channels');
+    if ($cached_processed) {
+        $log->debug("Building channel list from cached processed data");
+        my $sorted_channels = $class->buildChannelNumberMenu($cached_processed);
+        $cb->($sorted_channels);
+        return;
+    }
+    
+    # Check legacy cache for backward compatibility
+    my $cached_channel_info = $cache->get('siriusxm_channel_info');
+    if ($cached_channel_info) {
+        $log->debug("Building channel list from cached data");
+        my $sorted_channels = $class->buildChannelNumberMenu($cached_channel_info);
+        $cb->($sorted_channels);
+        return;
+    }
+    
+    # If no cache, get fresh data from API
+    $class->getChannels($client, sub {
+        my $category_menu = shift;
+        
+        # Get the processed channel info from cache (which should be populated by getChannels)
+        my $channel_info = $cache->get('siriusxm_processed_channels') || $cache->get('siriusxm_channel_info');
+        if ($channel_info) {
+            my $sorted_channels = $class->buildChannelNumberMenu($channel_info);
+            $cb->($sorted_channels);
+        } else {
+            $log->error("Failed to get channel info for number sorting");
+            $cb->([]);
+        }
+    });
+}
+
+sub buildChannelNumberMenu {
+    my ($class, $categories) = @_;
+    
+    my @all_channels = ();
+    
+    # Collect all channels from all categories
+    for my $category_name (keys %$categories) {
+        my $channels_in_category = $categories->{$category_name};
+        
+        for my $channel (@$channels_in_category) {
+            # Build sxm protocol URL
+            my $stream_url = "sxm:" . $channel->{id};
+            
+            # Format channel name: "Channel Name (siriusChannelNumber)"
+            my $display_name = $channel->{name};
+            if ($channel->{number}) {
+                $display_name .= " (" . $channel->{number} . ")";
+            }
+            
+            push @all_channels, {
+                name => $display_name,
+                type => 'audio',
+                url  => $stream_url,
+                icon => $channel->{logo} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
+                on_select => 'play',
+                description => $channel->{description},
+                channel_number => $channel->{number},
+                sort_key => $channel->{number} || 9999, # For sorting
+            };
+        }
+    }
+    
+    # Sort all channels by channel number
+    my @sorted_channels = sort {
+        my $a_num = $a->{sort_key};
+        my $b_num = $b->{sort_key};
+        $a_num <=> $b_num;
+    } @all_channels;
+    
+    # Remove the sort_key as it's no longer needed
+    for my $channel (@sorted_channels) {
+        delete $channel->{sort_key};
+    }
+    
+    return \@sorted_channels;
 }
 
 1;

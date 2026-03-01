@@ -11,6 +11,7 @@ use Slim::Utils::Misc;
 use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
+use Slim::Player::Playlist;
 use JSON::XS;
 use Data::Dumper;
 use Date::Parse;
@@ -26,6 +27,9 @@ use constant METADATA_UPDATE_INTERVAL => 25;
 
 # Global hash to track player metadata timers and states
 my %playerStates = ();
+
+# Global hash to track metadata by channel ID
+my %channelMetadata = ();
 
 sub new {
     my $class = shift;
@@ -100,6 +104,9 @@ sub cleanupPlayerEvents {
     
     # Clear all player states - Pretty sure we don't want to do this, there may be multiple players.
     #%playerStates = ();
+    
+    # Clear channel metadata cache
+    %channelMetadata = ();
 }
 
 # Player event callback handler
@@ -107,18 +114,33 @@ sub onPlayerEvent {
     my $request = shift;
     my $client = $request->client() || return;
     my $command = $request->getRequest(0) || return;
-    
+    my $subcommand = $request->getRequest(1) || '';
+     
     return unless $client;
     
     my $clientId = $client->id();
     my $song = $client->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
-    
+ 
+    my $port = $prefs->get('port');
+   
     # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
-    return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:\d+/[\w-]+\.m3u8$};
-    
-    $log->debug("Player event '$command' for client $clientId, URL: $url");
-    
+    return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$};
+
+    $log->debug("Player event '$command:$subcommand' for client $clientId, URL:$url" );
+#    $log->debug(Dumper($request));
+
+    if ($song) {
+        my $handler = $song->currentTrackHandler();
+        if ($handler ne qw(Plugins::SiriusXM::ProtocolHandler) ) {
+            if ( $url =~ m{^http://localhost:$port\b/([\w-]+)\.m3u8$} ) {
+                $log->debug("Current Track Handler: $handler overriding to SXM");
+                my $newurl = "sxm:" . $1;
+                $song->currentTrack()->url($newurl);
+                $song->_currentTrackHandler(Slim::Player::ProtocolHandlers->handlerForURL( $newurl ));
+            }
+        }
+    }
     if ($command eq 'play') {
         _startMetadataTimer($client, $url);
     } elsif ($command eq 'pause' || $command eq 'stop') {
@@ -286,7 +308,7 @@ sub _updateClientMetadata {
     my $state = $playerStates{$clientId};
     
     return unless $state;
-    
+
     my $new_meta = $result->{metadata};
     my $next = $result->{next};
     my $metadata_is_fresh = $result->{is_fresh};
@@ -312,8 +334,19 @@ sub _updateClientMetadata {
                   ($new_meta->{artist} || 'Unknown Artist'));
         
         my $song = $client->playingSong();
+
         if ($song) {
-            # Update song metadata
+            # Extract channel ID from current playing URL
+            my $currentUrl = $song->currentTrack()->url();
+            my $channel_id = __PACKAGE__->_extractChannelIdFromUrl($currentUrl);
+            
+            if ($channel_id) {
+                # Store metadata in global channel cache (primary storage)
+                $channelMetadata{$channel_id} = $new_meta;
+                $log->debug("Stored metadata for channel $channel_id in global cache");
+            }
+            
+            # Update song metadata for backward compatibility
             $song->pluginData('xmplaylist_meta', $new_meta);
             
             # Notify clients of metadata update
@@ -328,7 +361,7 @@ sub getFormatForURL {
     my ($class, $url) = @_;
     
     # For sxm: URLs, we'll stream as HTTP since we convert to HTTP proxy URLs
-    return 'mp3';  # Default format, actual format determined by proxy
+    return 'm3u8';  # Default format, actual format determined by proxy
 }
 
 sub scanUrl {
@@ -363,7 +396,9 @@ sub getNextTrack {
         $song->currentTrack()->url($httpUrl);
         
         $log->debug("Converted sxm URL to HTTP URL: $httpUrl");
-        
+
+        Slim::Player::Playlist::refreshPlaylist($client);
+    
         $successCb->();
     } else {
         $errorCb->('Failed to convert sxm URL to HTTP URL');
@@ -444,55 +479,73 @@ sub getChannelInfoFromUrl {
 # Provide metadata for the stream
 sub getMetadataFor {
     my ($class, $client, $url, undef, $song) = @_;
-    
-    my $song ||= $client->playingSong();
+
+    $song ||= $client->playingSong();
     return {} unless $song;
 
-    my $channel_info;
-    if ($song) {
-        $channel_info = $song->pluginData('channel_info');
-    }
+    # Extract channel ID from the requested URL
+    my $channel_id = $class->_extractChannelIdFromUrl($url);
+    return {} unless $channel_id;
 
-    my $xmplaylist_meta;
+    # Get basic channel info
+    my $channel_info = $class->getChannelInfoFromUrl($url);
+    return {} unless $channel_info;
+
+    # Check if this URL/channel is currently being played by this client
+    my $currentSong = $client->playingSong();
+    my $isCurrentTrack = 0;
     
-    # Only use external metadata sources if metadata is enabled
-    if ($prefs->get('enable_metadata') && $song) {
-        $xmplaylist_meta = $song->pluginData('xmplaylist_meta');
+    if ($currentSong) {
+        my $currentUrl = $currentSong->currentTrack()->url();
+        my $currentChannelId = $class->_extractChannelIdFromUrl($currentUrl);
+        $isCurrentTrack = ($currentChannelId && $currentChannelId eq $channel_id);
     }
 
-    # If no channel info in song data, try to extract from URL
-    if (!$channel_info) {
-        $channel_info = $class->getChannelInfoFromUrl($url);
-    }
+    my $meta = {};
 
-#    my $meta = $class->SUPER::getMetadataFor($client, $url, $forceCurrent) || {};
-    my $meta;    
-
-    # Use xmplaylist metadata if available and metadata is enabled, otherwise fall back to basic info
-    if ($prefs->get('enable_metadata') && $xmplaylist_meta && keys %$xmplaylist_meta) {
-        # Use enhanced metadata from xmplaylist.com
-        $meta->{title} = $xmplaylist_meta->{title} if $xmplaylist_meta->{title};
-        $meta->{artist} = $xmplaylist_meta->{artist} if $xmplaylist_meta->{artist};
-        $meta->{cover} = $xmplaylist_meta->{cover} if $xmplaylist_meta->{cover};
-        $meta->{icon} = $xmplaylist_meta->{icon} if $xmplaylist_meta->{icon};
-        $meta->{album} = $xmplaylist_meta->{album} if $xmplaylist_meta->{album};
-        $meta->{bitrate} = '';
+    # Only use external metadata (xmplaylist) for the currently playing track
+    if ($isCurrentTrack && $prefs->get('enable_metadata')) {
+        # Check for cached channel metadata first
+        my $cached_meta = $channelMetadata{$channel_id};
         
-#       Really noisy log message when using a LMS web.
-#        $log->debug("Using xmplaylist metadata: " . ($meta->{title} || 'Unknown') . 
-#                  " by " . ($meta->{artist} || 'Unknown Artist'));
-    } elsif ($channel_info) {
-        # Fall back to basic channel info when metadata is enabled
+        # If no cached metadata, try song pluginData for backward compatibility
+        if (!$cached_meta || !keys %$cached_meta) {
+            $cached_meta = $song->pluginData('xmplaylist_meta');
+        }
+        
+        # Use rich metadata if available
+        if ($cached_meta && keys %$cached_meta) {
+            $meta->{title} = $cached_meta->{title} if $cached_meta->{title};
+            $meta->{artist} = $cached_meta->{artist} if $cached_meta->{artist};
+            $meta->{cover} = $cached_meta->{cover} if $cached_meta->{cover};
+            $meta->{icon} = $cached_meta->{icon} if $cached_meta->{icon};
+            $meta->{album} = $cached_meta->{album} if $cached_meta->{album};
+            $meta->{bitrate} = '';
+            
+#            $log->debug("Using rich metadata for current track channel $channel_id: " . ($meta->{title} || 'Unknown'));
+        } else {
+            # Fall back to basic channel info for current track
+            $meta->{artist} = $channel_info->{name};
+            $meta->{title} = $channel_info->{description} || '';
+            $meta->{icon} = $channel_info->{icon};
+            $meta->{cover} = $channel_info->{icon};
+            $meta->{album} = 'SiriusXM';
+            $meta->{bitrate} = '';
+            
+#            $log->debug("Using basic channel info for current track channel $channel_id");
+        }
+    } else {
+        # For non-current tracks, only return basic channel artwork and info
         $meta->{artist} = $channel_info->{name};
         $meta->{title} = $channel_info->{description} || '';
         $meta->{icon} = $channel_info->{icon};
         $meta->{cover} = $channel_info->{icon};
         $meta->{album} = 'SiriusXM';
         $meta->{bitrate} = '';
+        
+#        $log->debug("Using channel artwork for non-current track channel $channel_id");
     }
 
-#    $meta->{channel_info} = $channel_info if $channel_info;
-#    $log->debug(Dumper($meta));
     return $meta;
 }
 
@@ -501,7 +554,7 @@ sub _clearPlayerStatesForDifferentChannel {
     my ($class, $client, $newUrl) = @_;
     my $clientId = $client->id();
 
-    return unless $client, $newUrl, $clientId;
+    return unless $client && $newUrl && $clientId;
 
     # Extract channel ID from the new URL
     my $newChannelId = $class->_extractChannelIdFromUrl($newUrl);
@@ -542,8 +595,10 @@ sub _extractChannelIdFromUrl {
         return $1;
     }
 
+    my $port = $prefs->get('port');
+
     # Handle converted HTTP URLs
-    if ($url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+    if ($url =~ m{^http://localhost:$port\b/([\w-]+)\.m3u8$}) {
         return $1;
     }
 
