@@ -1139,10 +1139,13 @@ sub post_request {
 sub login {
     my ($self, $channel_id) = @_;
     
-    # Login always uses the global jar (channel_id=undef) so that SXMDATA and
-    # SXMAKTOKEN land exclusively in the global jar, not in a channel jar.
+    # Login is made with the channel context so that the Cookie: header carries
+    # any session cookies already in the channel jar (e.g. incapsula affinity
+    # cookies).  The SiriusXM server returns SXMAKTOKEN only when those session
+    # cookies are present.  route_response_cookies() then puts SXMDATA and
+    # SXMAKTOKEN into the global jar and any session cookies into the channel jar.
     my $context = $channel_id ? "channel $channel_id" : "global";
-    main::log_debug("Attempting to login user: $self->{username} (auth cookies → global jar)");
+    main::log_debug("Attempting to login user: $self->{username} ($context)");
     
     my $postdata = {
         moduleList => {
@@ -1170,9 +1173,10 @@ sub login {
         },
     };
     
-    # Always post login through the global jar (channel_id=undef) so that
-    # SXMDATA/SXMAKTOKEN are stored only in the global jar.
-    my $data = $self->post_request('modify/authentication', $postdata, 0, undef);
+    # Pass channel_id so make_channel_request() composes the Cookie: header with
+    # both global auth cookies and channel session cookies.  route_response_cookies()
+    # ensures SXMDATA/SXMAKTOKEN from the response land in the global jar.
+    my $data = $self->post_request('modify/authentication', $postdata, 0, $channel_id);
     return 0 unless $data;
     
     main::log_trace("Login response received, checking status");
@@ -1194,8 +1198,8 @@ sub login {
     }
     
     if ($success) {
-        # Analyze cookies after successful login (global jar for auth cookies)
-        $self->analyze_cookies(undef, undef);
+        # Analyze cookies after successful login
+        $self->analyze_cookies(undef, $channel_id);
         return 1;
     }
     
