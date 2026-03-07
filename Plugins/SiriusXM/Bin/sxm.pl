@@ -432,6 +432,13 @@ sub new {
         # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
         jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
 
+        # Last known SXMAKTOKEN value.  The SiriusXM server issues this cookie
+        # only once (at initial account setup) and does not re-issue it in
+        # routine login/authenticate responses.  We cache it here so that
+        # clear_all_cookies() or HTTP::Cookies dropping the expired entry does
+        # not permanently destroy the only copy we have.
+        sxmaktoken_cache      => undef,
+
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
         cookiefile => $cookiefile,
@@ -573,8 +580,13 @@ sub should_renew_cookies {
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         
-        # Check authentication cookies
-        if (($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') && $expires) {
+        # Only check SXMDATA for renewal.  The SiriusXM server does NOT return a
+        # fresh SXMAKTOKEN in routine login/authenticate responses, so triggering
+        # renewal when SXMAKTOKEN is near expiry causes a login-failure feedback
+        # loop: login() is called, the server responds with status=1 but without
+        # a new SXMAKTOKEN, the near-expiry flag remains set, is_logged_in()
+        # still returns false, and login() falsely reports failure.
+        if ($key eq 'SXMDATA' && $expires) {
             my $remaining = $expires - $now;
             
             if ($remaining > 0 && $remaining < $renewal_threshold) {
@@ -1186,11 +1198,24 @@ sub login {
         my $status = $data->{ModuleListResponse}->{status};
         main::log_trace("Login response status: $status");
         
-        if ($status == 1 && $self->is_logged_in()) {
+        # Verify success by checking SXMDATA is present and not expired.
+        # Do NOT call is_logged_in() here: that method calls should_renew_cookies()
+        # which can return true when SXMAKTOKEN is approaching expiry.  Because
+        # the server does not return a fresh SXMAKTOKEN, calling is_logged_in()
+        # inside login() creates a feedback loop where login falsely reports
+        # failure even though the server responded with status=1.
+        my $sxmdata_valid = 0;
+        my $now_t = time();
+        $self->{ua}->cookie_jar->scan(sub {
+            my ($v, $k, $val, $p, $d, $port, $ps, $sec, $expires) = @_;
+            $sxmdata_valid = 1 if $k eq 'SXMDATA' && (!$expires || $expires > $now_t);
+        });
+        
+        if ($status == 1 && $sxmdata_valid) {
             main::log_info("Login successful for user: $self->{username}");
             $success = 1;
         } else {
-            main::log_trace("Login failed - status: $status, is_logged_in: " . ($self->is_logged_in() ? "true" : "false"));
+            main::log_trace("Login failed - status: $status, sxmdata valid: " . ($sxmdata_valid ? "true" : "false"));
         }
     };
     if ($@) {
@@ -1299,6 +1324,19 @@ sub get_sxmak_token {
             }
         }
     });
+    
+    if ($token) {
+        # Keep the in-process cache current so we have a fallback if the cookie
+        # is later dropped (e.g. it expires and HTTP::Cookies stops returning it
+        # via scan(), or clear_all_cookies() is called).
+        $self->{sxmaktoken_cache} = $token;
+    } elsif ($self->{sxmaktoken_cache}) {
+        # The SiriusXM server does not re-issue SXMAKTOKEN in routine
+        # login/authenticate responses, so once the cookie is gone we fall back
+        # to the last known value.  The server typically still accepts it.
+        $token = $self->{sxmaktoken_cache};
+        main::log_debug("SXMAK token: using cached value (cookie expired or missing from jar)");
+    }
     
     main::log_trace("SXMAK token (global jar): " . ($token ? "found" : "not found"));
     return $token;
