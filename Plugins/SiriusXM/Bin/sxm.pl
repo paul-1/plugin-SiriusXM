@@ -395,8 +395,10 @@ use constant {
 #   Auth cookies  – tied to the user's login; stored ONLY in the global cookie jar.
 #   Session cookies – short-lived server-affinity cookies; stored ONLY in per-channel
 #                     in-memory jars (or the global jar when no channel is specified).
-my %AUTH_COOKIE_NAMES    = map { $_ => 1 } qw(SXMDATA SXMAKTOKEN);
-my %SESSION_COOKIE_NAMES = map { $_ => 1 } qw(AWSALB JSESSIONID AWSALBCORS);
+my %AUTH_COOKIE_NAMES    = map { $_ => 1 } qw(SXMDATA);
+# SXMAKTOKEN is listed here even though it lives in the per-channel jar so that
+# it is included in the debug routing log alongside AWSALB/JSESSIONID.
+my %SESSION_COOKIE_NAMES = map { $_ => 1 } qw(AWSALB JSESSIONID AWSALBCORS SXMAKTOKEN);
 
 sub is_auth_cookie    { return exists $AUTH_COOKIE_NAMES{$_[0]}    }
 sub is_session_cookie { return exists $SESSION_COOKIE_NAMES{$_[0]} }
@@ -432,12 +434,12 @@ sub new {
         # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
         jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
 
-        # Last known SXMAKTOKEN value.  The SiriusXM server issues this cookie
-        # only once (at initial account setup) and does not re-issue it in
-        # routine login/authenticate responses.  We cache it here so that
-        # clear_all_cookies() or HTTP::Cookies dropping the expired entry does
-        # not permanently destroy the only copy we have.
-        sxmaktoken_cache      => undef,
+        # Per-channel SXMAKTOKEN cache.  SXMAKTOKEN is a per-session token issued by
+        # the server during authenticate().  It is stored in the per-channel jar, not
+        # the global jar, so that concurrent channels each keep their own copy.
+        # This cache holds the last-seen value per channel so it survives
+        # clear_all_cookies() or the cookie expiring inside HTTP::Cookies.
+        sxmaktoken_cache      => {},
 
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -498,9 +500,9 @@ sub new {
 }
 
 # Analyze and log cookie expiration information.
-# Auth cookies (SXMDATA, SXMAKTOKEN) are always read from the global jar.
-# Session cookies (AWSALB, JSESSIONID) are read from the channel jar when channel_id
-# is provided, or from the global jar when channel_id is undef.
+# Auth cookies (SXMDATA) are always read from the global jar.
+# Session cookies (AWSALB, JSESSIONID, SXMAKTOKEN) are read from the channel jar when
+# channel_id is provided, or from the global jar when channel_id is undef.
 # The legacy $cookies positional parameter is accepted but ignored.
 sub analyze_cookies {
     my ($self, $cookies, $channel_id) = @_;
@@ -540,7 +542,7 @@ sub analyze_cookies {
         }
     };
 
-    # Check global jar for auth cookies
+    # Check global jar for auth cookies (SXMDATA only)
     my $global_jar = $self->{ua}->cookie_jar;
     $global_jar->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
@@ -564,7 +566,7 @@ sub analyze_cookies {
 }
 
 # Check if auth cookies need renewal (before they expire).
-# Auth cookies (SXMDATA, SXMAKTOKEN) live only in the global jar.
+# Auth cookies (SXMDATA) live only in the global jar.
 sub should_renew_cookies {
     my ($self, $channel_id) = @_;
     
@@ -611,9 +613,8 @@ sub copy_auth_cookies_to_channel {
 }
 
 # Get or create an in-memory session cookie jar for a specific channel.
-# Channel jars hold only session/affinity cookies (AWSALB, JSESSIONID, etc.).
-# Auth cookies (SXMDATA, SXMAKTOKEN) live exclusively in the global jar tied to
-# the UA and are never stored in channel jars.
+# Channel jars hold session/affinity cookies (AWSALB, JSESSIONID, SXMAKTOKEN, etc.).
+# The global auth cookie (SXMDATA) lives exclusively in the global jar.
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
     
@@ -886,15 +887,15 @@ sub is_session_authenticated {
 #-----------------------------------------------------------------------------
 
 # Compose a merged Cookie: header string for a channel request.
-# Always includes global auth cookies (SXMDATA, SXMAKTOKEN).
+# Always includes SXMDATA from the global auth jar.
 # When channel_id is defined, also includes that channel's session cookies
-# (AWSALB, JSESSIONID, etc.) from the in-memory channel jar.
+# (AWSALB, JSESSIONID, SXMAKTOKEN, etc.) from the in-memory channel jar.
 sub compose_cookie_header {
     my ($self, $channel_id) = @_;
 
     my %cookies;
 
-    # Pull auth cookies from the global jar
+    # Pull auth cookies (SXMDATA) from the global jar
     my $global_jar = $self->{ua}->cookie_jar;
     $global_jar->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
@@ -926,8 +927,9 @@ sub compose_cookie_header {
 
 # Route Set-Cookie headers from $response to the correct cookie jar.
 #   channel_id undef  → all cookies go to the global jar (normal LWP behaviour).
-#   channel_id defined → auth cookies (SXMDATA, SXMAKTOKEN) go to global jar;
-#                        everything else goes to the channel in-memory jar.
+#   channel_id defined → SXMDATA goes to global jar;
+#                        everything else (SXMAKTOKEN, AWSALB, JSESSIONID, incapsula, …)
+#                        goes to the channel in-memory jar.
 # Cookie values are never logged.
 sub route_response_cookies {
     my ($self, $response, $channel_id) = @_;
@@ -1154,8 +1156,8 @@ sub login {
     # Login is made with the channel context so that the Cookie: header carries
     # any session cookies already in the channel jar (e.g. incapsula affinity
     # cookies).  The SiriusXM server returns SXMAKTOKEN only when those session
-    # cookies are present.  route_response_cookies() then puts SXMDATA and
-    # SXMAKTOKEN into the global jar and any session cookies into the channel jar.
+    # cookies are present.  route_response_cookies() then puts SXMDATA into
+    # the global jar and SXMAKTOKEN + session cookies into the channel jar.
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_debug("Attempting to login user: $self->{username} ($context)");
     
@@ -1186,8 +1188,8 @@ sub login {
     };
     
     # Pass channel_id so make_channel_request() composes the Cookie: header with
-    # both global auth cookies and channel session cookies.  route_response_cookies()
-    # ensures SXMDATA/SXMAKTOKEN from the response land in the global jar.
+    # SXMDATA (global) and channel session cookies.  route_response_cookies()
+    # ensures SXMDATA lands in the global jar and SXMAKTOKEN in the channel jar.
     my $data = $self->post_request('modify/authentication', $postdata, 0, $channel_id);
     return 0 unless $data;
     
@@ -1266,8 +1268,9 @@ sub authenticate {
     };
     
     # post_request will route the response cookies via route_response_cookies():
-    # - SXMDATA/SXMAKTOKEN → global jar
-    # - AWSALB/JSESSIONID  → channel jar (or global jar when channel_id is undef)
+    # - SXMDATA          → global jar
+    # - SXMAKTOKEN       → channel jar
+    # - AWSALB/JSESSIONID → channel jar (or global jar when channel_id is undef)
     my $data = $self->post_request('resume?OAtrial=false', $postdata, 0, $channel_id);
     return 0 unless $data;
     
@@ -1312,10 +1315,15 @@ sub authenticate {
 sub get_sxmak_token {
     my ($self, $channel_id) = @_;
     
-    # SXMAKTOKEN is an auth cookie; it lives exclusively in the global jar.
-    my $cookies = $self->{ua}->cookie_jar;
+    # SXMAKTOKEN is a per-session/per-channel token.  Each call to authenticate()
+    # receives a fresh one from the server and it is stored in the channel's
+    # in-memory jar so that concurrent channels each keep their own independent copy.
+    my $jar = $channel_id
+        ? $self->get_channel_cookie_jar($channel_id)
+        : $self->{ua}->cookie_jar;
+
     my $token;
-    $cookies->scan(sub {
+    $jar->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         if ($key eq 'SXMAKTOKEN') {
             # Parse token value: token=value,other_data
@@ -1325,20 +1333,22 @@ sub get_sxmak_token {
         }
     });
     
+    my $cache_key = $channel_id // '__global__';
     if ($token) {
-        # Keep the in-process cache current so we have a fallback if the cookie
-        # is later dropped (e.g. it expires and HTTP::Cookies stops returning it
-        # via scan(), or clear_all_cookies() is called).
-        $self->{sxmaktoken_cache} = $token;
-    } elsif ($self->{sxmaktoken_cache}) {
-        # The SiriusXM server does not re-issue SXMAKTOKEN in routine
-        # login/authenticate responses, so once the cookie is gone we fall back
-        # to the last known value.  The server typically still accepts it.
-        $token = $self->{sxmaktoken_cache};
-        main::log_debug("SXMAK token: using cached value (cookie expired or missing from jar)");
+        # Keep the per-channel cache current so we survive clear_all_cookies().
+        $self->{sxmaktoken_cache}{$cache_key} = $token;
+    } elsif (exists $self->{sxmaktoken_cache}{$cache_key}) {
+        # The server does not re-issue SXMAKTOKEN in every authenticate response.
+        # Fall back to the last known value for this channel – the server typically
+        # still accepts it.
+        $token = $self->{sxmaktoken_cache}{$cache_key};
+        main::log_debug("SXMAK token: using cached value for " .
+                        ($channel_id ? "channel $channel_id" : "global") .
+                        " (cookie missing from jar)");
     }
     
-    main::log_trace("SXMAK token (global jar): " . ($token ? "found" : "not found"));
+    my $context = $channel_id ? "channel $channel_id" : "global";
+    main::log_trace("SXMAK token ($context): " . ($token ? "found" : "not found"));
     return $token;
 }
 
