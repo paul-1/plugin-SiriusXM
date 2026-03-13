@@ -463,6 +463,21 @@ sub new {
                 $cookie_jar->load();
                 main::log_info("Loaded cookies from: $cookiefile");
                 
+                # SXMAKTOKEN is now per-channel only.  Any copy left in the global
+                # jar is stale data written by an older version.  Remove it so that
+                # the cookie file stays clean going forward.
+                my @sxmaktoken_entries;
+                $cookie_jar->scan(sub {
+                    my ($version, $key, $val, $path, $domain) = @_;
+                    push @sxmaktoken_entries, [$domain, $path, $key] if $key eq 'SXMAKTOKEN';
+                });
+                if (@sxmaktoken_entries) {
+                    $cookie_jar->clear(@$_) for @sxmaktoken_entries;
+                    $cookie_jar->save();
+                    main::log_debug("Removed " . scalar(@sxmaktoken_entries) .
+                                    " stale SXMAKTOKEN entry(s) from global cookie file");
+                }
+
                 # Analyze and log cookie information
                 $self->analyze_cookies($cookie_jar, undef);
             };
@@ -551,12 +566,16 @@ sub analyze_cookies {
         }
     });
 
-    # Check appropriate jar for session cookies
+    # Check appropriate jar for session cookies.
+    # SXMAKTOKEN is per-channel only — skip it in the global context because any
+    # entry there is stale data from before the per-channel migration and will
+    # never be refreshed at the global level.
     my $session_jar = $channel_id
         ? $self->get_channel_cookie_jar($channel_id)
         : $global_jar;
     $session_jar->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        return if !$channel_id && $key eq 'SXMAKTOKEN';
         if (is_session_cookie($key)) {
             $log_cookie->($key, $expires, $discard);
         }
