@@ -1738,7 +1738,11 @@ sub get_playlist {
     
     if ($response->code == 403 || $response->code == 500) {
         my $status_code = $response->code;
-        main::log_warn("Received status code $status_code on playlist for channel: $channel_id, renewing session");
+        my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
+        # Count toward server failover (same as get_segment does)
+        $self->record_channel_failure($channel_id, $error_msg);
+
+        main::log_warn("$error_msg, renewing session");
         
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
@@ -1762,9 +1766,13 @@ sub get_playlist {
     }
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on playlist variant");
+        my $error_msg = "Received status code " . $response->code . " on playlist variant";
+        main::log_error($error_msg);
+        $self->record_channel_failure($channel_id, $error_msg);
         return undef;
     }
+
+    $self->record_channel_success($channel_id);
     
     my $content = $response->decoded_content;
     
