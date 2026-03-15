@@ -1731,13 +1731,14 @@ sub get_playlist {
     my $response = $self->make_channel_request($request, $channel_id);
     
     if ($response->code == 403 || $response->code == 500) {
-        main::log_warn("Received status code " . $response->code . " on playlist for channel: $channel_id, renewing session");
+        my $status_code = $response->code;
+        main::log_warn("Received status code $status_code on playlist for channel: $channel_id, renewing session");
         
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
-        } else {
-            # If re-authentication failed, clear all cookies (auth issue is likely global)
+        } elsif ($status_code == 403) {
+            # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
             main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
             $self->clear_all_cookies();
             if ($self->authenticate($channel_id)) {
@@ -1746,6 +1747,11 @@ sub get_playlist {
                 main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
                 return undef;
             }
+        } else {
+            # A 500 is a transient server/CDN error, not an auth failure.
+            # Do NOT clear cookies – the session is intact; the server is temporarily unavailable.
+            main::log_warn("Re-authentication also failed for channel $channel_id after server error ($status_code) – server may be temporarily unavailable, preserving cookies");
+            return undef;
         }
     }
     
@@ -2240,8 +2246,9 @@ sub get_segment {
     my $response = $self->make_channel_request($request, $channel_id);
     
     if ($response->code == 403 || $response->code == 500) {
+        my $status_code = $response->code;
         # Record server failure for these error codes
-        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id";
+        my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
         $self->record_channel_failure($channel_id, $error_msg);
         
         if ($max_attempts > 0) {
@@ -2252,8 +2259,8 @@ sub get_segment {
             if ($self->authenticate($channel_id)) {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
-            } else {
-                # If re-authentication failed, clear all cookies (auth issue is likely global)
+            } elsif ($status_code == 403) {
+                # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
                 main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
                 $self->clear_all_cookies();
                 main::log_trace("Attempting to authenticate for channel: $channel_id after clearing all cookies");
@@ -2264,6 +2271,11 @@ sub get_segment {
                     main::log_error("Session renewal failed for channel: $channel_id after clearing all cookies");
                     return undef;
                 }
+            } else {
+                # A 500 is a transient server/CDN error, not an auth failure.
+                # Do NOT clear cookies – the session is intact; the server is temporarily unavailable.
+                main::log_warn("Re-authentication also failed for channel $channel_id after server error ($status_code) – server may be temporarily unavailable, preserving cookies");
+                return undef;
             }
         } else {
             main::log_error("$error_msg, max attempts exceeded");
