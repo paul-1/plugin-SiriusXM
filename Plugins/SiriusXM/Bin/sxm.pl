@@ -478,8 +478,6 @@ sub new {
                                     " stale SXMAKTOKEN entry(s) from global cookie file");
                 }
 
-                # Analyze and log cookie information
-                $self->analyze_cookies($cookie_jar, undef);
             };
             if ($@) {
                 main::log_warn("Error loading cookies from $cookiefile: $@");
@@ -498,7 +496,15 @@ sub new {
         cookie_jar => $cookie_jar,
         timeout    => 30,
     );
-    
+
+    # Analyze and log cookie information now that $self->{ua} is ready.
+    if ($cookiefile && -e $cookiefile) {
+        eval { $self->analyze_cookies(undef, undef) };
+        if ($@) {
+            main::log_warn("Error analyzing cookies: $@");
+        }
+    }
+
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
 
     # Set up channel cache file path (same directory as cookie file)
