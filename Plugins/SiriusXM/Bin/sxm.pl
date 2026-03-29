@@ -246,7 +246,7 @@ sub init_logging {
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%M>:%4L: %m%n
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p %M:%4L: %m%n
         };
     }
 
