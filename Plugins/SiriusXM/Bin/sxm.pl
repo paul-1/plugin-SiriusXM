@@ -2267,12 +2267,33 @@ sub get_segment {
     my $request  = HTTP::Request->new(GET => $uri);
     my $response = $self->make_channel_request($request, $channel_id);
     
-    if ($response->code == 403 || $response->code == 500) {
+    if ($response->code == 500) {
         my $status_code = $response->code;
-        # Record server failure for these error codes
         my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
         $self->record_channel_failure($channel_id, $error_msg);
-        
+
+        if ($max_attempts > 0) {
+            # A 500 is a transient CDN/server error, not an auth failure.
+            # Just retry the request once directly – no re-authentication needed.
+            main::log_warn("$error_msg, retrying once");
+            my $retry_response = $self->make_channel_request($request, $channel_id);
+            if ($retry_response->is_success) {
+                $self->record_channel_success($channel_id);
+                $response = $retry_response;
+            } else {
+                main::log_warn("Retry also failed for channel $channel_id (status " . $retry_response->code . ") – server may be temporarily unavailable, preserving cookies");
+                $self->record_channel_failure($channel_id, "Retry status " . $retry_response->code . " on segment for channel: $channel_id");
+                return undef;
+            }
+        } else {
+            main::log_error("$error_msg, max attempts exceeded");
+            return undef;
+        }
+    } elsif ($response->code == 403) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
+
         if ($max_attempts > 0) {
             main::log_warn("$error_msg, renewing session");
             
@@ -2281,7 +2302,7 @@ sub get_segment {
             if ($self->authenticate($channel_id)) {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
-            } elsif ($status_code == 403) {
+            } else {
                 # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
                 main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
                 $self->clear_all_cookies();
@@ -2293,11 +2314,6 @@ sub get_segment {
                     main::log_error("Session renewal failed for channel: $channel_id after clearing all cookies");
                     return undef;
                 }
-            } else {
-                # A 500 is a transient server/CDN error, not an auth failure.
-                # Do NOT clear cookies – the session is intact; the server is temporarily unavailable.
-                main::log_warn("Re-authentication also failed for channel $channel_id after server error ($status_code) – server may be temporarily unavailable, preserving cookies");
-                return undef;
             }
         } else {
             main::log_error("$error_msg, max attempts exceeded");
@@ -2718,11 +2734,11 @@ sub refresh_expired_playlists {
 
             if (!$result) {
                 # Fetch failed (e.g. transient server error) — restore old cache so clients
-                # are still served during the outage, and reschedule a retry in 10 seconds
+                # are still served during the outage, and reschedule a retry in 2 seconds
                 # instead of dropping the channel from the background refresh queue.
                 $self->{playlist_cache}->{$channel_id} = $old_cache if $old_cache;
-                $self->{playlist_next_update}->{$channel_id} = time() + 10;
-                main::log_debug("Background refresh failed for channel $channel_id, retrying in 10 seconds");
+                $self->{playlist_next_update}->{$channel_id} = time() + 2;
+                main::log_debug("Background refresh failed for channel $channel_id, retrying in 2 seconds");
             }
         } else {
             main::log_warn("Could not find channel name for channel_id $channel_id in cache");
