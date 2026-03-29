@@ -1731,7 +1731,25 @@ sub get_playlist {
     my $request  = HTTP::Request->new(GET => $uri);
     my $response = $self->make_channel_request($request, $channel_id);
     
-    if ($response->code == 403 || $response->code == 500) {
+    if ($response->code == 500) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
+        # Count toward server failover (same as get_segment does)
+        $self->record_channel_failure($channel_id, $error_msg);
+
+        # A 500 is a transient CDN/server error, not an auth failure.
+        # Just retry the request once directly – no re-authentication needed.
+        main::log_warn("$error_msg, retrying once");
+        my $retry_response = $self->make_channel_request($request, $channel_id);
+        if ($retry_response->is_success) {
+            $self->record_channel_success($channel_id);
+            $response = $retry_response;
+        } else {
+            main::log_warn("Retry also failed for channel $channel_id (status " . $retry_response->code . ") – server may be temporarily unavailable, preserving cookies");
+            $self->record_channel_failure($channel_id, "Retry status " . $retry_response->code . " on playlist for channel: $channel_id");
+            return undef;
+        }
+    } elsif ($response->code == 403) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
         # Count toward server failover (same as get_segment does)
@@ -1742,7 +1760,7 @@ sub get_playlist {
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
             return $self->get_playlist($name, 0);
-        } elsif ($status_code == 403) {
+        } else {
             # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
             main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
             $self->clear_all_cookies();
@@ -1752,11 +1770,6 @@ sub get_playlist {
                 main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
                 return undef;
             }
-        } else {
-            # A 500 is a transient server/CDN error, not an auth failure.
-            # Do NOT clear cookies – the session is intact; the server is temporarily unavailable.
-            main::log_warn("Re-authentication also failed for channel $channel_id after server error ($status_code) – server may be temporarily unavailable, preserving cookies");
-            return undef;
         }
     }
     
