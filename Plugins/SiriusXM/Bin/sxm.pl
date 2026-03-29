@@ -1735,10 +1735,18 @@ sub get_playlist {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
         # Count toward server failover (same as get_segment does)
+        my $server_before = $self->get_channel_server($channel_id);
         $self->record_channel_failure($channel_id, $error_msg);
 
-        # A 500 is a transient CDN/server error, not an auth failure.
-        # Just retry the request once directly – no re-authentication needed.
+        # If recording this failure triggered a server switch, don't retry with the
+        # now-stale primary URL.  Return undef so the background refresh re-enters
+        # get_playlist_url and picks up the new server's URL on the next attempt.
+        if ($self->get_channel_server($channel_id) ne $server_before) {
+            main::log_debug("Channel $channel_id: server switched after failure, next retry will use new server URL");
+            return undef;
+        }
+
+        # Same server still – retry the request once directly, no re-authentication needed.
         main::log_warn("$error_msg, retrying once");
         my $retry_response = $self->make_channel_request($request, $channel_id);
         if ($retry_response->is_success) {
@@ -2270,7 +2278,16 @@ sub get_segment {
     if ($response->code == 500) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
+        my $server_before = $self->get_channel_server($channel_id);
         $self->record_channel_failure($channel_id, $error_msg);
+
+        # If recording this failure triggered a server switch, don't retry with the
+        # now-stale URL.  Return undef so the caller retries with a fresh URL from
+        # the new server on the next attempt.
+        if ($self->get_channel_server($channel_id) ne $server_before) {
+            main::log_debug("Channel $channel_id: server switched after failure, next retry will use new server URL");
+            return undef;
+        }
 
         if ($max_attempts > 0) {
             # A 500 is a transient CDN/server error, not an auth failure.
