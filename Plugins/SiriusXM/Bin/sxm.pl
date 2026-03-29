@@ -386,7 +386,7 @@ use constant {
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
-    SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SERVER_FAILURE_THRESHOLD => 5,  # Number of consecutive failures before switching servers
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
     CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
@@ -1734,29 +1734,9 @@ sub get_playlist {
     if ($response->code == 500) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
-        # Count toward server failover (same as get_segment does)
-        my $server_before = $self->get_channel_server($channel_id);
         $self->record_channel_failure($channel_id, $error_msg);
-
-        # If recording this failure triggered a server switch, don't retry with the
-        # now-stale primary URL.  Return undef so the background refresh re-enters
-        # get_playlist_url and picks up the new server's URL on the next attempt.
-        if ($self->get_channel_server($channel_id) ne $server_before) {
-            main::log_debug("Channel $channel_id: server switched after failure, next retry will use new server URL");
-            return undef;
-        }
-
-        # Same server still – retry the request once directly, no re-authentication needed.
-        main::log_warn("$error_msg, retrying once");
-        my $retry_response = $self->make_channel_request($request, $channel_id);
-        if ($retry_response->is_success) {
-            $self->record_channel_success($channel_id);
-            $response = $retry_response;
-        } else {
-            main::log_warn("Retry also failed for channel $channel_id (status " . $retry_response->code . ") – server may be temporarily unavailable, preserving cookies");
-            $self->record_channel_failure($channel_id, "Retry status " . $retry_response->code . " on playlist for channel: $channel_id");
-            return undef;
-        }
+        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies");
+        return undef;
     } elsif ($response->code == 403) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
@@ -2278,34 +2258,9 @@ sub get_segment {
     if ($response->code == 500) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
-        my $server_before = $self->get_channel_server($channel_id);
         $self->record_channel_failure($channel_id, $error_msg);
-
-        # If recording this failure triggered a server switch, don't retry with the
-        # now-stale URL.  Return undef so the caller retries with a fresh URL from
-        # the new server on the next attempt.
-        if ($self->get_channel_server($channel_id) ne $server_before) {
-            main::log_debug("Channel $channel_id: server switched after failure, next retry will use new server URL");
-            return undef;
-        }
-
-        if ($max_attempts > 0) {
-            # A 500 is a transient CDN/server error, not an auth failure.
-            # Just retry the request once directly – no re-authentication needed.
-            main::log_warn("$error_msg, retrying once");
-            my $retry_response = $self->make_channel_request($request, $channel_id);
-            if ($retry_response->is_success) {
-                $self->record_channel_success($channel_id);
-                $response = $retry_response;
-            } else {
-                main::log_warn("Retry also failed for channel $channel_id (status " . $retry_response->code . ") – server may be temporarily unavailable, preserving cookies");
-                $self->record_channel_failure($channel_id, "Retry status " . $retry_response->code . " on segment for channel: $channel_id");
-                return undef;
-            }
-        } else {
-            main::log_error("$error_msg, max attempts exceeded");
-            return undef;
-        }
+        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies");
+        return undef;
     } elsif ($response->code == 403) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
