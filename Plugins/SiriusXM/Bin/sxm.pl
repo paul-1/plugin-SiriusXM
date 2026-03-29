@@ -1413,11 +1413,6 @@ sub get_playlist_url {
         return $self->{playlists}->{$channel_id}->{'url'};
     }
     
-    # When starting fresh (not using cache), reset to primary server for new playback session
-    if (!$use_cache) {
-        $self->reset_channel_server($channel_id);
-    }
-    
     my $timestamp = sprintf("%.0f", time() * 1000);
     my $iso_time = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime());
     
@@ -2691,16 +2686,30 @@ sub refresh_expired_playlists {
         my $channel_name = $self->{playlist_channel_name}->{$channel_id};
         
         if ($channel_name) {
-            # Manually clear the playlist cache to avoid expiring authentication
+            # Save old playlist content so clients keep getting something if the refresh fails
+            my $old_cache = $self->{playlist_cache}->{$channel_id};
+
+            # Clear the playlist content cache so get_playlist fetches a fresh copy
             delete $self->{playlist_cache}->{$channel_id};
             delete $self->{playlist_next_update}->{$channel_id};
-            
-            # Fetch new playlist (this will update the cache and schedule next update)
+
+            # Fetch new playlist (this will update the cache and schedule next update on success)
+            my $result;
             eval {
-                $self->get_playlist($channel_name, 1);  # Use cache for auth, but we cleared playlist cache above
+                $result = $self->get_playlist($channel_name, 1);
             };
             if ($@) {
                 main::log_warn("Error refreshing playlist for channel $channel_id: $@");
+                $result = undef;
+            }
+
+            if (!$result) {
+                # Fetch failed (e.g. transient server error) — restore old cache so clients
+                # are still served during the outage, and reschedule a retry in 10 seconds
+                # instead of dropping the channel from the background refresh queue.
+                $self->{playlist_cache}->{$channel_id} = $old_cache if $old_cache;
+                $self->{playlist_next_update}->{$channel_id} = time() + 10;
+                main::log_debug("Background refresh failed for channel $channel_id, retrying in 10 seconds");
             }
         } else {
             main::log_warn("Could not find channel name for channel_id $channel_id in cache");
@@ -2804,6 +2813,9 @@ sub clear_channel_cache {
     # Clear activity tracking
     delete $self->{channel_last_activity}->{$channel_id};
     delete $self->{channel_avg_duration}->{$channel_id};
+    
+    # Reset server selection so the next new session tries primary again
+    $self->reset_channel_server($channel_id);
     
     main::log_debug("Cleared playlist, segment cache, and activity data for channel $channel_id");
 }
