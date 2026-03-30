@@ -387,6 +387,9 @@ use constant {
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
     SERVER_FAILURE_THRESHOLD => 5,  # Number of consecutive failures before switching servers
+    MAX_HOLD_COUNT          => 3,   # Consecutive no-new-segment fetches before treating as server failure
+                                    # (3 × EXTINF/2 ≈ 15 s without new content per event;
+                                    #  5 such events → SERVER_FAILURE_THRESHOLD → server switch)
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
     CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
@@ -420,6 +423,7 @@ sub new {
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
         playlist_next_update => {}, # Track next scheduled update time per channel_id
+        playlist_hold_count  => {}, # Consecutive no-new-segment fetches per channel (FFmpeg m3u8_hold_counters analog)
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
         
@@ -1836,12 +1840,24 @@ sub get_playlist {
     $self->{playlist_next_update}->{$channel_id} = $next_update;
 
     if ($new_segment_count > 0) {
+        # New content arrived — reset the hold counter and the CDN failure counter
+        $self->{playlist_hold_count}->{$channel_id} = 0;
         my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
         main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                               $channel_id, $delay, $update_time, $new_segment_count));
     } else {
-        main::log_debug(sprintf("No new segments for channel %s, scheduling refresh in %.1f seconds (EXTINF/2)",
-                               $channel_id, $delay));
+        # No new content yet — increment the hold counter.
+        # Every MAX_HOLD_COUNT consecutive misses, escalate to record_channel_failure so
+        # the server-failover logic can eventually switch to the secondary CDN.
+        my $hold_count = ++$self->{playlist_hold_count}->{$channel_id};
+        if ($hold_count >= MAX_HOLD_COUNT) {
+            $self->record_channel_failure($channel_id,
+                sprintf("Playlist stalled: %d consecutive fetches with no new segments (%.0fs without new content)",
+                        $hold_count, $hold_count * $delay));
+            $self->{playlist_hold_count}->{$channel_id} = 0;  # reset so we escalate again after the next MAX_HOLD_COUNT misses
+        }
+        main::log_debug(sprintf("No new segments for channel %s, scheduling refresh in %.1f seconds (EXTINF/2, hold_count=%d)",
+                               $channel_id, $delay, $hold_count));
     }
     
     return $content;
@@ -2828,6 +2844,7 @@ sub clear_channel_cache {
     # Clear activity tracking
     delete $self->{channel_last_activity}->{$channel_id};
     delete $self->{channel_avg_duration}->{$channel_id};
+    delete $self->{playlist_hold_count}->{$channel_id};
     
     # Reset server selection so the next new session tries primary again
     $self->reset_channel_server($channel_id);
