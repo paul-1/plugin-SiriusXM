@@ -1829,22 +1829,19 @@ sub get_playlist {
         main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full playlist)");
     }
 
-    # Schedule next playlist update based on new segment count
-    # Use the count saved BEFORE any caching started
+    # Schedule next playlist update using FFmpeg's refresh heuristic
+    # (new segment → EXTINF, no new segment → EXTINF/2)
+    my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
+    my $next_update = time() + $delay;
+    $self->{playlist_next_update}->{$channel_id} = $next_update;
+
     if ($new_segment_count > 0) {
-        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        
         my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
         main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                               $channel_id, $delay, $update_time, $new_segment_count));
     } else {
-        # No new segments, schedule a default update in 6 seconds
-        my $delay = 6;
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+        main::log_debug(sprintf("No new segments for channel %s, scheduling refresh in %.1f seconds (EXTINF/2)",
+                               $channel_id, $delay));
     }
     
     return $content;
@@ -1978,25 +1975,24 @@ sub calculate_playlist_update_delay {
     # Store the EXTINF duration for this channel for idle timeout checking
     $self->{channel_avg_duration}->{$channel_id} = $extinf_duration;
     
-    # Adaptive backoff strategy:
-    # - Start with EXTINF duration as base
-    # - If 1 new segments: use EXTINF-1 duration
-    # - If >1 new segment: backoff by 1.6xEXTINF
-
-    my $delay;
-    if ($new_segment_count == 1) {
-        $delay = $extinf_duration - 1;
+    # Match FFmpeg's HLS live-stream refresh heuristic:
+    # - New segment(s) found  → refresh after one full EXTINF interval
+    # - No new segment found  → refresh after half an EXTINF interval (poll faster)
+    my ($delay, $strategy);
+    if ($new_segment_count > 0) {
+        $delay    = $extinf_duration;
+        $strategy = "EXTINF";
     } else {
-        $delay = $extinf_duration * 1.6;
+        $delay    = $extinf_duration / 2.0;
+        $strategy = "EXTINF/2";
     }
-    
-    # Ensure delay is at least 5 seconds and at most 30 seconds
-    $delay = 5 if $delay < 5;
+
+    # Clamp to a sensible range
+    $delay = 2  if $delay < 2;
     $delay = 30 if $delay > 30;
-    
-    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
-                           $delay, $extinf_duration, $new_segment_count, 
-                           $new_segment_count == 1 ? "EXTINF" : "backup 1.6"));
+
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)",
+                           $delay, $extinf_duration, $new_segment_count, $strategy));
     
     return $delay;
 }
