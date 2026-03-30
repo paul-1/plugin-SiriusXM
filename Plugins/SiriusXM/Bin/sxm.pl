@@ -1698,8 +1698,20 @@ sub get_playlist {
         }
     }
     
+    # Capture any stale cached content so we can serve it as a fallback if the
+    # fresh fetch fails (transient CDN/server error).  Only applies to client-driven
+    # requests (use_cache=1); background-refresh calls (use_cache=0) are fine to
+    # return undef so the scheduler retries.
+    my $stale_cache = ($caching_enabled && $use_cache &&
+                       exists $self->{playlist_cache}->{$channel_id})
+                      ? $self->{playlist_cache}->{$channel_id} : undef;
+
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
-    return undef unless $url;
+    unless ($url) {
+        main::log_warn("Could not get playlist URL for channel $channel_id" .
+                       ($stale_cache ? ", serving stale playlist" : ""));
+        return $stale_cache;
+    }
     
     # Auth tokens come from the global jar; no set_channel_context needed
     my $token = $self->get_sxmak_token($channel_id);
@@ -1716,7 +1728,11 @@ sub get_playlist {
         }
     }
     
-    return undef unless $token && $gup_id;
+    unless ($token && $gup_id) {
+        main::log_warn("Still missing token or gup_id for channel $channel_id" .
+                       ($stale_cache ? ", serving stale playlist" : ""));
+        return $stale_cache;
+    }
     
     my $uri = URI->new($url);
     $uri->query_form(
@@ -1735,8 +1751,9 @@ sub get_playlist {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
         $self->record_channel_failure($channel_id, $error_msg);
-        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies");
-        return undef;
+        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies" .
+                       ($stale_cache ? "; serving stale playlist to client" : ""));
+        return $stale_cache;
     } elsif ($response->code == 403) {
         my $status_code = $response->code;
         my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
@@ -1747,25 +1764,26 @@ sub get_playlist {
         
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
-            return $self->get_playlist($name, 0);
+            return $self->get_playlist($name, 0) // $stale_cache;
         } else {
             # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
             main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
             $self->clear_all_cookies();
             if ($self->authenticate($channel_id)) {
-                return $self->get_playlist($name, 0);
+                return $self->get_playlist($name, 0) // $stale_cache;
             } else {
-                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
-                return undef;
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies" .
+                                ($stale_cache ? "; serving stale playlist to client" : ""));
+                return $stale_cache;
             }
         }
     }
     
     if (!$response->is_success) {
         my $error_msg = "Received status code " . $response->code . " on playlist variant";
-        main::log_error($error_msg);
+        main::log_error($error_msg . ($stale_cache ? "; serving stale playlist to client" : ""));
         $self->record_channel_failure($channel_id, $error_msg);
-        return undef;
+        return $stale_cache;
     }
 
     $self->record_channel_success($channel_id);
