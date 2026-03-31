@@ -246,7 +246,7 @@ sub init_logging {
         log4perl.appender.logfile.filename = $logfile
         log4perl.appender.logfile.mode = append
         log4perl.appender.logfile.layout = Log::Log4perl::Layout::PatternLayout
-        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p <%M>:%4L: %m%n
+        log4perl.appender.logfile.layout.ConversionPattern = [%d{dd.MM.yyyy HH:mm:ss.SSS}] %5p %M:%4L: %m%n
         };
     }
 
@@ -386,10 +386,27 @@ use constant {
     LIVE_PRIMARY_HLS        => 'https://siriusxm-priprodlive.akamaized.net',
     LIVE_SECONDARY_HLS      => 'https://siriusxm-secprodlive.akamaized.net',
     SEGMENT_CACHE_BATCH_SIZE => 2,  # Number of segments to cache per iteration
-    SERVER_FAILURE_THRESHOLD => 3,  # Number of consecutive failures before switching servers
+    SERVER_FAILURE_THRESHOLD => 5,  # Number of consecutive failures before switching servers
+    MAX_HOLD_COUNT          => 3,   # Consecutive no-new-segment fetches before treating as server failure
+                                    # (3 × EXTINF/2 ≈ 15 s without new content per event;
+                                    #  5 such events → SERVER_FAILURE_THRESHOLD → server switch)
+    MAX_SEGMENT_RETRIES     => 3,   # Max consecutive fetch failures per segment before dropping it
+                                    # (~1 s between each retry via process_segment_queues interval)
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
     CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
+
+# Cookie classification:
+#   Auth cookies  – tied to the user's login; stored ONLY in the global cookie jar.
+#   Session cookies – short-lived server-affinity cookies; stored ONLY in per-channel
+#                     in-memory jars (or the global jar when no channel is specified).
+my %AUTH_COOKIE_NAMES    = map { $_ => 1 } qw(SXMDATA);
+# SXMAKTOKEN is listed here even though it lives in the per-channel jar so that
+# it is included in the debug routing log alongside AWSALB/JSESSIONID.
+my %SESSION_COOKIE_NAMES = map { $_ => 1 } qw(AWSALB JSESSIONID AWSALBCORS SXMAKTOKEN);
+
+sub is_auth_cookie    { return exists $AUTH_COOKIE_NAMES{$_[0]}    }
+sub is_session_cookie { return exists $SESSION_COOKIE_NAMES{$_[0]} }
 
 sub new {
     my ($class, $username, $password, $region, $cookiefile) = @_;
@@ -404,10 +421,12 @@ sub new {
         channel_cookies => {},  # Store per-channel cookie jars
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
+        segment_retry_count => {}, # Track consecutive fetch failures per segment (per channel)
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
         playlist_next_update => {}, # Track next scheduled update time per channel_id
+        playlist_hold_count  => {}, # Consecutive no-new-segment fetches per channel (FFmpeg m3u8_hold_counters analog)
         channel_last_activity => {}, # Track last client activity time per channel_id
         channel_avg_duration => {},  # Track average EXTINF duration per channel_id
         
@@ -421,6 +440,13 @@ sub new {
 
         # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
         jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
+
+        # Per-channel SXMAKTOKEN cache.  SXMAKTOKEN is a per-session token issued by
+        # the server during authenticate().  It is stored in the per-channel jar, not
+        # the global jar, so that concurrent channels each keep their own copy.
+        # This cache holds the last-seen value per channel so it survives
+        # clear_all_cookies() or the cookie expiring inside HTTP::Cookies.
+        sxmaktoken_cache      => {},
 
         ua        => undef,
         json      => JSON::XS->new->utf8->canonical,
@@ -444,8 +470,21 @@ sub new {
                 $cookie_jar->load();
                 main::log_info("Loaded cookies from: $cookiefile");
                 
-                # Analyze and log cookie information
-                $self->analyze_cookies($cookie_jar, undef);
+                # SXMAKTOKEN is now per-channel only.  Any copy left in the global
+                # jar is stale data written by an older version.  Remove it so that
+                # the cookie file stays clean going forward.
+                my @sxmaktoken_entries;
+                $cookie_jar->scan(sub {
+                    my ($version, $key, $val, $path, $domain) = @_;
+                    push @sxmaktoken_entries, [$domain, $path, $key] if $key eq 'SXMAKTOKEN';
+                });
+                if (@sxmaktoken_entries) {
+                    $cookie_jar->clear(@$_) for @sxmaktoken_entries;
+                    $cookie_jar->save();
+                    main::log_debug("Removed " . scalar(@sxmaktoken_entries) .
+                                    " stale SXMAKTOKEN entry(s) from global cookie file");
+                }
+
             };
             if ($@) {
                 main::log_warn("Error loading cookies from $cookiefile: $@");
@@ -464,7 +503,15 @@ sub new {
         cookie_jar => $cookie_jar,
         timeout    => 30,
     );
-    
+
+    # Analyze and log cookie information now that $self->{ua} is ready.
+    if ($cookiefile && -e $cookiefile) {
+        eval { $self->analyze_cookies(undef, undef) };
+        if ($@) {
+            main::log_warn("Error analyzing cookies: $@");
+        }
+    }
+
     main::log_debug("SiriusXM object created for user: $username, region: $self->{region}");
 
     # Set up channel cache file path (same directory as cookie file)
@@ -480,69 +527,83 @@ sub new {
     return $self;
 }
 
-# Analyze and log cookie expiration information
+# Analyze and log cookie expiration information.
+# Auth cookies (SXMDATA) are always read from the global jar.
+# Session cookies (AWSALB, JSESSIONID, SXMAKTOKEN) are read from the channel jar when
+# channel_id is provided, or from the global jar when channel_id is undef.
+# The legacy $cookies positional parameter is accepted but ignored.
 sub analyze_cookies {
     my ($self, $cookies, $channel_id) = @_;
-    
-    # Use the provided cookie jar or get the appropriate one
-    $cookies = $cookies || $self->get_channel_cookie_jar($channel_id);
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     my %cookie_info = ();
     my $now = time();
-    
-    $cookies->scan(sub {
-        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
-        
-        # Focus on authentication cookies
-        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN' || $key eq 'JSESSIONID' || $key eq 'AWSALB') {
-            $cookie_info{$key} = {
-                expires => $expires,
-                discard => $discard,
-            };
-            
-            # JSESSIONID typically doesn't have an expiry, estimate it
-            if ($key eq 'JSESSIONID' && !$expires) {
-                # Estimate expiration as SESSION_MAX_LIFE from now
-                my $estimated_expires = $now + SESSION_MAX_LIFE;
-                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($estimated_expires));
-                my $hours = int(SESSION_MAX_LIFE / 3600);
-                main::log_info("Cookie $key ($context): no expiration set, estimated lifetime ~${hours}h (expires ~$expires_str)");
-                $cookie_info{$key}->{estimated_expires} = $estimated_expires;
-            } elsif ($expires) {
-                my $remaining = $expires - $now;
-                my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
-                
-                if ($remaining > 0) {
-                    my $days = int($remaining / 86400);
-                    my $hours = int(($remaining % 86400) / 3600);
-                    my $minutes = int(($remaining % 3600) / 60);
-                    
-                    main::log_info("Cookie $key ($context): expires $expires_str (in ${days}d ${hours}h ${minutes}m)");
-                } else {
-                    main::log_warn("Cookie $key ($context): EXPIRED at $expires_str");
-                }
+
+    # Helper to log a single cookie's expiry info
+    my $log_cookie = sub {
+        my ($key, $expires, $discard) = @_;
+        $cookie_info{$key} = { expires => $expires, discard => $discard };
+
+        if ($key eq 'JSESSIONID' && !$expires) {
+            my $estimated_expires = $now + SESSION_MAX_LIFE;
+            my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($estimated_expires));
+            my $hours = int(SESSION_MAX_LIFE / 3600);
+            main::log_info("Cookie $key ($context): no expiration set, estimated lifetime ~${hours}h (expires ~$expires_str)");
+            $cookie_info{$key}->{estimated_expires} = $estimated_expires;
+        } elsif ($expires) {
+            my $remaining = $expires - $now;
+            my $expires_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($expires));
+            if ($remaining > 0) {
+                my $days    = int($remaining / 86400);
+                my $hours   = int(($remaining % 86400) / 3600);
+                my $minutes = int(($remaining % 3600) / 60);
+                main::log_info("Cookie $key ($context): expires $expires_str (in ${days}d ${hours}h ${minutes}m)");
             } else {
-                if ($discard) {
-                    main::log_debug("Cookie $key ($context): session cookie (will be discarded)");
-                } else {
-                    main::log_debug("Cookie $key ($context): no expiration set");
-                }
+                main::log_warn("Cookie $key ($context): EXPIRED at $expires_str");
+            }
+        } else {
+            if ($discard) {
+                main::log_debug("Cookie $key ($context): session cookie (will be discarded)");
+            } else {
+                main::log_debug("Cookie $key ($context): no expiration set");
             }
         }
+    };
+
+    # Check global jar for auth cookies (SXMDATA only)
+    my $global_jar = $self->{ua}->cookie_jar;
+    $global_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        if (is_auth_cookie($key)) {
+            $log_cookie->($key, $expires, $discard);
+        }
     });
-    
-    # Return cookie information for potential future use
-    # Currently used mainly for logging, but available for callers who need it
+
+    # Check appropriate jar for session cookies.
+    # SXMAKTOKEN is per-channel only — skip it in the global context because any
+    # entry there is stale data from before the per-channel migration and will
+    # never be refreshed at the global level.
+    my $session_jar = $channel_id
+        ? $self->get_channel_cookie_jar($channel_id)
+        : $global_jar;
+    $session_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        return if !$channel_id && $key eq 'SXMAKTOKEN';
+        if (is_session_cookie($key)) {
+            $log_cookie->($key, $expires, $discard);
+        }
+    });
+
     return \%cookie_info;
 }
 
-# Check if cookies need renewal (before they expire)
-# Returns true if cookies should be renewed proactively
+# Check if auth cookies need renewal (before they expire).
+# Auth cookies (SXMDATA) live only in the global jar.
 sub should_renew_cookies {
     my ($self, $channel_id) = @_;
     
-    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    # Auth cookies are always in the global jar regardless of channel
+    my $cookies = $self->{ua}->cookie_jar;
     my $now = time();
     
     # Renew if cookies expire within 1 hour (3600 seconds)
@@ -553,14 +614,18 @@ sub should_renew_cookies {
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         
-        # Check authentication cookies
-        if (($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') && $expires) {
+        # Only check SXMDATA for renewal.  The SiriusXM server does NOT return a
+        # fresh SXMAKTOKEN in routine login/authenticate responses, so triggering
+        # renewal when SXMAKTOKEN is near expiry causes a login-failure feedback
+        # loop: login() is called, the server responds with status=1 but without
+        # a new SXMAKTOKEN, the near-expiry flag remains set, is_logged_in()
+        # still returns false, and login() falsely reports failure.
+        if ($key eq 'SXMDATA' && $expires) {
             my $remaining = $expires - $now;
             
             if ($remaining > 0 && $remaining < $renewal_threshold) {
-                my $context = $channel_id ? "channel $channel_id" : "global";
                 my $minutes = int($remaining / 60);
-                main::log_info("Cookie $key ($context) expires in ${minutes}m, scheduling renewal");
+                main::log_info("Cookie $key (global) expires in ${minutes}m, scheduling renewal");
                 $should_renew = 1;
             }
         }
@@ -569,138 +634,55 @@ sub should_renew_cookies {
     return $should_renew;
 }
 
-# Copy authentication cookies from global jar to a channel-specific jar
+# DEPRECATED: Auth cookies are no longer copied into channel jars.
+# Login/auth cookies are tracked exclusively in the global cookie jar.
+# Channel requests receive auth cookies via the merged Cookie: header built
+# by compose_cookie_header() / make_channel_request().
 sub copy_auth_cookies_to_channel {
     my ($self, $channel_id) = @_;
-    
-    return unless $channel_id;
-    
-    my $global_jar = $self->{ua}->cookie_jar;
-    my $channel_jar = $self->{channel_cookies}->{$channel_id};
-    
-    return unless $global_jar && $channel_jar;
-    
-    my $copied_count = 0;
-    
-    # Scan global jar for authentication cookies
-    $global_jar->scan(sub {
-        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
-        
-        # Copy authentication cookies (SXMDATA and SXMAKTOKEN)
-        if ($key eq 'SXMDATA' || $key eq 'SXMAKTOKEN') {
-            # Set the cookie in the channel jar with all attributes
-            $channel_jar->set_cookie(
-                $version, $key, $val, $path, $domain, $port, 
-                $path_spec, $secure, $expires, $discard, $hash
-            );
-            $copied_count++;
-            main::log_debug("Copied cookie $key from global to channel $channel_id");
-        }
-    });
-    
-    if ($copied_count > 0) {
-        main::log_info("Copied $copied_count authentication cookie(s) from global jar to channel $channel_id");
-        # Force save to disk if persistent
-        if ($self->{cookiefile}) {
-            eval { $channel_jar->save(); };
-        }
-    }
-    
-    return $copied_count;
+    main::log_debug("copy_auth_cookies_to_channel() called but is now a no-op (deprecated)");
+    return 0;
 }
 
-# Get or create cookie jar for a specific channel
+# Get or create an in-memory session cookie jar for a specific channel.
+# Channel jars hold session/affinity cookies (AWSALB, JSESSIONID, SXMAKTOKEN, etc.).
+# The global auth cookie (SXMDATA) lives exclusively in the global jar.
 sub get_channel_cookie_jar {
     my ($self, $channel_id) = @_;
     
-    # If no channel_id specified, use global cookie jar for backward compatibility
+    # If no channel_id specified, return the global cookie jar
     return $self->{ua}->cookie_jar unless $channel_id;
     
-    # Create channel-specific cookie jar if it doesn't exist
+    # Create a fresh in-memory cookie jar for this channel if one doesn't exist yet
     if (!exists $self->{channel_cookies}->{$channel_id}) {
-        my $cookie_jar;
-        my $channel_cookiefile;
-        my $file_exists = 0;
-        
-        # Create persistent cookie jar for channel if cookiefile is configured
-        if ($self->{cookiefile}) {
-            # Generate unique filename for this channel
-            $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            $file_exists = -e $channel_cookiefile;
-            
-            $cookie_jar = HTTP::Cookies->new(
-                file => $channel_cookiefile,
-                autosave => 1,
-                ignore_discard => 1,
-            );
-            
-            # Load existing cookies if file exists
-            if ($file_exists) {
-                eval {
-                    $cookie_jar->load();
-                    main::log_debug("Loaded cookies for channel $channel_id from: $channel_cookiefile");
-                };
-                if ($@) {
-                    main::log_warn("Error loading cookies for channel $channel_id: $@");
-                }
-            }
-        } else {
-            # No persistence - use in-memory cookie jar
-            $cookie_jar = HTTP::Cookies->new();
-        }
-        
+        my $cookie_jar = HTTP::Cookies->new();
         $self->{channel_cookies}->{$channel_id} = $cookie_jar;
-        main::log_debug("Created cookie jar for channel: $channel_id");
-        
-        # If this is a new channel (no existing cookie file), copy auth cookies from global jar
-        if (!$file_exists) {
-            main::log_debug("New channel $channel_id detected, checking for authentication cookies to copy");
-            $self->copy_auth_cookies_to_channel($channel_id);
-        }
+        main::log_debug("Created in-memory session cookie jar for channel: $channel_id");
     }
     
     return $self->{channel_cookies}->{$channel_id};
 }
 
-# Set the user agent to use a specific channel's cookie jar
+# DEPRECATED: The UA no longer swaps cookie jars between channels.
+# Cookies are now merged explicitly in make_channel_request() via compose_cookie_header().
 sub set_channel_context {
     my ($self, $channel_id) = @_;
-    
-    my $cookie_jar = $self->get_channel_cookie_jar($channel_id);
-    $self->{ua}->cookie_jar($cookie_jar);
-    
-    main::log_trace("Set cookie context for channel: " . ($channel_id || 'global'));
+    main::log_trace("set_channel_context() called but is now a no-op (deprecated)");
 }
 
-# Clear all cookies for a specific channel (or global if no channel_id)
+# Clear cookies for a specific channel (or global if no channel_id).
+# Channel jars are in-memory only, so clearing them just removes the in-memory object.
 sub clear_channel_cookies {
     my ($self, $channel_id) = @_;
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     
     if ($channel_id) {
-        # Delete the channel cookie file if it exists
-        if ($self->{cookiefile}) {
-            my $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;  # Remove .txt extension if present
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            if (-e $channel_cookiefile) {
-                unlink($channel_cookiefile);
-                main::log_debug("Deleted cookie file for $context: $channel_cookiefile");
-            }
-        }
-        
-        # Create a fresh cookie jar for this channel
+        # Drop the in-memory session jar; it will be recreated fresh on next access
         delete $self->{channel_cookies}->{$channel_id};
-        # It will be recreated on next access via get_channel_cookie_jar
-        main::log_debug("Cleared cookies for $context");
+        main::log_debug("Cleared in-memory session cookies for $context");
     } else {
-        # Clear global cookie jar
-        # Delete the global cookie file if it exists
+        # Clear global cookie jar (and its backing file if configured)
         if ($self->{cookiefile} && -e $self->{cookiefile}) {
             unlink($self->{cookiefile});
             main::log_debug("Deleted global cookie file: $self->{cookiefile}");
@@ -723,36 +705,18 @@ sub clear_channel_cookies {
     }
 }
 
-# Clear all cookies (global and all channel-specific)
+# Clear all cookies (global and all channel-specific in-memory jars).
 sub clear_all_cookies {
     my ($self) = @_;
     
     main::log_info("Clearing all cookies (global and all channels)");
     
-    my $cleared_channels = 0;
+    my $cleared_channels = scalar keys %{$self->{channel_cookies}};
     
-    # Clear all channel-specific cookie jars
-    if ($self->{cookiefile}) {
-        foreach my $channel_id (keys %{$self->{channel_cookies}}) {
-            # Generate the channel cookie filename
-            my $channel_cookiefile = $self->{cookiefile};
-            $channel_cookiefile =~ s/\.txt$//;
-            $channel_cookiefile .= "-channel-${channel_id}.txt";
-            
-            # Delete the file if it exists
-            if (-e $channel_cookiefile) {
-                unlink($channel_cookiefile);
-                main::log_debug("Deleted cookie file for channel $channel_id: $channel_cookiefile");
-            }
-            
-            $cleared_channels++;
-        }
-    }
-    
-    # Remove all channel cookie jars from memory
+    # Remove all in-memory channel session jars
     $self->{channel_cookies} = {};
     
-    # Clear the global cookie jar
+    # Clear the global cookie jar (and its backing file if configured)
     if ($self->{cookiefile} && -e $self->{cookiefile}) {
         unlink($self->{cookiefile});
         main::log_debug("Deleted global cookie file: $self->{cookiefile}");
@@ -772,7 +736,7 @@ sub clear_all_cookies {
     
     $self->{ua}->cookie_jar($cookie_jar);
     
-    main::log_info("Cleared all cookies: global and $cleared_channels channel(s)");
+    main::log_info("Cleared all cookies: global and $cleared_channels in-memory channel jar(s)");
     
     return $cleared_channels + 1;  # Return total count including global
 }
@@ -851,7 +815,9 @@ sub reset_channel_server {
 
 sub is_logged_in {
     my ($self, $channel_id) = @_;
-    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    # Auth cookies (SXMDATA) live exclusively in the global jar.
+    # The channel_id parameter is accepted for call-site compatibility but is ignored.
+    my $cookies = $self->{ua}->cookie_jar;
     
     # Check for SXMDATA cookie
     my $has_sxmdata = 0;
@@ -862,7 +828,8 @@ sub is_logged_in {
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         push @cookie_names, $key;
-        main::log_trace("Cookie found: $key = " . substr($val, 0, 50) . (length($val) > 50 ? "..." : ""));
+        # Log cookie names only – never log values
+        main::log_trace("Global cookie found: $key");
         
         if ($key eq 'SXMDATA') {
             $has_sxmdata = 1;
@@ -881,29 +848,31 @@ sub is_logged_in {
         }
     });
     
-    my $context = $channel_id ? "channel $channel_id" : "global";
-    main::log_trace("is_logged_in() check for $context - found cookies: " . join(", ", @cookie_names));
+    main::log_trace("is_logged_in() check (global jar) - found cookies: " . join(", ", @cookie_names));
     
     # Return false if cookie is expired
     if ($sxmdata_expired) {
-        main::log_debug("is_logged_in() result for $context: false (cookie expired)");
+        main::log_debug("is_logged_in() result: false (cookie expired)");
         return 0;
     }
     
     # Check if cookies need proactive renewal
-    if ($has_sxmdata && $self->should_renew_cookies($channel_id)) {
-        main::log_info("Cookies approaching expiration for $context, returning false to trigger renewal");
+    if ($has_sxmdata && $self->should_renew_cookies()) {
+        main::log_info("Auth cookies approaching expiration, returning false to trigger renewal");
         return 0;
     }
     
-    main::log_trace("is_logged_in() result for $context: " . ($has_sxmdata ? "true" : "false"));
-    
+    main::log_trace("is_logged_in() result: " . ($has_sxmdata ? "true" : "false"));
     return $has_sxmdata;
 }
 
 sub is_session_authenticated {
     my ($self, $channel_id) = @_;
-    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    # Session cookies (AWSALB, JSESSIONID) live in the per-channel in-memory jar when a
+    # channel is active, or in the global jar for channel-less (e.g. get_channels) flows.
+    my $cookies = $channel_id
+        ? $self->get_channel_cookie_jar($channel_id)
+        : $self->{ua}->cookie_jar;
     
     # Check for AWSALB and JSESSIONID cookies
     my ($has_awsalb, $has_jsessionid) = (0, 0);
@@ -945,14 +914,184 @@ sub is_session_authenticated {
     return $result;
 }
 
+#-----------------------------------------------------------------------------
+# Cookie merge helpers (new model)
+#-----------------------------------------------------------------------------
+
+# Compose a merged Cookie: header string for a channel request.
+# Always includes SXMDATA from the global auth jar.
+# When channel_id is defined, also includes that channel's session cookies
+# (AWSALB, JSESSIONID, SXMAKTOKEN, etc.) from the in-memory channel jar.
+sub compose_cookie_header {
+    my ($self, $channel_id) = @_;
+
+    my %cookies;
+
+    # Pull auth cookies (SXMDATA) from the global jar
+    my $global_jar = $self->{ua}->cookie_jar;
+    $global_jar->scan(sub {
+        my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+        if (is_auth_cookie($key)) {
+            $cookies{$key} = $val;
+        }
+    });
+
+    # Pull session cookies from the channel's in-memory jar (if applicable)
+    if ($channel_id && exists $self->{channel_cookies}->{$channel_id}) {
+        my $channel_jar = $self->{channel_cookies}->{$channel_id};
+        $channel_jar->scan(sub {
+            my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
+            # Never let auth cookies come from the channel jar
+            $cookies{$key} = $val unless is_auth_cookie($key);
+        });
+    }
+
+    my @cookie_pairs = map { "$_=$cookies{$_}" } sort keys %cookies;
+
+    if (@cookie_pairs && $main::CONFIG{verbose} >= main::LOG_TRACE) {
+        my @names = map { (split '=', $_, 2)[0] } @cookie_pairs;
+        main::log_trace("Composed Cookie header for " . ($channel_id ? "channel $channel_id" : "global") .
+                        ": " . join(', ', @names) . " (" . scalar(@cookie_pairs) . " cookies)");
+    }
+
+    return join('; ', @cookie_pairs);
+}
+
+# Route Set-Cookie headers from $response to the correct cookie jar.
+#   channel_id undef  → all cookies go to the global jar (normal LWP behaviour).
+#   channel_id defined → SXMDATA goes to global jar;
+#                        everything else (SXMAKTOKEN, AWSALB, JSESSIONID, incapsula, …)
+#                        goes to the channel in-memory jar.
+# Cookie values are never logged.
+sub route_response_cookies {
+    my ($self, $response, $channel_id) = @_;
+
+    return unless $response;
+
+    my $global_jar = $self->{ua}->cookie_jar;
+
+    if (!defined $channel_id) {
+        # Global request – let the global jar absorb all Set-Cookie headers
+        $global_jar->extract_cookies($response);
+        $self->log_jar_cookie_names($global_jar, 'global') if $main::CONFIG{verbose} >= main::LOG_DEBUG;
+        return;
+    }
+
+    # Channel request – route each Set-Cookie to the appropriate jar
+    my @set_cookies = $response->header('Set-Cookie');
+    unless (@set_cookies) {
+        main::log_trace("No Set-Cookie headers in response for channel $channel_id");
+        return;
+    }
+
+    main::log_debug("Routing " . scalar(@set_cookies) . " Set-Cookie header(s) for channel $channel_id");
+
+    my $channel_jar = $self->get_channel_cookie_jar($channel_id);
+    my $req         = $response->request;
+
+    unless ($req) {
+        main::log_warn("Cannot route Set-Cookie headers: response has no associated request object");
+        return;
+    }
+
+    my (@auth_names, @session_names, @unknown_names);
+
+    for my $set_cookie (@set_cookies) {
+        # Extract the cookie name (first token before '=')
+        my ($name) = $set_cookie =~ /^([^=;]+)/;
+        next unless defined $name;
+        $name =~ s/^\s+|\s+$//g;
+
+        # Build a minimal response wrapping just this one Set-Cookie header so that
+        # extract_cookies() can determine the correct domain/path from the request URI.
+        my $mini_resp = HTTP::Response->new(200);
+        $mini_resp->request(HTTP::Request->new(GET => $req->uri));
+        $mini_resp->header('Set-Cookie', $set_cookie);
+
+        if (is_auth_cookie($name)) {
+            $global_jar->extract_cookies($mini_resp);
+            push @auth_names, $name;
+        } else {
+            $channel_jar->extract_cookies($mini_resp);
+            if (is_session_cookie($name)) {
+                push @session_names, $name;
+            } else {
+                push @unknown_names, $name;
+            }
+        }
+    }
+
+    main::log_debug("Cookie routing for channel $channel_id: " .
+                    "global=[" . join(',', @auth_names) . "] " .
+                    "channel=[" . join(',', @session_names, @unknown_names) . "]")
+        if @auth_names || @session_names || @unknown_names;
+}
+
+# Execute an HTTP request with the correct cookie jars for the given channel.
+#
+# For channel_id=undef: delegates directly to the UA (which holds the global jar).
+# For a defined channel_id:
+#   1. Composes a merged Cookie: header (global auth + channel session cookies).
+#   2. Temporarily replaces the UA's jar with an empty one so LWP does not
+#      auto-add or auto-store cookies for this request.
+#   3. Makes the request.
+#   4. Restores the global jar on the UA.
+#   5. Routes Set-Cookie response headers to the correct jars via route_response_cookies().
+sub make_channel_request {
+    my ($self, $request, $channel_id) = @_;
+
+    unless (defined $channel_id) {
+        # Global request: use the UA with its global jar unchanged
+        main::log_trace("Global request via UA global jar: " . $request->uri);
+        return $self->{ua}->request($request);
+    }
+
+    # Channel request: merge cookies manually, bypass LWP auto-cookie handling
+    main::log_trace("Channel $channel_id request: merging Cookie header for " . $request->uri);
+
+    my $cookie_header = $self->compose_cookie_header($channel_id);
+    $request->header('Cookie', $cookie_header) if $cookie_header;
+
+    # Swap in an empty jar so LWP neither adds extra cookies nor stores Set-Cookie
+    my $saved_jar = $self->{ua}->cookie_jar;
+    $self->{ua}->cookie_jar(HTTP::Cookies->new());
+
+    my $response = $self->{ua}->request($request);
+
+    # Restore the global jar immediately after the request
+    $self->{ua}->cookie_jar($saved_jar);
+
+    # Route Set-Cookie headers to the appropriate jars
+    $self->route_response_cookies($response, $channel_id);
+
+    return $response;
+}
+
+# Log the names (never values) of all cookies in $jar.
+# Intended for DEBUG/TRACE diagnostics only.
+sub log_jar_cookie_names {
+    my ($self, $jar, $context) = @_;
+    return unless $main::CONFIG{verbose} >= main::LOG_DEBUG;
+
+    my @names;
+    $jar->scan(sub { my ($v, $k) = @_; push @names, $k; });
+
+    if (@names) {
+        main::log_debug("Cookie names in $context jar: " . join(', ', @names));
+    } else {
+        main::log_debug("No cookies in $context jar");
+    }
+}
+
+#-----------------------------------------------------------------------------
+# HTTP API helpers
+#-----------------------------------------------------------------------------
+
 sub get_request {
     my ($self, $method, $params, $authenticate, $channel_id) = @_;
     $authenticate //= 1;
     
     if ($authenticate) {
-        # Set channel context for authentication
-        $self->set_channel_context($channel_id);
-        
         if (!$self->is_session_authenticated($channel_id) && !$self->authenticate($channel_id)) {
             main::log_error('Unable to authenticate');
             return undef;
@@ -965,7 +1104,8 @@ sub get_request {
     
     main::log_trace("GET request to: $uri");
     
-    my $response = $self->{ua}->get($uri);
+    my $request  = HTTP::Request->new(GET => $uri);
+    my $response = $self->make_channel_request($request, $channel_id);
     
     if (!$response->is_success) {
         main::log_error("Received status code " . $response->code . " for method '$method'");
@@ -990,9 +1130,6 @@ sub post_request {
     $authenticate //= 1;
     
     if ($authenticate) {
-        # Set channel context for authentication
-        $self->set_channel_context($channel_id);
-        
         if (!$self->is_session_authenticated($channel_id) && !$self->authenticate($channel_id)) {
             main::log_error('Unable to authenticate');
             return undef;
@@ -1014,12 +1151,13 @@ sub post_request {
     $request->content_type('application/json');
     $request->content($json_data);
     
-    my $response = $self->{ua}->request($request);
+    my $response = $self->make_channel_request($request, $channel_id);
     
-    # Log response details for trace level
+    # Log response details for trace level (cookie names only, never values)
     main::log_trace("Response status: " . $response->status_line);
-    if ($response->header('Set-Cookie')) {
-        main::log_trace("Response cookies: " . $response->header('Set-Cookie'));
+    if ($response->header('Set-Cookie') && $main::CONFIG{verbose} >= main::LOG_TRACE) {
+        my @names = map { /^([^=;]+)/ ? $1 : '?' } $response->header('Set-Cookie');
+        main::log_trace("Response Set-Cookie names: " . join(', ', @names));
     }
     
     if (!$response->is_success) {
@@ -1047,11 +1185,13 @@ sub post_request {
 sub login {
     my ($self, $channel_id) = @_;
     
-    # Set channel context before login
-    $self->set_channel_context($channel_id);
-    
+    # Login is made with the channel context so that the Cookie: header carries
+    # any session cookies already in the channel jar (e.g. incapsula affinity
+    # cookies).  The SiriusXM server returns SXMAKTOKEN only when those session
+    # cookies are present.  route_response_cookies() then puts SXMDATA into
+    # the global jar and SXMAKTOKEN + session cookies into the channel jar.
     my $context = $channel_id ? "channel $channel_id" : "global";
-    main::log_debug("Attempting to login user: $self->{username} for $context");
+    main::log_debug("Attempting to login user: $self->{username} ($context)");
     
     my $postdata = {
         moduleList => {
@@ -1079,26 +1219,41 @@ sub login {
         },
     };
     
+    # Pass channel_id so make_channel_request() composes the Cookie: header with
+    # SXMDATA (global) and channel session cookies.  route_response_cookies()
+    # ensures SXMDATA lands in the global jar and SXMAKTOKEN in the channel jar.
     my $data = $self->post_request('modify/authentication', $postdata, 0, $channel_id);
     return 0 unless $data;
     
-    main::log_trace("Login response received for $context, checking status");
+    main::log_trace("Login response received, checking status");
     
     my $success = 0;
     eval {
         my $status = $data->{ModuleListResponse}->{status};
-        main::log_trace("Login response status for $context: $status");
+        main::log_trace("Login response status: $status");
         
-        if ($status == 1 && $self->is_logged_in($channel_id)) {
-            main::log_info("Login successful for user: $self->{username} ($context)");
-            main::log_trace("Session cookies after login for $context: " . ($self->{ua}->cookie_jar ? "present" : "none"));
+        # Verify success by checking SXMDATA is present and not expired.
+        # Do NOT call is_logged_in() here: that method calls should_renew_cookies()
+        # which can return true when SXMAKTOKEN is approaching expiry.  Because
+        # the server does not return a fresh SXMAKTOKEN, calling is_logged_in()
+        # inside login() creates a feedback loop where login falsely reports
+        # failure even though the server responded with status=1.
+        my $sxmdata_valid = 0;
+        my $now_t = time();
+        $self->{ua}->cookie_jar->scan(sub {
+            my ($v, $k, $val, $p, $d, $port, $ps, $sec, $expires) = @_;
+            $sxmdata_valid = 1 if $k eq 'SXMDATA' && (!$expires || $expires > $now_t);
+        });
+        
+        if ($status == 1 && $sxmdata_valid) {
+            main::log_info("Login successful for user: $self->{username}");
             $success = 1;
         } else {
-            main::log_trace("Login failed for $context - status: $status, is_logged_in: " . ($self->is_logged_in($channel_id) ? "true" : "false"));
+            main::log_trace("Login failed - status: $status, sxmdata valid: " . ($sxmdata_valid ? "true" : "false"));
         }
     };
     if ($@) {
-        main::log_error("Error decoding JSON response for login ($context): $@");
+        main::log_error("Error decoding JSON response for login: $@");
     }
     
     if ($success) {
@@ -1107,7 +1262,7 @@ sub login {
         return 1;
     }
     
-    main::log_error("Login failed for user: $self->{username} ($context)");
+    main::log_error("Login failed for user: $self->{username}");
     return 0;
 }
 
@@ -1118,9 +1273,6 @@ sub authenticate {
         main::log_error('Unable to authenticate because login failed');
         return 0;
     }
-    
-    # Set channel context for authentication
-    $self->set_channel_context($channel_id);
     
     my $context = $channel_id ? "channel $channel_id" : "global";
     main::log_debug("Attempting to authenticate session for $context");
@@ -1147,6 +1299,10 @@ sub authenticate {
         }
     };
     
+    # post_request will route the response cookies via route_response_cookies():
+    # - SXMDATA          → global jar
+    # - SXMAKTOKEN       → channel jar
+    # - AWSALB/JSESSIONID → channel jar (or global jar when channel_id is undef)
     my $data = $self->post_request('resume?OAtrial=false', $postdata, 0, $channel_id);
     return 0 unless $data;
     
@@ -1159,7 +1315,6 @@ sub authenticate {
         
         if ($status == 1 && $self->is_session_authenticated($channel_id)) {
             main::log_info("Session authentication successful for $context");
-            main::log_trace("Session authenticated for $context, cookies available");
             $success = 1;
         } else {
             main::log_trace("Authentication failed for $context - status: $status, is_session_authenticated: " . ($self->is_session_authenticated($channel_id) ? "true" : "false"));
@@ -1173,8 +1328,10 @@ sub authenticate {
         # Analyze cookies after successful authentication
         $self->analyze_cookies(undef, $channel_id);
 
-        # Track when the global JSESSIONID will expire.
+        # Track when the JSESSIONID session will expire.
         # The cookie carries no explicit timestamp so we calculate it ourselves.
+        # We only track this for the global (undef channel) auth flow because the
+        # background channel-cache refresh uses that path.
         if (!defined $channel_id) {
             $self->{jsessionid_expires} = time() + SESSION_MAX_LIFE;
             my $exp_str = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($self->{jsessionid_expires}));
@@ -1190,9 +1347,15 @@ sub authenticate {
 sub get_sxmak_token {
     my ($self, $channel_id) = @_;
     
-    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    # SXMAKTOKEN is a per-session/per-channel token.  Each call to authenticate()
+    # receives a fresh one from the server and it is stored in the channel's
+    # in-memory jar so that concurrent channels each keep their own independent copy.
+    my $jar = $channel_id
+        ? $self->get_channel_cookie_jar($channel_id)
+        : $self->{ua}->cookie_jar;
+
     my $token;
-    $cookies->scan(sub {
+    $jar->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
         if ($key eq 'SXMAKTOKEN') {
             # Parse token value: token=value,other_data
@@ -1202,15 +1365,30 @@ sub get_sxmak_token {
         }
     });
     
+    my $cache_key = $channel_id // '__global__';
+    if ($token) {
+        # Keep the per-channel cache current so we survive clear_all_cookies().
+        $self->{sxmaktoken_cache}{$cache_key} = $token;
+    } elsif (exists $self->{sxmaktoken_cache}{$cache_key}) {
+        # The server does not re-issue SXMAKTOKEN in every authenticate response.
+        # Fall back to the last known value for this channel – the server typically
+        # still accepts it.
+        $token = $self->{sxmaktoken_cache}{$cache_key};
+        main::log_debug("SXMAK token: using cached value for " .
+                        ($channel_id ? "channel $channel_id" : "global") .
+                        " (cookie missing from jar)");
+    }
+    
     my $context = $channel_id ? "channel $channel_id" : "global";
-    main::log_trace("SXMAK token for $context: " . ($token || 'not found'));
+    main::log_trace("SXMAK token ($context): " . ($token ? "found" : "not found"));
     return $token;
 }
 
 sub get_gup_id {
     my ($self, $channel_id) = @_;
     
-    my $cookies = $self->get_channel_cookie_jar($channel_id);
+    # SXMDATA is an auth cookie; it lives exclusively in the global jar.
+    my $cookies = $self->{ua}->cookie_jar;
     my $gup_id;
     $cookies->scan(sub {
         my ($version, $key, $val, $path, $domain, $port, $path_spec, $secure, $expires, $discard, $hash) = @_;
@@ -1221,16 +1399,14 @@ sub get_gup_id {
                 $gup_id = $data->{gupId};
             };
             if ($@) {
-                my $context = $channel_id ? "channel $channel_id" : "global";
-                main::log_warn("Error parsing SXMDATA cookie for $context: $@");
-                main::log_debug("Clearing corrupted cookies for $context to force fresh authentication");
-                $self->clear_channel_cookies($channel_id);
+                main::log_warn("Error parsing SXMDATA cookie (global jar): $@");
+                main::log_debug("Clearing global cookies to force fresh authentication");
+                $self->clear_channel_cookies(undef);  # clear global jar
             }
         }
     });
     
-    my $context = $channel_id ? "channel $channel_id" : "global";
-    main::log_trace("GUP ID for $context: " . ($gup_id || 'not found'));
+    main::log_trace("GUP ID (global jar): " . ($gup_id || 'not found'));
     return $gup_id;
 }
 
@@ -1242,11 +1418,6 @@ sub get_playlist_url {
     if ($use_cache && exists $self->{playlists}->{$channel_id}->{'url'}) {
         main::log_trace("Using cached playlist for channel: $channel_id");
         return $self->{playlists}->{$channel_id}->{'url'};
-    }
-    
-    # When starting fresh (not using cache), reset to primary server for new playback session
-    if (!$use_cache) {
-        $self->reset_channel_server($channel_id);
     }
     
     my $timestamp = sprintf("%.0f", time() * 1000);
@@ -1380,9 +1551,7 @@ sub get_playlist_url {
 sub get_playlist_variant_url {
     my ($self, $url, $channel_id) = @_;
     
-    # Set channel context for token retrieval
-    $self->set_channel_context($channel_id);
-    
+    # Auth tokens come from the global jar; no set_channel_context needed
     my $token = $self->get_sxmak_token($channel_id);
     my $gup_id = $self->get_gup_id($channel_id);
     
@@ -1397,10 +1566,10 @@ sub get_playlist_variant_url {
     
     main::log_trace("Getting playlist variant from: $uri");
     
-    my $response = $self->{ua}->get($uri);
+    my $request  = HTTP::Request->new(GET => $uri);
+    my $response = $self->make_channel_request($request, $channel_id);
     
     if (!$response->is_success) {
-        my $server = $self->get_channel_server($channel_id);
         my $error_msg = "Received status code " . $response->code . " on playlist variant retrieval";
         main::log_error($error_msg);
         $self->record_channel_failure($channel_id, $error_msg);
@@ -1536,12 +1705,22 @@ sub get_playlist {
         }
     }
     
+    # Capture any stale cached content so we can serve it as a fallback if the
+    # fresh fetch fails (transient CDN/server error).  Only applies to client-driven
+    # requests (use_cache=1); background-refresh calls (use_cache=0) are fine to
+    # return undef so the scheduler retries.
+    my $stale_cache = ($caching_enabled && $use_cache &&
+                       exists $self->{playlist_cache}->{$channel_id})
+                      ? $self->{playlist_cache}->{$channel_id} : undef;
+
     my $url = $self->get_playlist_url($guid, $channel_id, $use_cache);
-    return undef unless $url;
+    unless ($url) {
+        main::log_warn("Could not get playlist URL for channel $channel_id" .
+                       ($stale_cache ? ", serving stale playlist" : ""));
+        return $stale_cache;
+    }
     
-    # Set channel context for token retrieval
-    $self->set_channel_context($channel_id);
-    
+    # Auth tokens come from the global jar; no set_channel_context needed
     my $token = $self->get_sxmak_token($channel_id);
     my $gup_id = $self->get_gup_id($channel_id);
     
@@ -1556,7 +1735,11 @@ sub get_playlist {
         }
     }
     
-    return undef unless $token && $gup_id;
+    unless ($token && $gup_id) {
+        main::log_warn("Still missing token or gup_id for channel $channel_id" .
+                       ($stale_cache ? ", serving stale playlist" : ""));
+        return $stale_cache;
+    }
     
     my $uri = URI->new($url);
     $uri->query_form(
@@ -1568,31 +1751,49 @@ sub get_playlist {
     main::log_debug("Getting playlist for channel: $name");
     main::log_trace("Playlist URL: $uri");
     
-    my $response = $self->{ua}->get($uri);
+    my $request  = HTTP::Request->new(GET => $uri);
+    my $response = $self->make_channel_request($request, $channel_id);
     
-    if ($response->code == 403 || $response->code == 500) {
-        main::log_warn("Received status code " . $response->code . " on playlist for channel: $channel_id, renewing session");
+    if ($response->code == 500) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
+        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies" .
+                       ($stale_cache ? "; serving stale playlist to client" : ""));
+        return $stale_cache;
+    } elsif ($response->code == 403) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on playlist for channel: $channel_id";
+        # Count toward server failover (same as get_segment does)
+        $self->record_channel_failure($channel_id, $error_msg);
+
+        main::log_warn("$error_msg, renewing session");
         
         # Try re-authentication first (without clearing cookies)
         if ($self->authenticate($channel_id)) {
-            return $self->get_playlist($name, 0);
+            return $self->get_playlist($name, 0) // $stale_cache;
         } else {
-            # If re-authentication failed, clear all cookies (auth issue is likely global)
+            # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
             main::log_warn("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
             $self->clear_all_cookies();
             if ($self->authenticate($channel_id)) {
-                return $self->get_playlist($name, 0);
+                return $self->get_playlist($name, 0) // $stale_cache;
             } else {
-                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies");
-                return undef;
+                main::log_error("Failed to re-authenticate for channel: $channel_id after clearing all cookies" .
+                                ($stale_cache ? "; serving stale playlist to client" : ""));
+                return $stale_cache;
             }
         }
     }
     
     if (!$response->is_success) {
-        main::log_error("Received status code " . $response->code . " on playlist variant");
-        return undef;
+        my $error_msg = "Received status code " . $response->code . " on playlist variant";
+        main::log_error($error_msg . ($stale_cache ? "; serving stale playlist to client" : ""));
+        $self->record_channel_failure($channel_id, $error_msg);
+        return $stale_cache;
     }
+
+    $self->record_channel_success($channel_id);
     
     my $content = $response->decoded_content;
     
@@ -1635,22 +1836,31 @@ sub get_playlist {
         main::log_debug("First load: returning playlist with last $segment_drop segments dropped (cache has full playlist)");
     }
 
-    # Schedule next playlist update based on new segment count
-    # Use the count saved BEFORE any caching started
+    # Schedule next playlist update using FFmpeg's refresh heuristic
+    # (new segment → EXTINF, no new segment → EXTINF/2)
+    my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
+    my $next_update = time() + $delay;
+    $self->{playlist_next_update}->{$channel_id} = $next_update;
+
     if ($new_segment_count > 0) {
-        my $delay = $self->calculate_playlist_update_delay($content, $new_segment_count, $channel_id);
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        
+        # New content arrived — reset the hold counter and the CDN failure counter
+        $self->{playlist_hold_count}->{$channel_id} = 0;
         my $update_time = strftime('%Y-%m-%d %H:%M:%S', localtime($next_update));
         main::log_info(sprintf("Cached playlist for channel %s, next update scheduled in %.1f seconds at %s (%d new segments)", 
                               $channel_id, $delay, $update_time, $new_segment_count));
     } else {
-        # No new segments, schedule a default update in 6 seconds
-        my $delay = 6;
-        my $next_update = time() + $delay;
-        $self->{playlist_next_update}->{$channel_id} = $next_update;
-        main::log_debug("$new_segment_count new segments in playlist for channel $channel_id, scheduling default update in $delay seconds");
+        # No new content yet — increment the hold counter.
+        # Every MAX_HOLD_COUNT consecutive misses, escalate to record_channel_failure so
+        # the server-failover logic can eventually switch to the secondary CDN.
+        my $hold_count = ++$self->{playlist_hold_count}->{$channel_id};
+        if ($hold_count >= MAX_HOLD_COUNT) {
+            $self->record_channel_failure($channel_id,
+                sprintf("Playlist stalled: %d consecutive fetches with no new segments (%.0fs without new content)",
+                        $hold_count, $hold_count * $delay));
+            $self->{playlist_hold_count}->{$channel_id} = 0;  # reset so we escalate again after the next MAX_HOLD_COUNT misses
+        }
+        main::log_debug(sprintf("No new segments for channel %s, scheduling refresh in %.1f seconds (EXTINF/2, hold_count=%d)",
+                               $channel_id, $delay, $hold_count));
     }
     
     return $content;
@@ -1784,25 +1994,24 @@ sub calculate_playlist_update_delay {
     # Store the EXTINF duration for this channel for idle timeout checking
     $self->{channel_avg_duration}->{$channel_id} = $extinf_duration;
     
-    # Adaptive backoff strategy:
-    # - Start with EXTINF duration as base
-    # - If 1 new segments: use EXTINF-1 duration
-    # - If >1 new segment: backoff by 1.6xEXTINF
-
-    my $delay;
-    if ($new_segment_count == 1) {
-        $delay = $extinf_duration - 1;
+    # Match FFmpeg's HLS live-stream refresh heuristic:
+    # - New segment(s) found  → refresh after one full EXTINF interval
+    # - No new segment found  → refresh after half an EXTINF interval (poll faster)
+    my ($delay, $strategy);
+    if ($new_segment_count > 0) {
+        $delay    = $extinf_duration;
+        $strategy = "EXTINF";
     } else {
-        $delay = $extinf_duration * 1.6;
+        $delay    = $extinf_duration / 2.0;
+        $strategy = "EXTINF/2";
     }
-    
-    # Ensure delay is at least 5 seconds and at most 30 seconds
-    $delay = 5 if $delay < 5;
+
+    # Clamp to a sensible range
+    $delay = 2  if $delay < 2;
     $delay = 30 if $delay > 30;
-    
-    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)", 
-                           $delay, $extinf_duration, $new_segment_count, 
-                           $new_segment_count == 1 ? "EXTINF" : "backup 1.6"));
+
+    main::log_debug(sprintf("Calculated playlist update delay: %.1f seconds (EXTINF: %.1f, new segments: %d, strategy: %s)",
+                           $delay, $extinf_duration, $new_segment_count, $strategy));
     
     return $delay;
 }
@@ -1881,9 +2090,27 @@ sub cache_next_segment {
             # Store in cache
             $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
             main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+            # Clear any retry counter on success
+            delete $self->{segment_retry_count}->{$channel_id}->{$segment_path};
             $cached_count++;
         } else {
-            main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+            # Track retry attempts for this segment
+            $self->{segment_retry_count}->{$channel_id} //= {};
+            my $retries = ++$self->{segment_retry_count}->{$channel_id}->{$segment_path};
+
+            if ($retries <= MAX_SEGMENT_RETRIES) {
+                main::log_warn("Failed to cache segment: $segment_path for channel $channel_id"
+                    . " (attempt $retries/" . MAX_SEGMENT_RETRIES . "), will retry in ~1s");
+                # Put the segment back at the front of the queue so the next scheduler
+                # tick (~1 s) retries it, rather than waiting for the next playlist refresh.
+                unshift @$queue, $segment_path;
+            } else {
+                main::log_warn("Failed to cache segment: $segment_path for channel $channel_id"
+                    . " after " . MAX_SEGMENT_RETRIES . " attempts, dropping segment");
+                delete $self->{segment_retry_count}->{$channel_id}->{$segment_path};
+            }
+            # Stop this batch — don't skip past a failed segment on this tick.
+            last;
         }
     }
     
@@ -2060,9 +2287,7 @@ sub get_segment {
     my $server_url = $server_name eq 'primary' ? LIVE_PRIMARY_HLS : LIVE_SECONDARY_HLS;
     my $url = $server_url . "/$base_path/$path";
     
-    # Set channel context for token retrieval
-    $self->set_channel_context($channel_id);
-    
+    # Auth tokens come from the global jar; no set_channel_context needed
     my $token = $self->get_sxmak_token($channel_id);
     my $gup_id = $self->get_gup_id($channel_id);
     
@@ -2078,13 +2303,20 @@ sub get_segment {
     main::log_info("Getting segment: $url");
     main::log_trace("Channel ID: $channel_id, Base path: $base_path, Server: $server_name");
     
-    my $response = $self->{ua}->get($uri);
+    my $request  = HTTP::Request->new(GET => $uri);
+    my $response = $self->make_channel_request($request, $channel_id);
     
-    if ($response->code == 403 || $response->code == 500) {
-        # Record server failure for these error codes
-        my $error_msg = "Received status code " . $response->code . " on segment for channel: $channel_id";
+    if ($response->code == 500) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
         $self->record_channel_failure($channel_id, $error_msg);
-        
+        main::log_warn("$error_msg – server may be temporarily unavailable, preserving cookies");
+        return undef;
+    } elsif ($response->code == 403) {
+        my $status_code = $response->code;
+        my $error_msg = "Received status code $status_code on segment for channel: $channel_id";
+        $self->record_channel_failure($channel_id, $error_msg);
+
         if ($max_attempts > 0) {
             main::log_warn("$error_msg, renewing session");
             
@@ -2094,7 +2326,7 @@ sub get_segment {
                 main::log_trace("Session renewed successfully for channel: $channel_id, retrying segment request");
                 return $self->get_segment($path, $max_attempts - 1);
             } else {
-                # If re-authentication failed, clear all cookies (auth issue is likely global)
+                # A 403 is a genuine auth rejection – clear cookies and try a fresh login.
                 main::log_debug("Re-authentication failed, clearing all cookies and retrying for channel $channel_id");
                 $self->clear_all_cookies();
                 main::log_trace("Attempting to authenticate for channel: $channel_id after clearing all cookies");
@@ -2241,7 +2473,6 @@ sub refresh_channel_cache_if_expired {
     if (time() >= $self->{jsessionid_expires}) {
         my $hours = int(SESSION_MAX_LIFE / 3600);
         main::log_info("Background channel refresh: JSESSIONID expired (tracked lifetime ~${hours}h), re-authenticating...");
-        $self->set_channel_context(undef);
         if (!$self->authenticate(undef)) {
             main::log_warn("Background channel refresh: re-authentication failed – keeping existing channel list, retry in 5 minutes");
             return;
@@ -2250,14 +2481,11 @@ sub refresh_channel_cache_if_expired {
     } else {
         my $remaining = int(($self->{jsessionid_expires} - time()) / 60);
         main::log_debug("Background channel refresh: JSESSIONID valid for ${remaining}m, skipping re-auth");
-        $self->set_channel_context(undef);
     }
 
     my $old_channels = $self->{channels};
 
     eval {
-        $self->set_channel_context(undef);
-
         my $postdata = {
             moduleList => {
                 modules => [{
@@ -2510,16 +2738,30 @@ sub refresh_expired_playlists {
         my $channel_name = $self->{playlist_channel_name}->{$channel_id};
         
         if ($channel_name) {
-            # Manually clear the playlist cache to avoid expiring authentication
+            # Save old playlist content so clients keep getting something if the refresh fails
+            my $old_cache = $self->{playlist_cache}->{$channel_id};
+
+            # Clear the playlist content cache so get_playlist fetches a fresh copy
             delete $self->{playlist_cache}->{$channel_id};
             delete $self->{playlist_next_update}->{$channel_id};
-            
-            # Fetch new playlist (this will update the cache and schedule next update)
+
+            # Fetch new playlist (this will update the cache and schedule next update on success)
+            my $result;
             eval {
-                $self->get_playlist($channel_name, 1);  # Use cache for auth, but we cleared playlist cache above
+                $result = $self->get_playlist($channel_name, 1);
             };
             if ($@) {
                 main::log_warn("Error refreshing playlist for channel $channel_id: $@");
+                $result = undef;
+            }
+
+            if (!$result) {
+                # Fetch failed (e.g. transient server error) — restore old cache so clients
+                # are still served during the outage, and reschedule a retry in 2 seconds
+                # instead of dropping the channel from the background refresh queue.
+                $self->{playlist_cache}->{$channel_id} = $old_cache if $old_cache;
+                $self->{playlist_next_update}->{$channel_id} = time() + 2;
+                main::log_debug("Background refresh failed for channel $channel_id, retrying in 2 seconds");
             }
         } else {
             main::log_warn("Could not find channel name for channel_id $channel_id in cache");
@@ -2618,11 +2860,16 @@ sub clear_channel_cache {
     # Clear segment cache and queue
     delete $self->{segment_cache}->{$channel_id};
     delete $self->{segment_queue}->{$channel_id};
+    delete $self->{segment_retry_count}->{$channel_id};
     delete $self->{last_segment}->{$channel_id};
     
     # Clear activity tracking
     delete $self->{channel_last_activity}->{$channel_id};
     delete $self->{channel_avg_duration}->{$channel_id};
+    delete $self->{playlist_hold_count}->{$channel_id};
+    
+    # Reset server selection so the next new session tries primary again
+    $self->reset_channel_server($channel_id);
     
     main::log_debug("Cleared playlist, segment cache, and activity data for channel $channel_id");
 }
