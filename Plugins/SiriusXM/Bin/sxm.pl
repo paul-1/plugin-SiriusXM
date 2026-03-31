@@ -390,6 +390,8 @@ use constant {
     MAX_HOLD_COUNT          => 3,   # Consecutive no-new-segment fetches before treating as server failure
                                     # (3 × EXTINF/2 ≈ 15 s without new content per event;
                                     #  5 such events → SERVER_FAILURE_THRESHOLD → server switch)
+    MAX_SEGMENT_RETRIES     => 3,   # Max consecutive fetch failures per segment before dropping it
+                                    # (~1 s between each retry via process_segment_queues interval)
     SESSION_MAX_LIFE        => 14400,  # JSESSIONID estimated lifetime: 14400s (4 hours)
     CHANNEL_CACHE_TTL       => 86400, # Channel list cache lifetime: 24 hours
 };
@@ -419,6 +421,7 @@ sub new {
         channel_cookies => {},  # Store per-channel cookie jars
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
+        segment_retry_count => {}, # Track consecutive fetch failures per segment (per channel)
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
         playlist_channel_name => {}, # Store channel name for each channel_id for efficient lookup
@@ -2087,9 +2090,27 @@ sub cache_next_segment {
             # Store in cache
             $self->{segment_cache}->{$channel_id}->{$segment_path} = $segment_data;
             main::log_info("Cached segment: $segment_path (" . length($segment_data) . " bytes) for channel $channel_id");
+            # Clear any retry counter on success
+            delete $self->{segment_retry_count}->{$channel_id}->{$segment_path};
             $cached_count++;
         } else {
-            main::log_warn("Failed to cache segment: $segment_path for channel $channel_id");
+            # Track retry attempts for this segment
+            $self->{segment_retry_count}->{$channel_id} //= {};
+            my $retries = ++$self->{segment_retry_count}->{$channel_id}->{$segment_path};
+
+            if ($retries <= MAX_SEGMENT_RETRIES) {
+                main::log_warn("Failed to cache segment: $segment_path for channel $channel_id"
+                    . " (attempt $retries/" . MAX_SEGMENT_RETRIES . "), will retry in ~1s");
+                # Put the segment back at the front of the queue so the next scheduler
+                # tick (~1 s) retries it, rather than waiting for the next playlist refresh.
+                unshift @$queue, $segment_path;
+            } else {
+                main::log_warn("Failed to cache segment: $segment_path for channel $channel_id"
+                    . " after " . MAX_SEGMENT_RETRIES . " attempts, dropping segment");
+                delete $self->{segment_retry_count}->{$channel_id}->{$segment_path};
+            }
+            # Stop this batch — don't skip past a failed segment on this tick.
+            last;
         }
     }
     
@@ -2839,6 +2860,7 @@ sub clear_channel_cache {
     # Clear segment cache and queue
     delete $self->{segment_cache}->{$channel_id};
     delete $self->{segment_queue}->{$channel_id};
+    delete $self->{segment_retry_count}->{$channel_id};
     delete $self->{last_segment}->{$channel_id};
     
     # Clear activity tracking
