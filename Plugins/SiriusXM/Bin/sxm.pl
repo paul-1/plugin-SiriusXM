@@ -377,7 +377,6 @@ use HTTP::Request;
 use JSON::XS;
 use File::Basename;
 use File::Spec;
-use Socket qw(getaddrinfo getnameinfo AF_INET SOCK_STREAM AI_ADDRCONFIG NI_NUMERICHOST);
 #use Data::Dumper;
 
 # Constants
@@ -1073,7 +1072,7 @@ sub make_channel_request {
 # LWP will automatically open a fresh TCP connection on the retry; keep-alive
 # is best-effort and the server may close idle sockets at any time.
 # If the failure looks like a broken IPv6 route (ENETUNREACH / EHOSTUNREACH),
-# one additional retry is attempted using an IPv4 literal address so that
+# one additional retry is attempted forcing an IPv4-only socket so that
 # hosts with absent IPv6 routing still work.
 sub _ua_request_with_retry {
     my ($self, $request) = @_;
@@ -1100,40 +1099,27 @@ sub _ua_request_with_retry {
     return $response;
 }
 
-# Resolve the request's hostname to an IPv4 address and replay the request
-# using that literal, while preserving the original Host header for TLS SNI
-# and virtual-host routing.  Returns the new response, or undef on failure.
+# Retry the same request over an IPv4-only socket.
+# Binding the local socket to the IPv4 wildcard address (0.0.0.0) forces
+# IO::Socket::IP to create an AF_INET socket, which means getaddrinfo will
+# only consider IPv4 results even when DNS returns AAAA records first.
+# The original hostname stays in the URL so TLS SNI works without any changes.
+# Returns the new response, or undef if the UA itself throws an exception.
 sub _retry_via_ipv4 {
     my ($self, $request, $original_error) = @_;
 
-    my $uri  = $request->uri;
-    my $host = URI->new("$uri")->host;
-    my $port = URI->new("$uri")->port // 443;
+    my $host = URI->new($request->uri)->host;
+    main::log_warn("IPv6 connect failed ($original_error) - retrying via IPv4 for $host");
 
-    my ($err, @res) = getaddrinfo($host, $port, { socktype => SOCK_STREAM, family => AF_INET });
-    if ($err || !@res) {
-        main::log_warn("IPv6 connect failed ($original_error); could not resolve an IPv4 address for $host");
-        return undef;
-    }
+    # Save the existing local_address (usually undef), force IPv4, then restore.
+    my $saved_local = $self->{ua}->local_address;
+    $self->{ua}->local_address('0.0.0.0');
+    my $response = eval { $self->{ua}->request($request) };
+    my $err = $@;
+    $self->{ua}->local_address($saved_local);
+    die $err if $err;
 
-    my ($ni_err, $ipv4) = getnameinfo($res[0]{addr}, NI_NUMERICHOST);
-    if ($ni_err || !$ipv4) {
-        main::log_warn("IPv6 connect failed ($original_error); failed to format IPv4 address for $host");
-        return undef;
-    }
-
-    # Build a new URI that points at the IPv4 literal while keeping the path/query.
-    my $ipv4_uri = URI->new("$uri");
-    $ipv4_uri->host($ipv4);
-
-    main::log_warn("IPv6 connect failed ($original_error) - retrying via IPv4 $ipv4 for $host");
-
-    my $ipv4_request = $request->clone;
-    $ipv4_request->uri($ipv4_uri);
-    # Preserve original Host so that TLS SNI and vhost routing work correctly.
-    $ipv4_request->header('Host' => $host);
-
-    return $self->{ua}->request($ipv4_request);
+    return $response;
 }
 
 # Log the names (never values) of all cookies in $jar.
