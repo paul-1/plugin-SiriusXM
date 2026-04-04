@@ -502,6 +502,7 @@ sub new {
         agent      => USER_AGENT,
         cookie_jar => $cookie_jar,
         timeout    => 30,
+        keep_alive => 1,   # reuse TCP connections; server may still close idle sockets
     );
 
     # Analyze and log cookie information now that $self->{ua} is ready.
@@ -1043,7 +1044,7 @@ sub make_channel_request {
     unless (defined $channel_id) {
         # Global request: use the UA with its global jar unchanged
         main::log_trace("Global request via UA global jar: " . $request->uri);
-        return $self->{ua}->request($request);
+        return $self->_ua_request_with_retry($request);
     }
 
     # Channel request: merge cookies manually, bypass LWP auto-cookie handling
@@ -1056,13 +1057,31 @@ sub make_channel_request {
     my $saved_jar = $self->{ua}->cookie_jar;
     $self->{ua}->cookie_jar(HTTP::Cookies->new());
 
-    my $response = $self->{ua}->request($request);
+    my $response = $self->_ua_request_with_retry($request);
 
     # Restore the global jar immediately after the request
     $self->{ua}->cookie_jar($saved_jar);
 
     # Route Set-Cookie headers to the appropriate jars
     $self->route_response_cookies($response, $channel_id);
+
+    return $response;
+}
+
+# Wrap $ua->request with a single retry on connection-drop style failures.
+# LWP will automatically open a fresh TCP connection on the retry; keep-alive
+# is best-effort and the server may close idle sockets at any time.
+sub _ua_request_with_retry {
+    my ($self, $request) = @_;
+
+    my $response = $self->{ua}->request($request);
+    return $response if $response->is_success;
+
+    my $status = $response->status_line // '';
+    if ($status =~ /(?:timeout|read timed out|connection reset|broken pipe|closed|EOF)/i) {
+        main::log_warn("Connection issue ($status) - retrying once with a new TCP connection");
+        $response = $self->{ua}->request($request);
+    }
 
     return $response;
 }
