@@ -1100,11 +1100,23 @@ sub _ua_request_with_retry {
 }
 
 # Retry the same request forcing an IPv4-only socket.
-# We temporarily prepend Family => AF_INET to @LWP::Protocol::http::EXTRA_SOCK_OPTS,
-# which is appended verbatim to every IO::Socket::IP (and IO::Socket::SSL) new()
-# call made by both the http and https LWP protocol handlers.  IO::Socket::IP
-# honours the Family argument by restricting getaddrinfo to AF_INET results,
-# so AAAA records are never tried even if DNS returns them first.
+#
+# The full socket-creation call chain for HTTPS is:
+#   LWP::Protocol::https::Socket->new(...)
+#     -> Net::HTTPS::configure -> http_configure -> http_connect
+#     -> IO::Socket::SSL::configure -> IO::Socket::IP::configure
+#
+# IO::Socket::IP::configure is the function that calls getaddrinfo and
+# creates the actual socket.  Depending on the version of IO::Socket::SSL
+# bundled with LMS, the Family hint set in @EXTRA_SOCK_OPTS may be silently
+# dropped or transformed before it reaches IO::Socket::IP::configure.
+#
+# To guarantee the restriction, we temporarily monkey-patch
+# IO::Socket::IP::configure itself — every layer above it eventually calls
+# it via SUPER, so our patch intercepts the call no matter what the SSL/HTTP
+# wrappers do with the socket arguments first.  @EXTRA_SOCK_OPTS is also set
+# as belt-and-suspenders for any non-IO::Socket::IP backend.
+#
 # The original hostname stays in the URL, so TLS SNI works without changes.
 # Returns the new response, or undef if the UA itself throws an exception.
 sub _retry_via_ipv4 {
@@ -1113,14 +1125,37 @@ sub _retry_via_ipv4 {
     my $host = URI->new($request->uri)->host;
     main::log_warn("IPv6 connect failed ($original_error) - retrying via IPv4 for $host");
 
-    # Temporarily inject Family => AF_INET into the LWP extra socket options.
-    # This is the most reliable hook available: it reaches IO::Socket::IP
-    # directly regardless of whether the SSL layer is in the call chain.
     require Socket;
+
+    # Belt-and-suspenders: set EXTRA_SOCK_OPTS in case a non-IO::Socket::IP
+    # backend is in use (Family for IO::Socket::IP, Domain for INET6).
     my @saved_opts = @LWP::Protocol::http::EXTRA_SOCK_OPTS;
-    @LWP::Protocol::http::EXTRA_SOCK_OPTS = (Family => Socket::AF_INET(), @saved_opts);
-    my $response = eval { $self->{ua}->request($request) };
-    my $err = $@;
+    @LWP::Protocol::http::EXTRA_SOCK_OPTS = (
+        Family => Socket::AF_INET(),
+        Domain => Socket::AF_INET(),
+        @saved_opts,
+    );
+
+    my ($response, $err);
+    if (defined &IO::Socket::IP::configure) {
+        # Primary mechanism: patch IO::Socket::IP::configure so Family=>AF_INET
+        # is always present when getaddrinfo is called, even if upper layers
+        # (IO::Socket::SSL, Net::HTTPS) have already stripped or ignored it.
+        my $orig = \&IO::Socket::IP::configure;
+        no warnings 'redefine';
+        local *IO::Socket::IP::configure = sub {
+            my ($io_self, $arg) = @_;
+            $arg->{Family} = Socket::AF_INET();
+            $orig->($io_self, $arg);
+        };
+        $response = eval { $self->{ua}->request($request) };
+        $err = $@;
+    }
+    else {
+        $response = eval { $self->{ua}->request($request) };
+        $err = $@;
+    }
+
     @LWP::Protocol::http::EXTRA_SOCK_OPTS = @saved_opts;
     die $err if $err;
 
