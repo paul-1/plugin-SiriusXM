@@ -377,6 +377,7 @@ use HTTP::Request;
 use JSON::XS;
 use File::Basename;
 use File::Spec;
+use Socket qw(getaddrinfo getnameinfo AF_INET SOCK_STREAM AI_ADDRCONFIG NI_NUMERICHOST);
 #use Data::Dumper;
 
 # Constants
@@ -1071,6 +1072,9 @@ sub make_channel_request {
 # Wrap $ua->request with a single retry on connection-drop style failures.
 # LWP will automatically open a fresh TCP connection on the retry; keep-alive
 # is best-effort and the server may close idle sockets at any time.
+# If the failure looks like a broken IPv6 route (ENETUNREACH / EHOSTUNREACH),
+# one additional retry is attempted using an IPv4 literal address so that
+# hosts with absent IPv6 routing still work.
 sub _ua_request_with_retry {
     my ($self, $request) = @_;
 
@@ -1081,9 +1085,55 @@ sub _ua_request_with_retry {
     if ($status =~ /(?:timeout|read timed out|connection reset|broken pipe|closed|EOF)/i) {
         main::log_warn("Connection issue ($status) - retrying once with a new TCP connection");
         $response = $self->{ua}->request($request);
+        return $response if $response->is_success;
+        $status = $response->status_line // '';
+    }
+
+    # Broken/absent IPv6 routing: OS returns ENETUNREACH or EHOSTUNREACH before
+    # any TCP connection is established.  Retry once via an IPv4 address so that
+    # hosts where "curl -6 <url>" fails but "curl -4 <url>" works keep streaming.
+    if ($status =~ /Network is unreachable|No route to host|Cannot assign requested address/i) {
+        my $ipv4_response = $self->_retry_via_ipv4($request, $status);
+        $response = $ipv4_response if defined $ipv4_response;
     }
 
     return $response;
+}
+
+# Resolve the request's hostname to an IPv4 address and replay the request
+# using that literal, while preserving the original Host header for TLS SNI
+# and virtual-host routing.  Returns the new response, or undef on failure.
+sub _retry_via_ipv4 {
+    my ($self, $request, $original_error) = @_;
+
+    my $uri  = $request->uri;
+    my $host = URI->new("$uri")->host;
+    my $port = URI->new("$uri")->port // 443;
+
+    my ($err, @res) = getaddrinfo($host, $port, { socktype => SOCK_STREAM, family => AF_INET });
+    if ($err || !@res) {
+        main::log_warn("IPv6 connect failed ($original_error); could not resolve an IPv4 address for $host");
+        return undef;
+    }
+
+    my ($ni_err, $ipv4) = getnameinfo($res[0]{addr}, NI_NUMERICHOST);
+    if ($ni_err || !$ipv4) {
+        main::log_warn("IPv6 connect failed ($original_error); failed to format IPv4 address for $host");
+        return undef;
+    }
+
+    # Build a new URI that points at the IPv4 literal while keeping the path/query.
+    my $ipv4_uri = URI->new("$uri");
+    $ipv4_uri->host($ipv4);
+
+    main::log_warn("IPv6 connect failed ($original_error) - retrying via IPv4 $ipv4 for $host");
+
+    my $ipv4_request = $request->clone;
+    $ipv4_request->uri($ipv4_uri);
+    # Preserve original Host so that TLS SNI and vhost routing work correctly.
+    $ipv4_request->header('Host' => $host);
+
+    return $self->{ua}->request($ipv4_request);
 }
 
 # Log the names (never values) of all cookies in $jar.
