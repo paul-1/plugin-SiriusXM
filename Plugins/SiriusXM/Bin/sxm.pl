@@ -438,6 +438,11 @@ sub new {
         channel_cache_file    => undef,  # Path to channel list cache file (channels.json)
         channel_cache_expires => 0,      # Unix timestamp when channel cache expires (0 = expired)
 
+        # Per-channel server-selection state file (server_state.json) – separate from the
+        # channel cache so that server switches can be persisted immediately without
+        # rewriting the entire (large) channel list.
+        server_state_file     => undef,
+
         # Tracked JSESSIONID expiry (cookie carries no timestamp; we set it ourselves)
         jsessionid_expires    => 0,      # Unix timestamp; 0 = treat as expired, triggers re-auth
 
@@ -521,8 +526,12 @@ sub new {
         $self->{channel_cache_file} = File::Spec->catfile($cache_dir, 'channels.json');
         main::log_debug("Channel cache file: $self->{channel_cache_file}");
 
-        # Load channel list from disk cache at startup
+        # Set up server state file path (lightweight, written on every server switch)
+        $self->{server_state_file} = File::Spec->catfile($cache_dir, 'server_state.json');
+
+        # Load channel list and server state from disk at startup
         $self->load_channel_cache();
+        $self->load_server_state();
     }
 
     return $self;
@@ -798,6 +807,9 @@ sub switch_channel_server {
     delete $self->{playlists}->{$channel_id}->{'url'};
     
     main::log_info("Channel $channel_id: switched from $old_server to $new_server server");
+
+    # Persist the new server selection immediately (small file, written on every switch)
+    $self->save_server_state();
 }
 
 # Reset channel to primary server (called when starting new playback)
@@ -811,6 +823,9 @@ sub reset_channel_server {
         $self->{channel_server}->{$channel_id} = 'primary';
         $self->{channel_failure_count}->{$channel_id} = 0;
         delete $self->{playlists}->{$channel_id}->{'url'};
+
+        # Persist the reset so it survives the next restart
+        $self->save_server_state();
     }
 }
 
@@ -2415,14 +2430,6 @@ sub load_channel_cache {
             main::log_debug("No tracked JSESSIONID expiry in cache, re-auth will run on next refresh");
         }
 
-        # Restore per-channel server selection (primary/secondary) so active channels
-        # resume on the same CDN server they were using before the restart.
-        if ($cache_data->{channel_server} && ref($cache_data->{channel_server}) eq 'HASH') {
-            $self->{channel_server} = $cache_data->{channel_server};
-            my $server_count = scalar keys %{$self->{channel_server}};
-            main::log_debug("Restored server selection for $server_count channel(s) from cache") if $server_count;
-        }
-
         if ($cache_data->{expires_at} <= $now) {
             # Cache is expired – load it anyway so we can serve data during background refresh
             my $expired_at = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($cache_data->{expires_at}));
@@ -2461,8 +2468,6 @@ sub save_channel_cache {
             expires_at         => $expires_at,
             jsessionid_expires => $self->{jsessionid_expires} || 0,
             channels           => $self->{channels},
-            # Persist per-channel server selection (primary/secondary) so it survives restarts
-            channel_server     => $self->{channel_server} || {},
         };
 
         open(my $fh, '>', $self->{channel_cache_file}) or die "Cannot open: $!";
@@ -2477,6 +2482,53 @@ sub save_channel_cache {
     if ($@) {
         main::log_warn("Error saving channel cache to $self->{channel_cache_file}: $@");
     }
+}
+
+# Save per-channel server selection to a dedicated lightweight file (server_state.json).
+# This is written on every server switch so state is always current, without the overhead
+# of rewriting the full (large) channel list cache.
+sub save_server_state {
+    my ($self) = @_;
+
+    return unless $self->{server_state_file};
+
+    eval {
+        my $state = { channel_server => $self->{channel_server} || {} };
+        open(my $fh, '>', $self->{server_state_file}) or die "Cannot open: $!";
+        print $fh $self->{json}->encode($state);
+        close($fh);
+        main::log_debug("Saved server state to $self->{server_state_file}");
+    };
+    if ($@) {
+        main::log_warn("Error saving server state to $self->{server_state_file}: $@");
+    }
+}
+
+# Load per-channel server selection from server_state.json on startup.
+# Backward-compatible: silently skips if the file does not exist yet.
+sub load_server_state {
+    my ($self) = @_;
+
+    return 0 unless $self->{server_state_file} && -e $self->{server_state_file};
+
+    eval {
+        open(my $fh, '<', $self->{server_state_file}) or die "Cannot open: $!";
+        my $content = do { local $/; <$fh> };
+        close($fh);
+
+        my $state = $self->{json}->decode($content);
+        if ($state->{channel_server} && ref($state->{channel_server}) eq 'HASH') {
+            $self->{channel_server} = $state->{channel_server};
+            my $count = scalar keys %{$self->{channel_server}};
+            main::log_debug("Restored server selection for $count channel(s) from $self->{server_state_file}") if $count;
+        }
+    };
+    if ($@) {
+        main::log_warn("Error loading server state from $self->{server_state_file}: $@");
+        return 0;
+    }
+
+    return 1;
 }
 
 # Background refresh: fetch fresh channel list from API when the cache has expired.
