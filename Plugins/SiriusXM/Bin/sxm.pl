@@ -2415,6 +2415,14 @@ sub load_channel_cache {
             main::log_debug("No tracked JSESSIONID expiry in cache, re-auth will run on next refresh");
         }
 
+        # Restore per-channel server selection (primary/secondary) so active channels
+        # resume on the same CDN server they were using before the restart.
+        if ($cache_data->{channel_server} && ref($cache_data->{channel_server}) eq 'HASH') {
+            $self->{channel_server} = $cache_data->{channel_server};
+            my $server_count = scalar keys %{$self->{channel_server}};
+            main::log_debug("Restored server selection for $server_count channel(s) from cache") if $server_count;
+        }
+
         if ($cache_data->{expires_at} <= $now) {
             # Cache is expired – load it anyway so we can serve data during background refresh
             my $expired_at = strftime('%Y-%m-%d %H:%M:%S UTC', gmtime($cache_data->{expires_at}));
@@ -2453,6 +2461,8 @@ sub save_channel_cache {
             expires_at         => $expires_at,
             jsessionid_expires => $self->{jsessionid_expires} || 0,
             channels           => $self->{channels},
+            # Persist per-channel server selection (primary/secondary) so it survives restarts
+            channel_server     => $self->{channel_server} || {},
         };
 
         open(my $fh, '>', $self->{channel_cache_file}) or die "Cannot open: $!";
