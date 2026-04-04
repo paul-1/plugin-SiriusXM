@@ -1099,11 +1099,13 @@ sub _ua_request_with_retry {
     return $response;
 }
 
-# Retry the same request over an IPv4-only socket.
-# Binding the local socket to the IPv4 wildcard address (0.0.0.0) forces
-# IO::Socket::IP to create an AF_INET socket, which means getaddrinfo will
-# only consider IPv4 results even when DNS returns AAAA records first.
-# The original hostname stays in the URL so TLS SNI works without any changes.
+# Retry the same request forcing an IPv4-only socket.
+# We temporarily prepend Family => AF_INET to @LWP::Protocol::http::EXTRA_SOCK_OPTS,
+# which is appended verbatim to every IO::Socket::IP (and IO::Socket::SSL) new()
+# call made by both the http and https LWP protocol handlers.  IO::Socket::IP
+# honours the Family argument by restricting getaddrinfo to AF_INET results,
+# so AAAA records are never tried even if DNS returns them first.
+# The original hostname stays in the URL, so TLS SNI works without changes.
 # Returns the new response, or undef if the UA itself throws an exception.
 sub _retry_via_ipv4 {
     my ($self, $request, $original_error) = @_;
@@ -1111,12 +1113,15 @@ sub _retry_via_ipv4 {
     my $host = URI->new($request->uri)->host;
     main::log_warn("IPv6 connect failed ($original_error) - retrying via IPv4 for $host");
 
-    # Save the existing local_address (usually undef), force IPv4, then restore.
-    my $saved_local = $self->{ua}->local_address;
-    $self->{ua}->local_address('0.0.0.0');
+    # Temporarily inject Family => AF_INET into the LWP extra socket options.
+    # This is the most reliable hook available: it reaches IO::Socket::IP
+    # directly regardless of whether the SSL layer is in the call chain.
+    require Socket;
+    my @saved_opts = @LWP::Protocol::http::EXTRA_SOCK_OPTS;
+    @LWP::Protocol::http::EXTRA_SOCK_OPTS = (Family => Socket::AF_INET(), @saved_opts);
     my $response = eval { $self->{ua}->request($request) };
     my $err = $@;
-    $self->{ua}->local_address($saved_local);
+    @LWP::Protocol::http::EXTRA_SOCK_OPTS = @saved_opts;
     die $err if $err;
 
     return $response;
