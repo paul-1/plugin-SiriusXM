@@ -16,7 +16,7 @@ my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
 # Cache timeout in seconds
-use constant CACHE_TIMEOUT => 86400; # 24 hours (1 day)
+use constant CACHE_TIMEOUT => 14400; # 4 hours
 
 # Track in-flight channel requests to prevent concurrent calls
 my %channel_fetch_callbacks = ();
