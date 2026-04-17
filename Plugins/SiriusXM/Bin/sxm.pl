@@ -15,7 +15,7 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
-        --segment-drop NUM      Number of segments to drop from first playlist (default: 3, max: 30)
+        --segment-drop NUM      Number of segments to drop from first playlist (default: 3, values >30 are clamped to 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
         --cookiefile FILE       Cookie storage file (default: <cache_dir>/siriusxm-cookies.txt)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
@@ -147,6 +147,7 @@ use constant {
     LOG_INFO  => 2,
     LOG_DEBUG => 3,
     LOG_TRACE => 4,
+    MAX_SEGMENT_DROP => 30,
 };
 
 # Global configuration
@@ -355,6 +356,19 @@ sub signal_handler {
     }
     
     exit(0);
+}
+
+sub effective_segment_drop {
+    my ($segment_drop) = @_;
+    $segment_drop //= 0;
+    return MAX_SEGMENT_DROP if $segment_drop > MAX_SEGMENT_DROP;
+    return $segment_drop;
+}
+
+sub playlist_size_for_segment_drop {
+    my ($segment_drop) = @_;
+    my $effective_segment_drop = effective_segment_drop($segment_drop);
+    return ($effective_segment_drop >= 1 && $effective_segment_drop < 7) ? 'SMALL' : 'MEDIUM';
 }
 
 # Handle SIGPIPE gracefully - ignore broken pipe errors
@@ -1554,10 +1568,17 @@ sub get_playlist_url {
 
     # Determine which server to use for this channel
     my $desired_server = $self->get_channel_server($channel_id);
+    my $effective_segment_drop = main::effective_segment_drop($CONFIG{segment_drop});
+    my $desired_playlist_size = main::playlist_size_for_segment_drop($effective_segment_drop);
+
+    if ($effective_segment_drop != $CONFIG{segment_drop}) {
+        main::log_debug("segment_drop configured as $CONFIG{segment_drop} exceeds max " . main::MAX_SEGMENT_DROP() . ", using $effective_segment_drop");
+    }
+    main::log_info("Channel $channel_id: selecting $desired_playlist_size playlist on $desired_server server (segment_drop=$effective_segment_drop)");
     
     # Find the appropriate playlist entry (matching both size and server name)
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'MEDIUM' && $playlist_info->{name} eq $desired_server) {
+        if ($playlist_info->{size} eq $desired_playlist_size && $playlist_info->{name} eq $desired_server) {
             my $playlist_url = $playlist_info->{url};
             
             # Replace the placeholder with actual server URL
@@ -1567,7 +1588,7 @@ sub get_playlist_url {
                 $playlist_url =~ s/%Live_Secondary_HLS%/@{[LIVE_SECONDARY_HLS]}/g;
             }
             
-            main::log_info("Channel $channel_id: using $desired_server server playlist");
+            main::log_debug("Channel $channel_id: using $desired_server server $desired_playlist_size playlist");
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
@@ -1578,7 +1599,7 @@ sub get_playlist_url {
         }
     }
     
-    main::log_error("No suitable $desired_server playlist found for channel: $channel_id");
+    main::log_error("No suitable $desired_server $desired_playlist_size playlist found for channel: $channel_id");
     return undef;
 }
 
@@ -1664,6 +1685,7 @@ sub get_playlist_variant_url {
 # Trim playlist to reduce size from 1800+ segments to a manageable window
 sub drop_last_segments {
     my ($self, $content, $segment_drop) = @_;
+    $segment_drop = main::effective_segment_drop($segment_drop);
     
     # Drop last N segments from playlist (for first load only)
     # Following Apple HLS specification
@@ -1718,7 +1740,10 @@ sub get_playlist {
     }
     
     # Check if caching is disabled (segment_drop == 0)
-    my $segment_drop = $CONFIG{segment_drop};
+    my $segment_drop = main::effective_segment_drop($CONFIG{segment_drop});
+    if ($segment_drop != $CONFIG{segment_drop}) {
+        main::log_debug("segment_drop configured as $CONFIG{segment_drop} exceeds max " . main::MAX_SEGMENT_DROP() . ", using $segment_drop");
+    }
     my $caching_enabled = $segment_drop >= 1;
     
     # Check if we have a cached playlist and it's not time to update yet
@@ -3284,10 +3309,11 @@ sub parse_arguments {
         },
         'segment-drop=i' => sub {
             my ($name, $value) = @_;
-            if ($value < 0 || $value > 30) {
-                die "Invalid segment-drop value: $value. Must be between 0 and 30\n";
+            my $effective_value = effective_segment_drop($value);
+            if ($effective_value != $value) {
+                warn "segment-drop value $value exceeds max " . MAX_SEGMENT_DROP . ", clamping to $effective_value\n";
             }
-            $CONFIG{segment_drop} = $value;
+            $CONFIG{segment_drop} = $effective_value;
         },
         'logfile=s'     => \$CONFIG{logfile},
         'cookiefile=s'  => \$CONFIG{cookiefile},
