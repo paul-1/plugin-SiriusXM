@@ -15,7 +15,7 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
-        --segment-drop NUM      Number of segments to drop from first playlist (default: 2)
+        --segment-drop NUM      Number of segments to drop from first playlist (default: 0, max: 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
         --cookiefile FILE       Cookie storage file (default: <cache_dir>/siriusxm-cookies.txt)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
@@ -1733,7 +1733,6 @@ sub get_playlist {
     
     # Check if caching is disabled (segment_drop == 0)
     my $segment_drop = $CONFIG{segment_drop};
-
     my $caching_enabled = $segment_drop >= 1;
     
     # Check if we have a cached playlist and it's not time to update yet
