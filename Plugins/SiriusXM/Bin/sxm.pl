@@ -15,7 +15,7 @@ sxm.pl - SiriusXM proxy server
         -e, --env               Use SXM_USER and SXM_PASS environment variables
         -v, --verbose LEVEL     Set logging level (ERROR, WARN, INFO, DEBUG, TRACE)
         -q, --quality QUALITY   Audio quality: High (256k, default), Med (96k), Low (64k)
-        --segment-drop NUM      Number of segments to drop from first playlist (default: 3, max: 30)
+        --segment-drop NUM      Number of segments to drop from first playlist (default: 0, max: 30)
         --logfile FILE          Log file location (default: /var/log/sxm-proxy.log)
         --cookiefile FILE       Cookie storage file (default: <cache_dir>/siriusxm-cookies.txt)
         --lmsroot DIR           Specify LMS root directory (Not needed when running inside LMS)
@@ -355,6 +355,14 @@ sub signal_handler {
     }
     
     exit(0);
+}
+
+sub playlist_size_for_segment_drop {
+    my ($segment_drop) = @_;
+    $segment_drop //= 0;
+    return ($segment_drop <= 15) ? 'SMALLL'
+         : ($segment_drop <= 30) ? 'MEDIUM'
+         : 'LARGE';
 }
 
 # Handle SIGPIPE gracefully - ignore broken pipe errors
@@ -1517,6 +1525,9 @@ sub get_playlist_url {
 
 =begin comment
    Playlist data format includes both primary and secondary servers:
+   SMALL = 17segments
+   MEDIUM = 32segments
+   LARGE = >100 segments
   [
     {
       'size' => 'SMALL',
@@ -1554,10 +1565,13 @@ sub get_playlist_url {
 
     # Determine which server to use for this channel
     my $desired_server = $self->get_channel_server($channel_id);
+    my $desired_playlist_size = main::playlist_size_for_segment_drop($CONFIG{segment_drop});
+
+    main::log_info("Channel $channel_id: selecting $desired_playlist_size playlist on $desired_server server (segment_drop=$CONFIG{segment_drop})");
     
     # Find the appropriate playlist entry (matching both size and server name)
     for my $playlist_info (@$playlists) {
-        if ($playlist_info->{size} eq 'MEDIUM' && $playlist_info->{name} eq $desired_server) {
+        if ($playlist_info->{size} eq $desired_playlist_size && $playlist_info->{name} eq $desired_server) {
             my $playlist_url = $playlist_info->{url};
             
             # Replace the placeholder with actual server URL
@@ -1567,7 +1581,7 @@ sub get_playlist_url {
                 $playlist_url =~ s/%Live_Secondary_HLS%/@{[LIVE_SECONDARY_HLS]}/g;
             }
             
-            main::log_info("Channel $channel_id: using $desired_server server playlist");
+            main::log_debug("Channel $channel_id: using $desired_server server $desired_playlist_size playlist");
             
             my $variant_url = $self->get_playlist_variant_url($playlist_url, $channel_id);
             if ($variant_url) {
@@ -1578,7 +1592,7 @@ sub get_playlist_url {
         }
     }
     
-    main::log_error("No suitable $desired_server playlist found for channel: $channel_id");
+    main::log_error("No suitable $desired_server $desired_playlist_size playlist found for channel: $channel_id");
     return undef;
 }
 
@@ -3284,8 +3298,12 @@ sub parse_arguments {
         },
         'segment-drop=i' => sub {
             my ($name, $value) = @_;
-            if ($value < 0 || $value > 30) {
-                die "Invalid segment-drop value: $value. Must be between 0 and 30\n";
+            my $orig = $value;
+            $value = 0  if $value < 0;
+            $value = 30 if $value > 30;
+
+            if ($value != $orig) {
+                warn "segment-drop value $value exceeds 30 clamping\n";
             }
             $CONFIG{segment_drop} = $value;
         },
