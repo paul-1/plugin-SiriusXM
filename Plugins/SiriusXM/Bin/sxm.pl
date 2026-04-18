@@ -360,7 +360,7 @@ sub signal_handler {
 sub playlist_size_for_segment_drop {
     my ($segment_drop) = @_;
     $segment_drop //= 0;
-    return ($segment_drop <= 15) ? 'SMALLL'
+    return ($segment_drop <= 15) ? 'SMALL'
          : ($segment_drop <= 30) ? 'MEDIUM'
          : 'LARGE';
 }
