@@ -65,7 +65,7 @@ use constant HAS_AIO      => 0;
 use constant LOCALFILE    => 0;
 use constant NOMYSB       => 1;
 
-our $VERSION = '1.1.0';
+our $VERSION = '2.0.0';
 our $REVISION    = undef;
 our $BUILDDATE   = undef;
 
