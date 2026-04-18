@@ -164,4 +164,4 @@ PLUGIN_SIRIUSXM_SEGMENT_DROP
 	EN	Playlist Cache Segments
 
 PLUGIN_SIRIUSXM_SEGMENT_DROP_DESC
-	EN	Set to 0 for no precaching, or Number of additional 10s segments behind live to start. (0-30, default: 1)
+	EN	Set to 0 for no precaching, or Number of additional 10s segments behind live to start. (0-30, default: 2)
