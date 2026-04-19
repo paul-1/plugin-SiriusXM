@@ -2233,7 +2233,7 @@ sub write_segment_pdt_file {
     my $pdt_dir = File::Spec->catdir($tmp_dir, 'siriusxm');
     if (!-d $pdt_dir) {
         eval {
-            make_path($pdt_dir, { mode => 0755 });
+            File::Path::make_path($pdt_dir, { mode => 0755 });
             1;
         } or do {
             my $err = $@ || 'unknown error';
