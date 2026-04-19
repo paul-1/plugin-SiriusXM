@@ -21,6 +21,7 @@ use Plugins::SiriusXM::APImetadata;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
+my $json_encoder = JSON::XS->new->canonical(1);
 
 # Metadata update interval (25 seconds)
 use constant METADATA_UPDATE_INTERVAL => 25;
@@ -171,7 +172,6 @@ sub onPlayerEvent {
         $playerStates{$clientId} = {
             url => $url,
             channel_info => $channel_info,
-            last_next => undef,
             last_metadata_signature => undef,
             timer => undef,
         };
@@ -206,7 +206,6 @@ sub _startMetadataTimer {
     $playerStates{$clientId} = {
         url => $url,
         channel_info => $channel_info,
-        last_next => undef,
         last_metadata_signature => undef,
         timer => undef,
     };
@@ -312,9 +311,8 @@ sub _updateClientMetadata {
     return unless $state;
 
     my $new_meta = $result->{metadata};
-    my $next = $result->{next};
     my $metadata_is_fresh = $result->{is_fresh};
-    my $metadata_signature = _metadataSignature($new_meta);
+    my $metadata_signature = _metadataSignature($new_meta, "client $clientId");
     
     # Check if metadata content has changed.
     # Using metadata signature avoids lag when xmplaylist's "next" token
@@ -333,8 +331,6 @@ sub _updateClientMetadata {
         }
     }
     
-    # Update the last_next value
-    $state->{last_next} = $next;
     $state->{last_metadata_signature} = $metadata_signature;
     
     # Update the current song's metadata if we have new information
@@ -367,10 +363,20 @@ sub _updateClientMetadata {
 }
 
 sub _metadataSignature {
-    my ($meta) = @_;
+    my ($meta, $context) = @_;
     return unless $meta && ref($meta) eq 'HASH';
+    $context ||= 'unknown context';
 
-    return JSON::XS->new->canonical(1)->encode($meta);
+    my $signature;
+    eval {
+        $signature = $json_encoder->encode($meta);
+    };
+    if ($@) {
+        $log->warn("Failed to encode metadata signature for $context: $@");
+        return;
+    }
+
+    return $signature;
 }
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs
