@@ -11,6 +11,7 @@ use JSON::XS;
 use Date::Parse;
 use Time::HiRes;
 use File::Spec;
+use Errno qw(ENOENT);
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
@@ -239,36 +240,44 @@ sub _processResponse {
     my $selected_reason = 'default latest xmplaylist record';
 
     if ($channel_info && $channel_info->{id}) {
-        my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
-        my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_info->{id} . '.txt');
-        my $play_ts = _readPlayTimestampFromFile($pdt_file);
+        my $channel_id = $channel_info->{id};
+        unless ($channel_id =~ /^[A-Za-z0-9_-]+$/ && $channel_id !~ /\.\./) {
+            $log->warn("Invalid channel id '$channel_id' for PDT lookup, falling back to latest xmplaylist record");
+            $channel_id = undef;
+        }
 
-        if (defined $play_ts) {
-            my $matched_track;
-            my $matched_ts;
+        if ($channel_id) {
+            my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || File::Spec->tmpdir() || '/tmp';
+            my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_id . '.txt');
+            my $play_ts = _readPlayTimestampFromFile($pdt_file);
 
-            for my $result (@$results) {
-                next unless $result && ref($result) eq 'HASH';
+            if (defined $play_ts) {
+                my $matched_track;
+                my $matched_ts;
 
-                my $result_ts = _parseTimestampToEpoch($result->{timestamp});
-                next unless defined $result_ts;
-                next if $result_ts > $play_ts;
+                for my $result (@$results) {
+                    next unless $result && ref($result) eq 'HASH';
 
-                if (!defined $matched_ts || $result_ts > $matched_ts) {
-                    $matched_track = $result;
-                    $matched_ts = $result_ts;
+                    my $result_ts = _parseTimestampToEpoch($result->{timestamp});
+                    next unless defined $result_ts;
+                    next if $result_ts > $play_ts;
+
+                    if (!defined $matched_ts || $result_ts > $matched_ts) {
+                        $matched_track = $result;
+                        $matched_ts = $result_ts;
+                    }
                 }
-            }
 
-            if ($matched_track) {
-                $selected_track = $matched_track;
-                $selected_reason = 'matched record at/before play timestamp';
-                $log->debug("Selected xmplaylist record timestamp " . ($selected_track->{timestamp} || 'unknown') . " for play timestamp $play_ts");
+                if ($matched_track) {
+                    $selected_track = $matched_track;
+                    $selected_reason = 'matched record at/before play timestamp';
+                    $log->debug("Selected xmplaylist record timestamp " . ($selected_track->{timestamp} || 'unknown') . " for play timestamp $play_ts");
+                } else {
+                    $log->debug("No xmplaylist record timestamp <= play timestamp $play_ts, falling back to latest record");
+                }
             } else {
-                $log->debug("No xmplaylist record timestamp <= play timestamp $play_ts, falling back to latest record");
+                $log->debug("No usable play timestamp from $pdt_file, falling back to latest xmplaylist record");
             }
-        } else {
-            $log->debug("No usable play timestamp from $pdt_file, falling back to latest xmplaylist record");
         }
     } else {
         $log->debug("Missing channel id in channel info, falling back to latest xmplaylist record");
@@ -368,13 +377,12 @@ sub _processResponse {
 sub _readPlayTimestampFromFile {
     my ($pdt_file) = @_;
 
-    unless (-e $pdt_file) {
-        $log->debug("PDT file not found: $pdt_file");
-        return;
-    }
-
     open(my $fh, '<', $pdt_file) or do {
-        $log->warn("Unable to read PDT file $pdt_file: $!");
+        if ($!{ENOENT}) {
+            $log->debug("PDT file not found: $pdt_file");
+        } else {
+            $log->warn("Unable to read PDT file $pdt_file: $!");
+        }
         return;
     };
 
@@ -406,8 +414,9 @@ sub _parseTimestampToEpoch {
     my ($timestamp) = @_;
     return unless defined $timestamp;
 
+    # Handle epoch seconds (optionally fractional) before trying Date::Parse formats.
     if ($timestamp =~ /^\s*(\d+(?:\.\d+)?)\s*$/) {
-        return int($1);
+        return $1 + 0;
     }
 
     return str2time($timestamp);
