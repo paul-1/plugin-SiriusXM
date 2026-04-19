@@ -284,12 +284,15 @@ sub _fetchMetadataFromAPI {
             _updateClientMetadata($client, $result);
 
             if (
-                defined $result->{next_update_delay}
-                && $result->{next_update_delay} =~ /^\d+(?:\.\d+)?$/
-                && $result->{next_update_delay} > 0
+                _isValidDelay($result->{next_update_delay})
             ) {
                 $next_delay = $result->{next_update_delay};
             }
+        }
+
+        unless ($prefs->get('enable_metadata')) {
+            _stopMetadataTimer($client);
+            return;
         }
 
         _scheduleNextMetadataUpdate($client, $next_delay);
@@ -300,18 +303,10 @@ sub _scheduleNextMetadataUpdate {
     my ($client, $delay) = @_;
     return unless $client;
 
-    # Let the metadata refresh one more time, to return player screens to channel artwork.
-    unless ($prefs->get('enable_metadata')) {
-        $log->debug("Metadata updates disabled by user preference, stopping timer");
-        _stopMetadataTimer($client);
-        return;
-    }
-
     my $clientId = $client->id();
     return unless exists $playerStates{$clientId};
 
-    $delay = METADATA_UPDATE_INTERVAL unless defined $delay && $delay > 0;
-    $delay = 1 if $delay < 1;
+    $delay = METADATA_UPDATE_INTERVAL unless _isValidDelay($delay);
     $log->debug("Scheduling next metadata update for client $clientId in ${delay}s");
 
     $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
@@ -399,6 +394,11 @@ sub _metadataSignature {
     }
 
     return $signature;
+}
+
+sub _isValidDelay {
+    my ($delay) = @_;
+    return defined $delay && $delay =~ /^\d+(?:\.\d+)?$/ && $delay > 0;
 }
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs

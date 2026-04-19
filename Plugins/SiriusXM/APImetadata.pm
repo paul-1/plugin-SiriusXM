@@ -18,6 +18,7 @@ my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
 use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
+use constant MIN_NEXT_UPDATE_DELAY_SECONDS => 1;
 
 # xmplaylists.com API JSON Schema:
 # {
@@ -267,9 +268,10 @@ sub _processResponse {
                     next unless defined $result_ts;
 
                     if ($result_ts > $play_ts) {
-                        if (!defined $next_track_ts || $result_ts < $next_track_ts) {
-                            $next_track_ts = $result_ts;
-                        }
+                        # Track the nearest upcoming record so ProtocolHandler can
+                        # schedule the next metadata refresh near the transition time.
+                        $next_track_ts = $result_ts
+                            if !defined $next_track_ts || $result_ts < $next_track_ts;
                         next;
                     }
 
@@ -281,8 +283,8 @@ sub _processResponse {
 
                 if (defined $next_track_ts) {
                     $next_update_delay = $next_track_ts - $play_ts;
-                    if ($next_update_delay < 1) {
-                        $next_update_delay = 1;
+                    if ($next_update_delay < MIN_NEXT_UPDATE_DELAY_SECONDS) {
+                        $next_update_delay = MIN_NEXT_UPDATE_DELAY_SECONDS;
                     }
                     $log->debug("Next xmplaylist track timestamp is in ${next_update_delay}s relative to play timestamp");
                 }
