@@ -10,6 +10,7 @@ use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
 use Date::Parse;
 use Time::HiRes;
+use File::Spec;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
@@ -234,10 +235,49 @@ sub _processResponse {
         return;
     }
 
-    my $latest_track = $results->[0];
-    my $track_info = $latest_track->{track};
-    my $spotify_info = $latest_track->{spotify};
-    my $timestamp = $latest_track->{timestamp};
+    my $selected_track = $results->[0];
+    my $selected_reason = 'default latest xmplaylist record';
+
+    if ($channel_info && $channel_info->{id}) {
+        my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+        my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_info->{id} . '.txt');
+        my $play_ts = _readPlayTimestampFromFile($pdt_file);
+
+        if (defined $play_ts) {
+            my $matched_track;
+            my $matched_ts;
+
+            for my $result (@$results) {
+                next unless $result && ref($result) eq 'HASH';
+
+                my $result_ts = _parseTimestampToEpoch($result->{timestamp});
+                next unless defined $result_ts;
+                next if $result_ts > $play_ts;
+
+                if (!defined $matched_ts || $result_ts > $matched_ts) {
+                    $matched_track = $result;
+                    $matched_ts = $result_ts;
+                }
+            }
+
+            if ($matched_track) {
+                $selected_track = $matched_track;
+                $selected_reason = 'matched record at/before play timestamp';
+                $log->debug("Selected xmplaylist record timestamp " . ($selected_track->{timestamp} || 'unknown') . " for play timestamp $play_ts");
+            } else {
+                $log->debug("No xmplaylist record timestamp <= play timestamp $play_ts, falling back to latest record");
+            }
+        } else {
+            $log->debug("No usable play timestamp from $pdt_file, falling back to latest xmplaylist record");
+        }
+    } else {
+        $log->debug("Missing channel id in channel info, falling back to latest xmplaylist record");
+    }
+
+    my $track_info = $selected_track->{track};
+    my $spotify_info = $selected_track->{spotify};
+    my $timestamp = $selected_track->{timestamp};
+    $log->debug("Metadata source selection: $selected_reason");
 
     return unless $track_info;
 
@@ -323,6 +363,54 @@ sub _processResponse {
             is_fresh => $metadata_is_fresh,
         });
     }
+}
+
+sub _readPlayTimestampFromFile {
+    my ($pdt_file) = @_;
+
+    unless (-e $pdt_file) {
+        $log->debug("PDT file not found: $pdt_file");
+        return;
+    }
+
+    open(my $fh, '<', $pdt_file) or do {
+        $log->warn("Unable to read PDT file $pdt_file: $!");
+        return;
+    };
+
+    my $raw_ts = <$fh>;
+    close($fh);
+
+    unless (defined $raw_ts) {
+        $log->debug("PDT file is empty: $pdt_file");
+        return;
+    }
+
+    $raw_ts =~ s/^\s+|\s+$//g;
+    unless (length $raw_ts) {
+        $log->debug("PDT file contains no timestamp text: $pdt_file");
+        return;
+    }
+
+    my $play_ts = _parseTimestampToEpoch($raw_ts);
+    unless (defined $play_ts) {
+        $log->debug("Failed to parse play timestamp '$raw_ts' from $pdt_file");
+        return;
+    }
+
+    $log->debug("Read play timestamp '$raw_ts' ($play_ts) from $pdt_file");
+    return $play_ts;
+}
+
+sub _parseTimestampToEpoch {
+    my ($timestamp) = @_;
+    return unless defined $timestamp;
+
+    if ($timestamp =~ /^\s*(\d+(?:\.\d+)?)\s*$/) {
+        return int($1);
+    }
+
+    return str2time($timestamp);
 }
 
 1;
