@@ -282,6 +282,8 @@ sub _processResponse {
                 }
 
                 if (defined $next_track_ts) {
+                    my $raw_next_update_delay = $next_track_ts - $play_ts;
+
                     # If mtime is unavailable, treat age as 0 and use the raw
                     # timestamp delta (best-effort fallback).
                     my $pdt_age = 0;
@@ -293,11 +295,11 @@ sub _processResponse {
                         }
                     }
 
-                    $next_update_delay = $next_track_ts - $play_ts - $pdt_age;
+                    $next_update_delay = $raw_next_update_delay - $pdt_age;
                     if ($next_update_delay < MIN_NEXT_UPDATE_DELAY_SECONDS) {
                         $next_update_delay = MIN_NEXT_UPDATE_DELAY_SECONDS;
                     }
-                    $log->debug("Next xmplaylist track timestamp is in ${next_update_delay}s relative to playback (pdt age=${pdt_age}s)");
+                    $log->debug("Next xmplaylist track timestamp raw delay=${raw_next_update_delay}s adjusted=${next_update_delay}s (pdt age=${pdt_age}s)");
                 }
 
                 if ($matched_track) {
