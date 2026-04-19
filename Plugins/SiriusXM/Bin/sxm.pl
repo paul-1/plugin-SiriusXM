@@ -2219,7 +2219,7 @@ sub get_cached_segment {
     return $data;
 }
 
-# Write the upstream PDT for the requested segment to cache_dir/pdt_<channel_id>.txt
+# Write the upstream PDT for the requested segment to $TMPDIR/siriusxm/pdt_<channel_id>.txt
 sub write_segment_pdt_file {
     my ($self, $channel_id, $segment_path) = @_;
 
@@ -2229,20 +2229,21 @@ sub write_segment_pdt_file {
         return;
     }
 
-    my $cookiefile = $main::CONFIG{cookiefile};
-    if (!$cookiefile) {
-        main::log_debug("Cookie file not configured; skipping PDT file update for channel $channel_id");
-        return;
+    my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+    my $pdt_dir = File::Spec->catdir($tmp_dir, 'siriusxm');
+    if (!-d $pdt_dir) {
+        eval {
+            make_path($pdt_dir, { mode => 0755 });
+            1;
+        } or do {
+            my $err = $@ || 'unknown error';
+            main::log_debug("Could not create PDT directory $pdt_dir for channel $channel_id: $err");
+            return;
+        };
     }
 
-    my $cache_dir = dirname($cookiefile);
-    if (!$cache_dir) {
-        main::log_debug("Could not determine cache directory; skipping PDT file update for channel $channel_id");
-        return;
-    }
-
-    my $tmp_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt.tmp");
-    my $pdt_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt");
+    my $tmp_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt.tmp");
+    my $pdt_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt");
 
     if (defined $self->{last_written_segment_pdt}->{$channel_id}
         && $self->{last_written_segment_pdt}->{$channel_id} eq $segment_pdt
@@ -3019,15 +3020,14 @@ sub clear_channel_cache {
     delete $self->{segment_retry_count}->{$channel_id};
     delete $self->{last_segment}->{$channel_id};
 
-    # Remove persisted PDT file for this channel from cache dir
-    if ($main::CONFIG{cookiefile}) {
-        my $cache_dir = dirname($main::CONFIG{cookiefile});
-        if ($cache_dir) {
-            my $pdt_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt");
-            my $pdt_tmp_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt.tmp");
-            unlink($pdt_file) if -e $pdt_file;
-            unlink($pdt_tmp_file) if -e $pdt_tmp_file;
-        }
+    # Remove persisted PDT files for this channel from $TMPDIR/siriusxm
+    my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+    my $pdt_dir = File::Spec->catdir($tmp_dir, 'siriusxm');
+    if (-d $pdt_dir) {
+        my $pdt_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt");
+        my $pdt_tmp_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt.tmp");
+        unlink($pdt_file) if -e $pdt_file;
+        unlink($pdt_tmp_file) if -e $pdt_tmp_file;
     }
     
     # Clear activity tracking
