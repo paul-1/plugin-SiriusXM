@@ -282,6 +282,8 @@ sub _processResponse {
                 }
 
                 if (defined $next_track_ts) {
+                    # If mtime is unavailable, treat age as 0 and use the raw
+                    # timestamp delta (best-effort fallback).
                     my $pdt_age = 0;
                     if (defined $pdt_file_mtime) {
                         $pdt_age = Time::HiRes::time() - $pdt_file_mtime;
