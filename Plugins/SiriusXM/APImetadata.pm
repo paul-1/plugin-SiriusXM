@@ -238,6 +238,7 @@ sub _processResponse {
     my $selected_track = $results->[0];
     my $selected_reason = 'default latest xmplaylist record';
     my $pdt_timestamp_available = 0;
+    my $next_update_delay;
 
     if ($channel_info && $channel_info->{id}) {
         my $channel_id = $channel_info->{id};
@@ -257,18 +258,33 @@ sub _processResponse {
                 $pdt_timestamp_available = 1;
                 my $matched_track;
                 my $matched_ts;
+                my $next_track_ts;
 
                 for my $result (@$results) {
                     next unless $result && ref($result) eq 'HASH';
 
                     my $result_ts = _parseTimestampToEpoch($result->{timestamp});
                     next unless defined $result_ts;
-                    next if $result_ts > $play_ts;
+
+                    if ($result_ts > $play_ts) {
+                        if (!defined $next_track_ts || $result_ts < $next_track_ts) {
+                            $next_track_ts = $result_ts;
+                        }
+                        next;
+                    }
 
                     if (!defined $matched_ts || $result_ts > $matched_ts) {
                         $matched_track = $result;
                         $matched_ts = $result_ts;
                     }
+                }
+
+                if (defined $next_track_ts) {
+                    $next_update_delay = $next_track_ts - $play_ts;
+                    if ($next_update_delay < 1) {
+                        $next_update_delay = 1;
+                    }
+                    $log->debug("Next xmplaylist track timestamp is in ${next_update_delay}s relative to play timestamp");
                 }
 
                 if ($matched_track) {
@@ -350,6 +366,7 @@ sub _processResponse {
             metadata => $new_meta,
             next => $data->{next},
             is_fresh => $metadata_is_fresh,
+            next_update_delay => $next_update_delay,
         });
     }
 }

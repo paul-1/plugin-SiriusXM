@@ -212,13 +212,6 @@ sub _startMetadataTimer {
     
     # Start immediate metadata fetch
     _fetchMetadataFromAPI($client);
-    
-    # Schedule periodic updates
-    $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
-        $client,
-        time() + METADATA_UPDATE_INTERVAL,
-        \&_onMetadataTimer
-    );
 }
 
 # Stop metadata update timer for a client
@@ -268,14 +261,6 @@ sub _onMetadataTimer {
         return;
     }
 
-    # Schedule next update if still playing
-    if (exists $playerStates{$clientId}) {
-        $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
-            $client,
-            time() + METADATA_UPDATE_INTERVAL,
-            \&_onMetadataTimer
-        );
-    }
 }
 
 # Fetch metadata from xmplaylist.com API using APImetadata module
@@ -293,10 +278,47 @@ sub _fetchMetadataFromAPI {
     
     Plugins::SiriusXM::APImetadata->fetchMetadata($client, $channel_info, sub {
         my $result = shift;
-        return unless $result;
-        
-        _updateClientMetadata($client, $result);
+        my $next_delay = METADATA_UPDATE_INTERVAL;
+
+        if ($result) {
+            _updateClientMetadata($client, $result);
+
+            if (
+                defined $result->{next_update_delay}
+                && $result->{next_update_delay} =~ /^\d+(?:\.\d+)?$/
+                && $result->{next_update_delay} > 0
+            ) {
+                $next_delay = $result->{next_update_delay};
+            }
+        }
+
+        _scheduleNextMetadataUpdate($client, $next_delay);
     });
+}
+
+sub _scheduleNextMetadataUpdate {
+    my ($client, $delay) = @_;
+    return unless $client;
+
+    # Let the metadata refresh one more time, to return player screens to channel artwork.
+    unless ($prefs->get('enable_metadata')) {
+        $log->debug("Metadata updates disabled by user preference, stopping timer");
+        _stopMetadataTimer($client);
+        return;
+    }
+
+    my $clientId = $client->id();
+    return unless exists $playerStates{$clientId};
+
+    $delay = METADATA_UPDATE_INTERVAL unless defined $delay && $delay > 0;
+    $delay = 1 if $delay < 1;
+    $log->debug("Scheduling next metadata update for client $clientId in ${delay}s");
+
+    $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
+        $client,
+        time() + $delay,
+        \&_onMetadataTimer
+    );
 }
 
 # Update client with new metadata
