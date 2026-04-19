@@ -172,6 +172,7 @@ sub onPlayerEvent {
             url => $url,
             channel_info => $channel_info,
             last_next => undef,
+            last_metadata_signature => undef,
             timer => undef,
         };
         _fetchMetadataFromAPI($client);
@@ -206,6 +207,7 @@ sub _startMetadataTimer {
         url => $url,
         channel_info => $channel_info,
         last_next => undef,
+        last_metadata_signature => undef,
         timer => undef,
     };
     
@@ -312,9 +314,16 @@ sub _updateClientMetadata {
     my $new_meta = $result->{metadata};
     my $next = $result->{next};
     my $metadata_is_fresh = $result->{is_fresh};
+    my $metadata_signature = _metadataSignature($new_meta);
     
-    # Check if metadata has changed using "next" field
-    if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
+    # Check if metadata content has changed.
+    # Using metadata signature avoids lag when xmplaylist's "next" token
+    # stays constant while the selected record for play-behind-live changes.
+    if (
+        defined $state->{last_metadata_signature}
+        && defined $metadata_signature
+        && $state->{last_metadata_signature} eq $metadata_signature
+    ) {
         # Only skip update if metadata is fresh - if stale, we need to update display
         if ($metadata_is_fresh) {
             $log->debug("No new metadata available and current metadata is fresh - skipping update");
@@ -326,6 +335,7 @@ sub _updateClientMetadata {
     
     # Update the last_next value
     $state->{last_next} = $next;
+    $state->{last_metadata_signature} = $metadata_signature;
     
     # Update the current song's metadata if we have new information
     if ($new_meta && keys %$new_meta) {
@@ -354,6 +364,13 @@ sub _updateClientMetadata {
             Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
         }
     }
+}
+
+sub _metadataSignature {
+    my ($meta) = @_;
+    return unless $meta && ref($meta) eq 'HASH';
+
+    return JSON::XS->new->canonical(1)->encode($meta);
 }
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs
