@@ -430,6 +430,7 @@ sub new {
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
         segment_pdt => {},      # Track upstream #EXT-X-PROGRAM-DATE-TIME per segment (per channel_id)
+        last_written_segment_pdt => {}, # Last PDT written to disk per channel_id (to avoid redundant writes)
         segment_retry_count => {}, # Track consecutive fetch failures per segment (per channel)
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
@@ -2243,12 +2244,20 @@ sub write_segment_pdt_file {
     my $tmp_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt.tmp");
     my $pdt_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt");
 
+    if (defined $self->{last_written_segment_pdt}->{$channel_id}
+        && $self->{last_written_segment_pdt}->{$channel_id} eq $segment_pdt
+        && -e $pdt_file) {
+        main::log_trace("PDT unchanged for channel $channel_id; skipping file write");
+        return;
+    }
+
     eval {
         open(my $fh, '>', $tmp_file) or die "Cannot open temp PDT file: $!";
         print $fh $segment_pdt . "\n";
         close($fh) or die "Cannot close temp PDT file: $!";
 
         rename($tmp_file, $pdt_file) or die "Cannot rename PDT file: $!";
+        $self->{last_written_segment_pdt}->{$channel_id} = $segment_pdt;
         1;
     } or do {
         my $err = $@ || 'unknown error';
@@ -3006,8 +3015,20 @@ sub clear_channel_cache {
     delete $self->{segment_cache}->{$channel_id};
     delete $self->{segment_queue}->{$channel_id};
     delete $self->{segment_pdt}->{$channel_id};
+    delete $self->{last_written_segment_pdt}->{$channel_id};
     delete $self->{segment_retry_count}->{$channel_id};
     delete $self->{last_segment}->{$channel_id};
+
+    # Remove persisted PDT file for this channel from cache dir
+    if ($main::CONFIG{cookiefile}) {
+        my $cache_dir = dirname($main::CONFIG{cookiefile});
+        if ($cache_dir) {
+            my $pdt_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt");
+            my $pdt_tmp_file = File::Spec->catfile($cache_dir, "pdt_${channel_id}.txt.tmp");
+            unlink($pdt_file) if -e $pdt_file;
+            unlink($pdt_tmp_file) if -e $pdt_tmp_file;
+        }
+    }
     
     # Clear activity tracking
     delete $self->{channel_last_activity}->{$channel_id};
