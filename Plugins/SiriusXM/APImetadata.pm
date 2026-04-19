@@ -253,7 +253,7 @@ sub _processResponse {
             my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || File::Spec->tmpdir() || '/tmp';
             my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_id . '.txt');
             $log->debug("Checking PDT file for SiriusXM channel id $channel_id: $pdt_file");
-            my $play_ts = _readPlayTimestampFromFile($pdt_file);
+            my ($play_ts, $pdt_file_mtime) = _readPlayTimestampFromFile($pdt_file);
 
             if (defined $play_ts) {
                 $pdt_timestamp_available = 1;
@@ -282,11 +282,17 @@ sub _processResponse {
                 }
 
                 if (defined $next_track_ts) {
-                    $next_update_delay = $next_track_ts - $play_ts;
+                    my $pdt_age = 0;
+                    if (defined $pdt_file_mtime) {
+                        $pdt_age = Time::HiRes::time() - $pdt_file_mtime;
+                        $pdt_age = 0 if $pdt_age < 0;
+                    }
+
+                    $next_update_delay = $next_track_ts - $play_ts - $pdt_age;
                     if ($next_update_delay < MIN_NEXT_UPDATE_DELAY_SECONDS) {
                         $next_update_delay = MIN_NEXT_UPDATE_DELAY_SECONDS;
                     }
-                    $log->debug("Next xmplaylist track timestamp is in ${next_update_delay}s relative to play timestamp");
+                    $log->debug("Next xmplaylist track timestamp is in ${next_update_delay}s relative to playback (pdt age=${pdt_age}s)");
                 }
 
                 if ($matched_track) {
@@ -405,8 +411,14 @@ sub _readPlayTimestampFromFile {
         return;
     }
 
+    my $pdt_file_mtime;
+    my @stats = stat($pdt_file);
+    if (@stats) {
+        $pdt_file_mtime = $stats[9];
+    }
+
     $log->debug("Read play timestamp '$raw_ts' ($play_ts) from $pdt_file");
-    return $play_ts;
+    return ($play_ts, $pdt_file_mtime);
 }
 
 sub _parseTimestampToEpoch {

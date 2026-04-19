@@ -309,6 +309,10 @@ sub _scheduleNextMetadataUpdate {
     $delay = METADATA_UPDATE_INTERVAL unless _isValidDelay($delay);
     $log->debug("Scheduling next metadata update for client $clientId in ${delay}s");
 
+    if ($playerStates{$clientId}->{timer}) {
+        Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+    }
+
     $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
         $client,
         time() + $delay,
