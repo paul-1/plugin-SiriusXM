@@ -17,7 +17,6 @@ my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
-use constant METADATA_STALE_TIME => 230;
 use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
 
 # xmplaylists.com API JSON Schema:
@@ -238,20 +237,24 @@ sub _processResponse {
 
     my $selected_track = $results->[0];
     my $selected_reason = 'default latest xmplaylist record';
+    my $pdt_timestamp_available = 0;
 
     if ($channel_info && $channel_info->{id}) {
         my $channel_id = $channel_info->{id};
         unless ($channel_id =~ /^[A-Za-z0-9_-]+$/ && $channel_id !~ /\.\./) {
-            $log->warn("Invalid channel id '$channel_id' for PDT lookup, falling back to latest xmplaylist record");
+            $log->warn("Invalid channel id '$channel_id' for PDT lookup, falling back to channel metadata");
+            $selected_reason = 'invalid siriusxm channel id';
             $channel_id = undef;
         }
 
         if ($channel_id) {
             my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || File::Spec->tmpdir() || '/tmp';
             my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_id . '.txt');
+            $log->debug("Checking PDT file for SiriusXM channel id $channel_id: $pdt_file");
             my $play_ts = _readPlayTimestampFromFile($pdt_file);
 
             if (defined $play_ts) {
+                $pdt_timestamp_available = 1;
                 my $matched_track;
                 my $matched_ts;
 
@@ -276,50 +279,27 @@ sub _processResponse {
                     $log->debug("No xmplaylist record timestamp <= play timestamp $play_ts, falling back to latest record");
                 }
             } else {
-                $log->debug("No usable play timestamp from $pdt_file, falling back to latest xmplaylist record");
+                $selected_reason = 'no usable play timestamp from pdt file';
+                $log->debug("No usable play timestamp from $pdt_file, falling back to channel metadata");
             }
         }
     } else {
-        $log->debug("Missing channel id in channel info, falling back to latest xmplaylist record");
+        $selected_reason = 'missing siriusxm channel id';
+        $log->debug("Missing SiriusXM channel id in channel info, falling back to channel metadata");
     }
 
     my $track_info = $selected_track->{track};
     my $spotify_info = $selected_track->{spotify};
-    my $timestamp = $selected_track->{timestamp};
     $log->debug("Metadata source selection: $selected_reason");
 
-    return unless $track_info;
-
-    # Determine whether to use xmplaylists metadata or fallback to channel info
-    # based on timestamp (if metadata is 0-230 seconds old, use it; otherwise use channel info)
+    # Determine whether to use xmplaylist metadata or channel metadata.
+    # xmplaylist metadata is only used when we have a usable playback timestamp from the pdt file.
     my $use_xmplaylists_metadata = 0;
     my $metadata_is_fresh = 0;
-    
-    # Only consider xmplaylists metadata if metadata is enabled
-    if ($prefs->get('enable_metadata') && $timestamp) {
-        eval {
-            # Use Date::Parse to handle UTC timestamp format: 2025-08-09T15:57:41.586Z
-            my $track_time = str2time($timestamp);
-            die "Failed to parse timestamp" unless defined $track_time;
-            
-            my $current_time = time();
-            my $age_seconds = $current_time - $track_time;
-            
-            $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
-            
-            # Use xmplaylists metadata if timestamp is (200 seconds) or newer
-            if ($age_seconds <= METADATA_STALE_TIME) {
-                $use_xmplaylists_metadata = 1;
-                $metadata_is_fresh = 1;
-            }
-        };
-        
-        if ($@) {
-            $log->warn("Failed to parse timestamp '$timestamp': $@");
-            # Default to using xmplaylists metadata if we can't parse timestamp
-            $use_xmplaylists_metadata = 1;
-            $metadata_is_fresh = 1;
-        }
+
+    if ($prefs->get('enable_metadata') && $pdt_timestamp_available && $track_info) {
+        $use_xmplaylists_metadata = 1;
+        $metadata_is_fresh = 1;
     }
     
     # Build new metadata
@@ -352,7 +332,7 @@ sub _processResponse {
         $new_meta->{bitrate} = '';
 
     } else {
-        # Fall back to basic channel info when metadata is too old or disabled
+        # Fall back to basic channel info when xmplaylist metadata is unavailable or disabled
         if ($channel_info) {
             # Fall back to basic channel info
             $new_meta->{artist} = $channel_info->{name};
