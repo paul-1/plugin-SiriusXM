@@ -287,7 +287,10 @@ sub _processResponse {
                     my $pdt_age = 0;
                     if (defined $pdt_file_mtime) {
                         $pdt_age = Time::HiRes::time() - $pdt_file_mtime;
-                        $pdt_age = 0 if $pdt_age < 0;
+                        if ($pdt_age < 0) {
+                            $log->warn("PDT file mtime is in the future (clock skew?), clamping age to 0 for $pdt_file");
+                            $pdt_age = 0;
+                        }
                     }
 
                     $next_update_delay = $next_track_ts - $play_ts - $pdt_age;
@@ -416,6 +419,7 @@ sub _readPlayTimestampFromFile {
     my $pdt_file_mtime;
     my @stats = stat($pdt_file);
     if (@stats) {
+        # stat()[9] is mtime (seconds since epoch)
         $pdt_file_mtime = $stats[9];
     }
 
