@@ -429,6 +429,8 @@ sub new {
         channel_cookies => {},  # Store per-channel cookie jars
         segment_cache => {},    # Store cached segments per channel_id
         segment_queue => {},    # Track segments to be cached per channel_id
+        segment_pdt => {},      # Track upstream #EXT-X-PROGRAM-DATE-TIME per segment (per channel_id)
+        last_written_segment_pdt => {}, # Last PDT written to disk per channel_id (to avoid redundant writes)
         segment_retry_count => {}, # Track consecutive fetch failures per segment (per channel)
         last_segment => {},     # Track last requested segment per channel_id
         playlist_cache => {},   # Store cached m3u8 content per channel_id
@@ -1924,15 +1926,21 @@ sub extract_segments_from_playlist {
     my @lines = split /\r?\n/, $content;
     my @segments = ();
     my $expecting_uri = 0;
+    my $current_pdt;
     
     for my $line (@lines) {
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
         
-        if ($line =~ /^#EXTINF:/) {
+        if ($line =~ /^#EXT-X-PROGRAM-DATE-TIME:(.+)$/) {
+            $current_pdt = $1;
+        } elsif ($line =~ /^#EXTINF:/) {
             $expecting_uri = 1;
         } elsif ($expecting_uri && $line !~ /^#/ && $line =~ /\.aac/) {
             push @segments, $line;
+            if (defined $current_pdt && !exists $self->{segment_pdt}->{$channel_id}->{$line}) {
+                $self->{segment_pdt}->{$channel_id}->{$line} = $current_pdt;
+            }
             $expecting_uri = 0;
         }
     }
@@ -2173,6 +2181,7 @@ sub get_cached_segment {
     
     # Track this as the last requested segment for this channel
     $self->{last_segment}->{$channel_id} = $segment_path;
+    $self->write_segment_pdt_file($channel_id, $segment_path);
     
     # Check if caching is enabled
     my $caching_enabled = $CONFIG{segment_drop} >= 1;
@@ -2208,6 +2217,57 @@ sub get_cached_segment {
     }
     
     return $data;
+}
+
+# Write the upstream PDT for the requested segment to $TMPDIR/siriusxm/pdt_<channel_id>.txt
+sub write_segment_pdt_file {
+    my ($self, $channel_id, $segment_path) = @_;
+
+    my $segment_pdt = $self->{segment_pdt}->{$channel_id}->{$segment_path};
+    if (!defined $segment_pdt || $segment_pdt eq '') {
+        main::log_trace("No upstream PDT recorded for segment $segment_path on channel $channel_id");
+        return;
+    }
+
+    my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+    my $pdt_dir = File::Spec->catdir($tmp_dir, 'siriusxm');
+    if (!-d $pdt_dir) {
+        eval {
+            File::Path::make_path($pdt_dir, { mode => 0755 });
+            1;
+        } or do {
+            my $err = $@ || 'unknown error';
+            main::log_debug("Could not create PDT directory $pdt_dir for channel $channel_id: $err");
+            return;
+        };
+    }
+
+    my $tmp_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt.tmp");
+    my $pdt_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt");
+
+    if (defined $self->{last_written_segment_pdt}->{$channel_id}
+        && $self->{last_written_segment_pdt}->{$channel_id} eq $segment_pdt
+        && -e $pdt_file) {
+        main::log_trace("PDT unchanged for channel $channel_id; skipping file write");
+        return;
+    }
+
+    eval {
+        open(my $fh, '>', $tmp_file) or die "Cannot open temp PDT file: $!";
+        print $fh $segment_pdt . "\n";
+        close($fh) or die "Cannot close temp PDT file: $!";
+
+        rename($tmp_file, $pdt_file) or die "Cannot rename PDT file: $!";
+        $self->{last_written_segment_pdt}->{$channel_id} = $segment_pdt;
+        1;
+    } or do {
+        my $err = $@ || 'unknown error';
+        unlink($tmp_file) if -e $tmp_file;
+        main::log_debug("Failed writing PDT file for channel $channel_id: $err");
+        return;
+    };
+
+    main::log_trace("Updated PDT file for channel $channel_id");
 }
 
 sub select_quality_variant {
@@ -2955,8 +3015,20 @@ sub clear_channel_cache {
     # Clear segment cache and queue
     delete $self->{segment_cache}->{$channel_id};
     delete $self->{segment_queue}->{$channel_id};
+    delete $self->{segment_pdt}->{$channel_id};
+    delete $self->{last_written_segment_pdt}->{$channel_id};
     delete $self->{segment_retry_count}->{$channel_id};
     delete $self->{last_segment}->{$channel_id};
+
+    # Remove persisted PDT files for this channel from $TMPDIR/siriusxm
+    my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || '/tmp';
+    my $pdt_dir = File::Spec->catdir($tmp_dir, 'siriusxm');
+    if (-d $pdt_dir) {
+        my $pdt_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt");
+        my $pdt_tmp_file = File::Spec->catfile($pdt_dir, "pdt_${channel_id}.txt.tmp");
+        unlink($pdt_file) if -e $pdt_file;
+        unlink($pdt_tmp_file) if -e $pdt_tmp_file;
+    }
     
     # Clear activity tracking
     delete $self->{channel_last_activity}->{$channel_id};
