@@ -32,6 +32,9 @@ my %playerStates = ();
 # Global hash to track metadata by channel ID
 my %channelMetadata = ();
 
+# Monotonic token to invalidate stale async metadata callbacks
+my $metadataRequestToken = 0;
+
 sub new {
     my $class = shift;
     my $args = shift;
@@ -178,6 +181,7 @@ sub onPlayerEvent {
             url => $url,
             channel_info => $channel_info,
             last_metadata_signature => undef,
+            metadata_request_token => 0,
             timer => undef,
         };
         _fetchMetadataFromAPI($client);
@@ -212,6 +216,7 @@ sub _startMetadataTimer {
         url => $url,
         channel_info => $channel_info,
         last_metadata_signature => undef,
+        metadata_request_token => 0,
         timer => undef,
     };
     
@@ -280,10 +285,41 @@ sub _fetchMetadataFromAPI {
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
+    my $request_token = ++$metadataRequestToken;
+    my $request_channel_id = $channel_info->{id};
+    $state->{metadata_request_token} = $request_token;
     
     Plugins::SiriusXM::APImetadata->fetchMetadata($client, $channel_info, sub {
         my $result = shift;
         my $next_delay = METADATA_UPDATE_INTERVAL;
+        my $current_state = $playerStates{$clientId};
+
+        unless ($current_state) {
+            $log->debug("Ignoring async metadata response for client $clientId: no active player state");
+            return;
+        }
+
+        if (($current_state->{metadata_request_token} || 0) != $request_token) {
+            $log->debug("Ignoring stale async metadata response for client $clientId token $request_token");
+            return;
+        }
+
+        unless ($client->isPlaying()) {
+            $log->debug("Ignoring async metadata response for client $clientId: client no longer playing");
+            _stopMetadataTimer($client);
+            return;
+        }
+
+        my $current_channel_id = $current_state->{channel_info}
+            ? $current_state->{channel_info}->{id}
+            : undef;
+        if (
+            defined $request_channel_id && defined $current_channel_id
+            && $request_channel_id ne $current_channel_id
+        ) {
+            $log->debug("Ignoring stale async metadata response for client $clientId channel $request_channel_id");
+            return;
+        }
 
         if ($result) {
             _updateClientMetadata($client, $result);
