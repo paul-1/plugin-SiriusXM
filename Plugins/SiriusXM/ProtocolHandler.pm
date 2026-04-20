@@ -12,6 +12,7 @@ use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Player::Playlist;
+use Scalar::Util qw(refaddr);
 use JSON::XS;
 use Data::Dumper;
 use Date::Parse;
@@ -282,7 +283,7 @@ sub _fetchMetadataFromAPI {
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
-    my $request_token = join(':', $clientId, Time::HiRes::time(), int(rand(1_000_000)));
+    my $request_token = join(':', $clientId, refaddr($state), Time::HiRes::time());
     my $request_channel_id = $channel_info->{id};
     $state->{metadata_request_token} = $request_token;
     
@@ -296,7 +297,8 @@ sub _fetchMetadataFromAPI {
             return;
         }
 
-        if (($current_state->{metadata_request_token} // '') ne $request_token) {
+        my $current_request_token = $current_state->{metadata_request_token};
+        if (!defined $current_request_token || $current_request_token ne $request_token) {
             $log->debug("Ignoring stale async metadata response for client $clientId token $request_token");
             return;
         }
