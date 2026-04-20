@@ -13,6 +13,7 @@ use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Player::Playlist;
 use Scalar::Util qw(refaddr);
+use Time::HiRes qw(time);
 use JSON::XS;
 use Data::Dumper;
 use Date::Parse;
@@ -179,7 +180,7 @@ sub onPlayerEvent {
             url => $url,
             channel_info => $channel_info,
             last_metadata_signature => undef,
-            metadata_request_token => 0,
+            metadata_request_token => undef,
             timer => undef,
         };
         _fetchMetadataFromAPI($client);
@@ -214,7 +215,7 @@ sub _startMetadataTimer {
         url => $url,
         channel_info => $channel_info,
         last_metadata_signature => undef,
-        metadata_request_token => 0,
+        metadata_request_token => undef,
         timer => undef,
     };
     
@@ -283,7 +284,7 @@ sub _fetchMetadataFromAPI {
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
-    my $request_token = join(':', $clientId, refaddr($state), Time::HiRes::time());
+    my $request_token = join(':', $clientId, refaddr($state), time());
     my $request_channel_id = $channel_info->{id};
     $state->{metadata_request_token} = $request_token;
     
