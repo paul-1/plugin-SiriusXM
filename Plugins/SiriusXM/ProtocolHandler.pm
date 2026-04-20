@@ -163,7 +163,7 @@ sub onPlayerEvent {
         }
     }
 
-    # Initialize Player Metatadata
+    # Initialize player metadata
     my $state = $playerStates{$clientId};
     if (!$state) {
         unless ($client->isPlaying()) {
