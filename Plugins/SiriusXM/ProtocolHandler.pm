@@ -181,6 +181,7 @@ sub onPlayerEvent {
             channel_info => $channel_info,
             last_metadata_signature => undef,
             metadata_request_token => undef,
+            metadata_request_seq => 0,
             timer => undef,
         };
         _fetchMetadataFromAPI($client);
@@ -216,6 +217,7 @@ sub _startMetadataTimer {
         channel_info => $channel_info,
         last_metadata_signature => undef,
         metadata_request_token => undef,
+        metadata_request_seq => 0,
         timer => undef,
     };
     
@@ -284,7 +286,8 @@ sub _fetchMetadataFromAPI {
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
-    my $request_token = join(':', $clientId, refaddr($state), time());
+    my $request_seq = ++$state->{metadata_request_seq};
+    my $request_token = join(':', $clientId, refaddr($state), $request_seq, time());
     my $request_channel_id = $channel_info->{id};
     $state->{metadata_request_token} = $request_token;
     
@@ -299,7 +302,12 @@ sub _fetchMetadataFromAPI {
         }
 
         my $current_request_token = $current_state->{metadata_request_token};
-        if (!defined $current_request_token || $current_request_token ne $request_token) {
+        if (!defined $current_request_token) {
+            $log->debug("Ignoring stale async metadata response for client $clientId: missing request token");
+            return;
+        }
+
+        if ($current_request_token ne $request_token) {
             $log->debug("Ignoring stale async metadata response for client $clientId token $request_token");
             return;
         }
