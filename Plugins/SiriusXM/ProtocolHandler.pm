@@ -285,7 +285,8 @@ sub _fetchMetadataFromAPI {
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
-    my $request_token = ++$metadataRequestToken;
+    my $request_token = $metadataRequestToken + 1;
+    $metadataRequestToken = $request_token;
     my $request_channel_id = $channel_info->{id};
     $state->{metadata_request_token} = $request_token;
     
@@ -299,7 +300,7 @@ sub _fetchMetadataFromAPI {
             return;
         }
 
-        if (($current_state->{metadata_request_token} || 0) != $request_token) {
+        if (($current_state->{metadata_request_token} // 0) != $request_token) {
             $log->debug("Ignoring stale async metadata response for client $clientId token $request_token");
             return;
         }
