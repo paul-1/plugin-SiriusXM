@@ -166,6 +166,11 @@ sub onPlayerEvent {
     # Initialize Player Metatadata
     my $state = $playerStates{$clientId};
     if (!$state) {
+        unless ($client->isPlaying()) {
+            $log->debug("Client $clientId is not playing, skipping metadata state initialization");
+            return;
+        }
+
         $log->debug("No current player state, configuring");
         my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
         # Initialize player state
