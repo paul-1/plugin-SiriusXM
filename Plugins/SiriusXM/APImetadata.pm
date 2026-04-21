@@ -17,7 +17,7 @@ my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
 use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
-use constant MIN_NEXT_UPDATE_DELAY_SECONDS => 1;
+use constant MIN_NEXT_UPDATE_DELAY_SECONDS => 10;
 
 # xmplaylists.com API JSON Schema:
 # {
@@ -407,6 +407,8 @@ sub _readPlayTimestampFromFile {
         $log->debug("Failed to parse play timestamp '$raw_ts' from $pdt_file");
         return;
     }
+
+    $play_ts -= 20;   # This is when the segment is pulled by FFMpeg.  Playing segment is 2 segments behind.
 
     $log->debug("Read play timestamp '$raw_ts' ($play_ts) from $pdt_file");
     return $play_ts;
