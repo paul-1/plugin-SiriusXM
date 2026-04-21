@@ -239,6 +239,7 @@ sub _processResponse {
     my $selected_reason = 'default latest xmplaylist record';
     my $pdt_timestamp_available = 0;
     my $next_update_delay;
+    my $next_track;
 
     if ($channel_info && $channel_info->{id}) {
         my $channel_id = $channel_info->{id};
@@ -269,8 +270,10 @@ sub _processResponse {
                     if ($result_ts > $play_ts) {
                         # Track the nearest upcoming record so ProtocolHandler can
                         # schedule the next metadata refresh near the transition time.
-                        $next_track_ts = $result_ts
-                            if !defined $next_track_ts || $result_ts < $next_track_ts;
+                        if (!defined $next_track_ts || $result_ts < $next_track_ts) {
+                            $next_track_ts = $result_ts;
+                            $next_track = $result;
+                        }
                         next;
                     }
 
@@ -365,6 +368,35 @@ sub _processResponse {
         }
     }
 
+    my $next_meta;
+    if ($next_track && ref($next_track) eq 'HASH') {
+        my $next_track_info = $next_track->{track};
+        my $next_spotify_info = $next_track->{spotify};
+
+        if ($next_track_info) {
+            $next_meta = {};
+
+            if ($next_track_info->{title}) {
+                $next_meta->{title} = $next_track_info->{title};
+            }
+
+            if ($next_track_info->{artists} && ref($next_track_info->{artists}) eq 'ARRAY') {
+                my @artists = @{$next_track_info->{artists}};
+                if (@artists) {
+                    $next_meta->{artist} = join(', ', @artists);
+                }
+            }
+
+            if ($next_spotify_info && $next_spotify_info->{albumImageLarge}) {
+                $next_meta->{cover} = $next_spotify_info->{albumImageLarge};
+                $next_meta->{icon} = $next_spotify_info->{albumImageLarge};
+            }
+
+            $next_meta->{album} = $channel_info->{name} || 'SiriusXM';
+            $next_meta->{bitrate} = '';
+        }
+    }
+
     # Return metadata and freshness info through callback
     if ($callback) {
         $callback->({
@@ -372,6 +404,7 @@ sub _processResponse {
             next => $data->{next},
             is_fresh => $metadata_is_fresh,
             next_update_delay => $next_update_delay,
+            next_metadata => $next_meta,
         });
     }
 }

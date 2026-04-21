@@ -182,6 +182,7 @@ sub onPlayerEvent {
             last_metadata_signature => undef,
             metadata_request_token => undef,
             metadata_request_seq => 0,
+            pending_metadata_result => undef,
             timer => undef,
         };
         _fetchMetadataFromAPI($client);
@@ -218,6 +219,7 @@ sub _startMetadataTimer {
         last_metadata_signature => undef,
         metadata_request_token => undef,
         metadata_request_seq => 0,
+        pending_metadata_result => undef,
         timer => undef,
     };
     
@@ -253,12 +255,28 @@ sub _onMetadataTimer {
     return unless $client;
     
     my $clientId = $client->id();
+    my $state = $playerStates{$clientId};
     
     # Verify client is still playing
     my $isPlaying = $client->isPlaying();
     if (!$isPlaying) {
         $log->debug("Client $clientId no longer playing, stopping metadata timer");
         _stopMetadataTimer($client);
+        return;
+    }
+
+    if ($state && $state->{pending_metadata_result}) {
+        my $pending_result = delete $state->{pending_metadata_result};
+        $log->debug("Applying cached next-track metadata for client $clientId");
+        _updateClientMetadata($client, $pending_result);
+
+        unless ($prefs->get('enable_metadata')) {
+            $log->debug("Metadata updates disabled by user preference, stopping timer");
+            _stopMetadataTimer($client);
+            return;
+        }
+
+        _scheduleNextMetadataUpdate($client, METADATA_UPDATE_INTERVAL);
         return;
     }
     
@@ -331,11 +349,17 @@ sub _fetchMetadataFromAPI {
 
         if ($result) {
             _updateClientMetadata($client, $result);
+            delete $current_state->{pending_metadata_result};
 
             if (
                 _isValidDelay($result->{next_update_delay})
+                && $result->{next_metadata}
             ) {
                 $next_delay = $result->{next_update_delay};
+                $current_state->{pending_metadata_result} = {
+                    metadata => $result->{next_metadata},
+                    is_fresh => 1,
+                };
             }
         }
 
