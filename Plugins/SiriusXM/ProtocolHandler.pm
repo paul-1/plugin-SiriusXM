@@ -256,6 +256,12 @@ sub _onMetadataTimer {
     
     my $clientId = $client->id();
     my $state = $playerStates{$clientId};
+
+    unless ($state) {
+        $log->debug("No metadata state for client $clientId, stopping timer");
+        _stopMetadataTimer($client);
+        return;
+    }
     
     # Verify client is still playing
     my $isPlaying = $client->isPlaying();
