@@ -9,14 +9,15 @@ use Slim::Utils::Cache;
 use Slim::Networking::SimpleAsyncHTTP;
 use JSON::XS;
 use Date::Parse;
-use Time::HiRes;
+use File::Spec;
+use Errno qw(ENOENT);
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
 my $cache = Slim::Utils::Cache->new();
 
-use constant METADATA_STALE_TIME => 230;
 use constant STATION_CACHE_TIMEOUT => 21600; # 6 hours
+use constant MIN_NEXT_UPDATE_DELAY_SECONDS => 10;
 
 # xmplaylists.com API JSON Schema:
 # {
@@ -234,43 +235,95 @@ sub _processResponse {
         return;
     }
 
-    my $latest_track = $results->[0];
-    my $track_info = $latest_track->{track};
-    my $spotify_info = $latest_track->{spotify};
-    my $timestamp = $latest_track->{timestamp};
+    my $selected_track = $results->[0];
+    my $selected_reason = 'default latest xmplaylist record';
+    my $pdt_timestamp_available = 0;
+    my $next_update_delay;
+    my $next_track;
 
-    return unless $track_info;
+    if ($channel_info && $channel_info->{id}) {
+        my $channel_id = $channel_info->{id};
+        unless ($channel_id =~ /^[A-Za-z0-9_-]+$/ && $channel_id !~ /\.\./) {
+            $log->warn("Invalid channel id '$channel_id' for PDT lookup, falling back to channel metadata");
+            $selected_reason = 'invalid siriusxm channel id';
+            $channel_id = undef;
+        }
 
-    # Determine whether to use xmplaylists metadata or fallback to channel info
-    # based on timestamp (if metadata is 0-230 seconds old, use it; otherwise use channel info)
+        if ($channel_id) {
+            my $tmp_dir = $ENV{TMPDIR} || $ENV{TEMP} || File::Spec->tmpdir() || '/tmp';
+            my $pdt_file = File::Spec->catfile($tmp_dir, 'siriusxm', 'pdt_' . $channel_id . '.txt');
+            $log->debug("Checking PDT file for SiriusXM channel id $channel_id: $pdt_file");
+            my $play_ts = _readPlayTimestampFromFile($pdt_file);
+
+            if (defined $play_ts) {
+                $pdt_timestamp_available = 1;
+                my $matched_track;
+                my $matched_ts;
+                my $next_track_ts;
+
+                for my $result (@$results) {
+                    next unless $result && ref($result) eq 'HASH';
+
+                    my $result_ts = _parseTimestampToEpoch($result->{timestamp});
+                    next unless defined $result_ts;
+
+                    if ($result_ts > $play_ts) {
+                        # Track the nearest upcoming record so ProtocolHandler can
+                        # schedule the next metadata refresh near the transition time.
+                        if (!defined $next_track_ts || $result_ts < $next_track_ts) {
+                            $next_track_ts = $result_ts;
+                            $next_track = $result;
+                        }
+                        next;
+                    }
+
+                    if (!defined $matched_ts || $result_ts > $matched_ts) {
+                        $matched_track = $result;
+                        $matched_ts = $result_ts;
+                    }
+                }
+
+                if (defined $next_track_ts) {
+                    my $raw_next_update_delay = $next_track_ts - $play_ts;
+                    $next_update_delay = int($raw_next_update_delay);
+                    if ($raw_next_update_delay > $next_update_delay) {
+                        $next_update_delay++;
+                    }
+                    if ($next_update_delay < MIN_NEXT_UPDATE_DELAY_SECONDS) {
+                        $next_update_delay = MIN_NEXT_UPDATE_DELAY_SECONDS;
+                    }
+                    $log->debug("Next xmplaylist track timestamp raw delay=${raw_next_update_delay}s rounded=${next_update_delay}s");
+                }
+
+                if ($matched_track) {
+                    $selected_track = $matched_track;
+                    $selected_reason = 'matched record at/before play timestamp';
+                    $log->debug("Selected xmplaylist record timestamp " . ($selected_track->{timestamp} || 'unknown') . " for play timestamp $play_ts");
+                } else {
+                    $log->debug("No xmplaylist record timestamp <= play timestamp $play_ts, falling back to latest record");
+                }
+            } else {
+                $selected_reason = 'no usable play timestamp from pdt file';
+                $log->debug("No usable play timestamp from $pdt_file, falling back to channel metadata");
+            }
+        }
+    } else {
+        $selected_reason = 'missing siriusxm channel id';
+        $log->debug("Missing SiriusXM channel id in channel info, falling back to channel metadata");
+    }
+
+    my $track_info = $selected_track->{track};
+    my $spotify_info = $selected_track->{spotify};
+    $log->debug("Metadata source selection: $selected_reason");
+
+    # Determine whether to use xmplaylist metadata or channel metadata.
+    # xmplaylist metadata is only used when we have a usable playback timestamp from the pdt file.
     my $use_xmplaylists_metadata = 0;
     my $metadata_is_fresh = 0;
-    
-    # Only consider xmplaylists metadata if metadata is enabled
-    if ($prefs->get('enable_metadata') && $timestamp) {
-        eval {
-            # Use Date::Parse to handle UTC timestamp format: 2025-08-09T15:57:41.586Z
-            my $track_time = str2time($timestamp);
-            die "Failed to parse timestamp" unless defined $track_time;
-            
-            my $current_time = time();
-            my $age_seconds = $current_time - $track_time;
-            
-            $log->debug("Track timestamp: $timestamp, age: ${age_seconds}s");
-            
-            # Use xmplaylists metadata if timestamp is (200 seconds) or newer
-            if ($age_seconds <= METADATA_STALE_TIME) {
-                $use_xmplaylists_metadata = 1;
-                $metadata_is_fresh = 1;
-            }
-        };
-        
-        if ($@) {
-            $log->warn("Failed to parse timestamp '$timestamp': $@");
-            # Default to using xmplaylists metadata if we can't parse timestamp
-            $use_xmplaylists_metadata = 1;
-            $metadata_is_fresh = 1;
-        }
+
+    if ($prefs->get('enable_metadata') && $pdt_timestamp_available && $track_info) {
+        $use_xmplaylists_metadata = 1;
+        $metadata_is_fresh = 1;
     }
     
     # Build new metadata
@@ -303,7 +356,7 @@ sub _processResponse {
         $new_meta->{bitrate} = '';
 
     } else {
-        # Fall back to basic channel info when metadata is too old or disabled
+        # Fall back to basic channel info when xmplaylist metadata is unavailable or disabled
         if ($channel_info) {
             # Fall back to basic channel info
             $new_meta->{artist} = $channel_info->{name};
@@ -315,14 +368,95 @@ sub _processResponse {
         }
     }
 
+    my $next_meta;
+    if ($next_track && ref($next_track) eq 'HASH') {
+        my $next_track_info = $next_track->{track};
+        my $next_spotify_info = $next_track->{spotify};
+
+        if ($next_track_info) {
+            $next_meta = {};
+
+            if ($next_track_info->{title}) {
+                $next_meta->{title} = $next_track_info->{title};
+            }
+
+            if ($next_track_info->{artists} && ref($next_track_info->{artists}) eq 'ARRAY') {
+                my @artists = @{$next_track_info->{artists}};
+                if (@artists) {
+                    $next_meta->{artist} = join(', ', @artists);
+                }
+            }
+
+            if ($next_spotify_info && $next_spotify_info->{albumImageLarge}) {
+                $next_meta->{cover} = $next_spotify_info->{albumImageLarge};
+                $next_meta->{icon} = $next_spotify_info->{albumImageLarge};
+            }
+
+            $next_meta->{album} = $channel_info->{name} || 'SiriusXM';
+            $next_meta->{bitrate} = '';
+        }
+    }
+
     # Return metadata and freshness info through callback
     if ($callback) {
         $callback->({
             metadata => $new_meta,
             next => $data->{next},
             is_fresh => $metadata_is_fresh,
+            next_update_delay => $next_update_delay,
+            next_metadata => $next_meta,
         });
     }
+}
+
+sub _readPlayTimestampFromFile {
+    my ($pdt_file) = @_;
+
+    open(my $fh, '<', $pdt_file) or do {
+        if ($!{ENOENT}) {
+            $log->debug("PDT file not found: $pdt_file");
+        } else {
+            $log->warn("Unable to read PDT file $pdt_file: $!");
+        }
+        return;
+    };
+
+    my $raw_ts = <$fh>;
+    close($fh);
+
+    unless (defined $raw_ts) {
+        $log->debug("PDT file is empty: $pdt_file");
+        return;
+    }
+
+    $raw_ts =~ s/^\s+|\s+$//g;
+    unless (length $raw_ts) {
+        $log->debug("PDT file contains no timestamp text: $pdt_file");
+        return;
+    }
+
+    my $play_ts = _parseTimestampToEpoch($raw_ts);
+    unless (defined $play_ts) {
+        $log->debug("Failed to parse play timestamp '$raw_ts' from $pdt_file");
+        return;
+    }
+
+    $play_ts -= 20;   # This is when the segment is pulled by FFMpeg.  Playing segment is 2 segments behind.
+
+    $log->debug("Read play timestamp '$raw_ts' ($play_ts) from $pdt_file");
+    return $play_ts;
+}
+
+sub _parseTimestampToEpoch {
+    my ($timestamp) = @_;
+    return unless defined $timestamp;
+
+    # Handle epoch seconds (optionally fractional) before trying Date::Parse formats.
+    if ($timestamp =~ /^\s*(\d+(?:\.\d+)?)\s*$/) {
+        return $1 + 0;
+    }
+
+    return str2time($timestamp);
 }
 
 1;
