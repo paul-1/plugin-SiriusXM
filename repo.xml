@@ -11,6 +11,7 @@
               - Cache cookies, channel data and retain between restarts(prevents login on every channel change)
               - Download the smallest playlist size needed.
               - Track Playing timestamp against xmplaylist.com play time for metadata sync.
+              - Make sure player is not a sync-slave when updating metadata (1.0.1)
             </changes>
             <title lang="EN">SiriusXM</title>
             <desc lang="EN">Stream SiriusXM satellite radio through Lyrion Music Server</desc>

@@ -112,17 +112,30 @@ sub cleanupPlayerEvents {
     %channelMetadata = ();
 }
 
+sub _syncMasterClient {
+    my ($client) = @_;
+    return unless $client;
+
+    my $master = eval { $client->master };
+    return ($master && $master->id) ? $master : $client;
+}
+
 # Player event callback handler
 sub onPlayerEvent {
     my $request = shift;
     my $client = $request->client() || return;
+
+    my $realClient = _syncMasterClient($client);
+    # If this event came from a slave, ignore it (the master will also get one)
+    return if $realClient->id ne $client->id;
+
     my $command = $request->getRequest(0) || return;
     my $subcommand = $request->getRequest(1) || '';
      
     return unless $client;
     
-    my $clientId = $client->id();
-    my $song = $client->playingSong();
+    my $clientId = $realClient->id();
+    my $song = $realClient->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
  
     my $port = $prefs->get('port');
@@ -145,30 +158,30 @@ sub onPlayerEvent {
         }
     }
     if ($command eq 'play') {
-        _startMetadataTimer($client, $url);
+        _startMetadataTimer($realClient, $url);
     } elsif ($command eq 'pause' || $command eq 'stop') {
-        _stopMetadataTimer($client);
+        _stopMetadataTimer($realClient);
     } elsif ($command eq 'playlist') {
         # Handle playlist changes - may need to start/stop timers
-        my $clientId = $client->id();
-        my $isPlaying = $client->isPlaying();
+        my $clientId = $realClient->id();
+        my $isPlaying = $realClient->isPlaying();
         my $timersRunning = exists $playerStates{$clientId} && $playerStates{$clientId}->{timer};
         
         if ($isPlaying && !$timersRunning) {
             # Start timers if playing and no timers running
-            _startMetadataTimer($client, $url);
+            _startMetadataTimer($realClient, $url);
         } elsif ($isPlaying && $timersRunning) {
             # Do nothing - timers already running
         } elsif (!$isPlaying && $timersRunning) {
             # Stop timers if not playing but timers are running
-            _stopMetadataTimer($client);
+            _stopMetadataTimer($realClient);
         }
     }
 
     # Initialize player metadata
     my $state = $playerStates{$clientId};
     if (!$state) {
-        unless ($client->isPlaying()) {
+        unless ($realClient->isPlaying()) {
             $log->debug("Client $clientId is not playing, skipping metadata state initialization");
             return;
         }
@@ -185,7 +198,7 @@ sub onPlayerEvent {
             pending_metadata_result => undef,
             timer => undef,
         };
-        _fetchMetadataFromAPI($client);
+        _fetchMetadataFromAPI($realClient);
     }
 }
 
@@ -253,6 +266,9 @@ sub _onMetadataTimer {
     my $client = shift;
     
     return unless $client;
+
+    my $realClient = _syncMasterClient($client);
+    return if $realClient->id ne $client->id;  # timer should only run on master
     
     my $clientId = $client->id();
     my $state = $playerStates{$clientId};
@@ -297,6 +313,9 @@ sub _fetchMetadataFromAPI {
     my $client = shift;
     
     return unless $client;
+    
+    my $realClient = _syncMasterClient($client);
+    return if $realClient->id ne $client->id;  # timer should only run on master
     
     my $clientId = $client->id();
     my $state = $playerStates{$clientId};
