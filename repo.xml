@@ -4,7 +4,7 @@
         <title lang="EN">SiriusXM Plugin Repository</title>
     </details>
     <plugins>
-        <plugin name="SiriusXM" version="1.0.0" minTarget="8.3" maxTarget="*">
+        <plugin name="SiriusXM" version="1.0.1" minTarget="8.3" maxTarget="*">
             <changes lang="EN">
               - Add precaching of playlist and segmenets
               - Track login cookies independantly of channel cookies.
@@ -16,8 +16,8 @@
             <title lang="EN">SiriusXM</title>
             <desc lang="EN">Stream SiriusXM satellite radio through Lyrion Music Server</desc>
             <catagory>musicservices</catagory>
-            <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v1.0.0/SiriusXM-1.0.0.zip</url>
-            <sha>ab0ca876af1c48ba649a9442bee93545443b5199</sha>
+            <url>https://github.com/paul-1/plugin-SiriusXM/releases/download/v1.0.1/SiriusXM-1.0.1.zip</url>
+            <sha>57bb1e448857cf104760eda2b5e9a454c7e46cba</sha>
             <link>https://github.com/paul-1/plugin-SiriusXM</link>
             <icon>https://raw.githubusercontent.com/paul-1/plugin-SiriusXM/main/Plugins/SiriusXM/HTML/EN/plugins/SiriusXM/html/images/SiriusXMLogo.png</icon>
             <creator>paul-1</creator>
