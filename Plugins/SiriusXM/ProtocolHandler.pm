@@ -12,6 +12,8 @@ use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Player::Playlist;
+use Scalar::Util qw(refaddr);
+use Time::HiRes qw(time);
 use JSON::XS;
 use Data::Dumper;
 use Date::Parse;
@@ -21,6 +23,7 @@ use Plugins::SiriusXM::APImetadata;
 
 my $log = logger('plugin.siriusxm');
 my $prefs = preferences('plugin.siriusxm');
+my $json_encoder = JSON::XS->new->canonical(1);
 
 # Metadata update interval (25 seconds)
 use constant METADATA_UPDATE_INTERVAL => 25;
@@ -109,17 +112,30 @@ sub cleanupPlayerEvents {
     %channelMetadata = ();
 }
 
+sub _syncMasterClient {
+    my ($client) = @_;
+    return unless $client;
+
+    my $master = eval { $client->master };
+    return ($master && $master->id) ? $master : $client;
+}
+
 # Player event callback handler
 sub onPlayerEvent {
     my $request = shift;
     my $client = $request->client() || return;
+
+    my $realClient = _syncMasterClient($client);
+    # If this event came from a slave, ignore it (the master will also get one)
+    return if $realClient->id ne $client->id;
+
     my $command = $request->getRequest(0) || return;
     my $subcommand = $request->getRequest(1) || '';
      
     return unless $client;
     
-    my $clientId = $client->id();
-    my $song = $client->playingSong();
+    my $clientId = $realClient->id();
+    my $song = $realClient->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
  
     my $port = $prefs->get('port');
@@ -142,39 +158,47 @@ sub onPlayerEvent {
         }
     }
     if ($command eq 'play') {
-        _startMetadataTimer($client, $url);
+        _startMetadataTimer($realClient, $url);
     } elsif ($command eq 'pause' || $command eq 'stop') {
-        _stopMetadataTimer($client);
+        _stopMetadataTimer($realClient);
     } elsif ($command eq 'playlist') {
         # Handle playlist changes - may need to start/stop timers
-        my $clientId = $client->id();
-        my $isPlaying = $client->isPlaying();
+        my $clientId = $realClient->id();
+        my $isPlaying = $realClient->isPlaying();
         my $timersRunning = exists $playerStates{$clientId} && $playerStates{$clientId}->{timer};
         
         if ($isPlaying && !$timersRunning) {
             # Start timers if playing and no timers running
-            _startMetadataTimer($client, $url);
+            _startMetadataTimer($realClient, $url);
         } elsif ($isPlaying && $timersRunning) {
             # Do nothing - timers already running
         } elsif (!$isPlaying && $timersRunning) {
             # Stop timers if not playing but timers are running
-            _stopMetadataTimer($client);
+            _stopMetadataTimer($realClient);
         }
     }
 
-    # Initialize Player Metatadata
+    # Initialize player metadata
     my $state = $playerStates{$clientId};
     if (!$state) {
+        unless ($realClient->isPlaying()) {
+            $log->debug("Client $clientId is not playing, skipping metadata state initialization");
+            return;
+        }
+
         $log->debug("No current player state, configuring");
         my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
         # Initialize player state
         $playerStates{$clientId} = {
             url => $url,
             channel_info => $channel_info,
-            last_next => undef,
+            last_metadata_signature => undef,
+            metadata_request_token => undef,
+            metadata_request_seq => 0,
+            pending_metadata_result => undef,
             timer => undef,
         };
-        _fetchMetadataFromAPI($client);
+        _fetchMetadataFromAPI($realClient);
     }
 }
 
@@ -205,19 +229,15 @@ sub _startMetadataTimer {
     $playerStates{$clientId} = {
         url => $url,
         channel_info => $channel_info,
-        last_next => undef,
+        last_metadata_signature => undef,
+        metadata_request_token => undef,
+        metadata_request_seq => 0,
+        pending_metadata_result => undef,
         timer => undef,
     };
     
     # Start immediate metadata fetch
     _fetchMetadataFromAPI($client);
-    
-    # Schedule periodic updates
-    $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
-        $client,
-        time() + METADATA_UPDATE_INTERVAL,
-        \&_onMetadataTimer
-    );
 }
 
 # Stop metadata update timer for a client
@@ -246,8 +266,18 @@ sub _onMetadataTimer {
     my $client = shift;
     
     return unless $client;
+
+    my $realClient = _syncMasterClient($client);
+    return if $realClient->id ne $client->id;  # timer should only run on master
     
     my $clientId = $client->id();
+    my $state = $playerStates{$clientId};
+
+    unless ($state) {
+        $log->debug("No metadata state for client $clientId, stopping timer");
+        _stopMetadataTimer($client);
+        return;
+    }
     
     # Verify client is still playing
     my $isPlaying = $client->isPlaying();
@@ -256,25 +286,26 @@ sub _onMetadataTimer {
         _stopMetadataTimer($client);
         return;
     }
-    
-    # Fetch metadata update
-    _fetchMetadataFromAPI($client);
-    
-    # Let the meta data refresh one more time, to return player screens to channel artwork.
+
     unless ($prefs->get('enable_metadata')) {
         $log->debug("Metadata updates disabled by user preference, stopping timer");
         _stopMetadataTimer($client);
         return;
     }
 
-    # Schedule next update if still playing
-    if (exists $playerStates{$clientId}) {
-        $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
-            $client,
-            time() + METADATA_UPDATE_INTERVAL,
-            \&_onMetadataTimer
-        );
+    if ($state && $state->{pending_metadata_result}) {
+        my $pending_result = delete $state->{pending_metadata_result};
+        $log->debug("Applying cached next-track metadata for client $clientId");
+        _updateClientMetadata($client, $pending_result);
+
+        _scheduleNextMetadataUpdate($client, METADATA_UPDATE_INTERVAL);
+        return;
     }
+    
+    # Fetch metadata update
+    _fetchMetadataFromAPI($client);
+    
+    # Let the meta data refresh one more time, to return player screens to channel artwork.
 }
 
 # Fetch metadata from xmplaylist.com API using APImetadata module
@@ -283,19 +314,102 @@ sub _fetchMetadataFromAPI {
     
     return unless $client;
     
+    my $realClient = _syncMasterClient($client);
+    return if $realClient->id ne $client->id;  # timer should only run on master
+    
     my $clientId = $client->id();
     my $state = $playerStates{$clientId};
     
     return unless $state && $state->{channel_info};
     
     my $channel_info = $state->{channel_info};
+    my $request_seq = ++$state->{metadata_request_seq};
+    my $request_token = join(':', $clientId, refaddr($state), $request_seq, time());
+    my $request_channel_id = $channel_info->{id};
+    $state->{metadata_request_token} = $request_token;
     
     Plugins::SiriusXM::APImetadata->fetchMetadata($client, $channel_info, sub {
         my $result = shift;
-        return unless $result;
-        
-        _updateClientMetadata($client, $result);
+        my $next_delay = METADATA_UPDATE_INTERVAL;
+        my $current_state = $playerStates{$clientId};
+
+        unless ($current_state) {
+            $log->debug("Ignoring async metadata response for client $clientId: no active player state");
+            return;
+        }
+
+        my $current_request_token = $current_state->{metadata_request_token};
+        if (!defined $current_request_token) {
+            $log->debug("Ignoring stale async metadata response for client $clientId: missing request token");
+            return;
+        }
+
+        if ($current_request_token ne $request_token) {
+            $log->debug("Ignoring stale async metadata response for client $clientId token $request_token");
+            return;
+        }
+
+        unless ($client->isPlaying()) {
+            $log->debug("Ignoring async metadata response for client $clientId: client no longer playing");
+            _stopMetadataTimer($client);
+            return;
+        }
+
+        my $current_channel_id = $current_state->{channel_info}
+            ? $current_state->{channel_info}->{id}
+            : undef;
+        if (
+            defined $request_channel_id && defined $current_channel_id
+            && $request_channel_id ne $current_channel_id
+        ) {
+            $log->debug("Ignoring stale async metadata response for client $clientId channel $request_channel_id");
+            return;
+        }
+
+        if ($result) {
+            _updateClientMetadata($client, $result);
+            delete $current_state->{pending_metadata_result};
+
+            if (
+                _isValidDelay($result->{next_update_delay})
+                && $result->{next_metadata}
+            ) {
+                $next_delay = $result->{next_update_delay};
+                $current_state->{pending_metadata_result} = {
+                    metadata => $result->{next_metadata},
+                    is_fresh => 1,
+                };
+            }
+        }
+
+        unless ($prefs->get('enable_metadata')) {
+            _stopMetadataTimer($client);
+            return;
+        }
+
+        _scheduleNextMetadataUpdate($client, $next_delay);
     });
+}
+
+sub _scheduleNextMetadataUpdate {
+    my ($client, $delay) = @_;
+    return unless $client;
+
+    my $clientId = $client->id();
+    return unless exists $playerStates{$clientId};
+
+    $delay = METADATA_UPDATE_INTERVAL unless _isValidDelay($delay);
+    $log->debug("Scheduling next metadata update for client $clientId in ${delay}s");
+
+    if ($playerStates{$clientId}->{timer}) {
+        Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
+    }
+
+    $playerStates{$clientId}->{timer} = Slim::Utils::Timers::setTimer(
+        $client,
+        time() + $delay,
+        \&_onMetadataTimer
+    );
 }
 
 # Update client with new metadata
@@ -310,11 +424,17 @@ sub _updateClientMetadata {
     return unless $state;
 
     my $new_meta = $result->{metadata};
-    my $next = $result->{next};
     my $metadata_is_fresh = $result->{is_fresh};
+    my $metadata_signature = _metadataSignature($new_meta, "client $clientId");
     
-    # Check if metadata has changed using "next" field
-    if (defined $state->{last_next} && defined $next && $state->{last_next} eq $next) {
+    # Check if metadata content has changed.
+    # Using metadata signature avoids lag when xmplaylist's "next" token
+    # stays constant while the selected record for play-behind-live changes.
+    if (
+        defined $state->{last_metadata_signature}
+        && defined $metadata_signature
+        && $state->{last_metadata_signature} eq $metadata_signature
+    ) {
         # Only skip update if metadata is fresh - if stale, we need to update display
         if ($metadata_is_fresh) {
             $log->debug("No new metadata available and current metadata is fresh - skipping update");
@@ -324,8 +444,7 @@ sub _updateClientMetadata {
         }
     }
     
-    # Update the last_next value
-    $state->{last_next} = $next;
+    $state->{last_metadata_signature} = $metadata_signature;
     
     # Update the current song's metadata if we have new information
     if ($new_meta && keys %$new_meta) {
@@ -354,6 +473,28 @@ sub _updateClientMetadata {
             Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
         }
     }
+}
+
+sub _metadataSignature {
+    my ($meta, $context) = @_;
+    return unless $meta && ref($meta) eq 'HASH';
+    $context ||= 'unknown context';
+
+    my $signature;
+    eval {
+        $signature = $json_encoder->encode($meta);
+    };
+    if ($@) {
+        $log->warn("Failed to encode metadata signature for $context: $@");
+        return;
+    }
+
+    return $signature;
+}
+
+sub _isValidDelay {
+    my ($delay) = @_;
+    return defined $delay && $delay =~ /^\d+(?:\.\d+)?$/ && $delay > 0;
 }
 
 # Handle sxm: protocol URLs by converting them to HTTP proxy URLs

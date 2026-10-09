@@ -8,15 +8,13 @@ A plugin for streaming SiriusXM satellite radio through Lyrion Media Server usin
 
 - Lyrion Media Server 8.3 or higher
 - SiriusXM subscription
-- PlayHLS v1.1 (With ffmpeg installed in the OS)
-- SiriusXM Proxy Server (Included from https://github.com/paul-1/SiriusXM-Perl)
+- PlayHLS v1.1 (With ffmpeg installed in the OS, and in PATH)
 
 ## Installation
 
 1. Download the plugin from the Lyrion Media Server plugin repository or install manually
-2. Add https://github.com/paul-1/plugin-SiriusXM/releases/latest/download/repo.xml at the bottom of the plugin manager.
-3. Configure your SiriusXM credentials in the plugin settings.
-4. Adjust configuration settings as desired.
+2. Configure your SiriusXM credentials in the plugin settings.
+3. Adjust configuration settings as desired.
 
 ### Plugin Settings
 
@@ -26,17 +24,18 @@ Access the plugin settings through:
 
 Configure the following:
 - **Username**: Your SiriusXM username or email address
-- **Password**: Your SiriusXM account password
+- **Password**: Your SiriusXM account password (App login)
 - **Port**: The system port to use for the Proxy (default:9999)
 - **Audio Quality**: Select preferred streaming quality (Low/Medium/High)
 - **Region**: United States or Canada (Default:US)
 - **Metadata**: This is polled from a 3rd party un-official SXM track information site. Data often lags playback.
+- **Playlist Cache Segments**: Play a number of segments behind live, and cache segments.  Allows metadata to be better in sync.
 
 ## Usage
 
 Once configured:
 1. The SiriusXM service will appear in your music sources
-2. Browse available channels and content
+2. Browse available channels or genres
 3. Select channels to start streaming
 
 ## Features
@@ -62,12 +61,13 @@ Once configured:
 - Check <lyrion log directory>/sxmproxy.log (You may need to increase the log level of the proxy on the plugin settings page.
 
 **"No Audio"**
-- Verify PlayHLS v1.1 is properly installed
-- Verify FFMpeg is installed in the host os.
+- Verify PlayHLS v1.1 is properly installed.
+- Verify FFMpeg is installed in the host os and in the PATH.
 
 ## Support
 
 For issues and support:
+- Forums: [Lyrion Forums](https://forums.lyrion.org/forum/user-forums/3rd-party-software/1782066-announce-siriusxm-plugin)
 - Check the [GitHub Issues](https://github.com/paul-1/plugin-SiriusXM/issues)
 - Review the plugin logs in Lyrion Media Server
 - Verify the SiriusXM-Perl helper application is working independently
