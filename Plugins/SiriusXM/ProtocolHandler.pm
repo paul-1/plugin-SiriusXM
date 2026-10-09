@@ -12,7 +12,7 @@ use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Player::Playlist;
-use Scalar::Util qw(refaddr);
+use Scalar::Util qw(refaddr blessed);
 use Time::HiRes qw(time);
 use JSON::XS;
 use Data::Dumper;
@@ -91,7 +91,6 @@ sub _repairPlaylist {
     my ($class, $client) = @_;
     return 0 unless $client;
 
-    my $port = $prefs->get('port') || '9999';
     my $playlist = Slim::Player::Playlist::playList($client);
     return 0 unless $playlist && ref $playlist eq 'ARRAY';
 
@@ -106,8 +105,14 @@ sub _repairPlaylist {
     for my $i (0 .. $#$playlist) {
         next if $skip{$i};
         my $entry = $playlist->[$i];
-        next if ref $entry || !defined $entry;
-        if ($entry =~ m{^http://localhost:\Q$port\E/([\w-]+)\.m3u8$}) {
+        next unless defined $entry;
+
+        # Entries are either URL strings or Track objects (LMS back-patches objects into the list)
+        my $entryUrl = blessed($entry) ? ($entry->can('url') ? $entry->url : undef) : (ref $entry ? undef : $entry);
+        next unless defined $entryUrl;
+
+        if ($entryUrl =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+            $log->debug("Playlist entry $i: replacing $entryUrl with sxm:$1");
             $playlist->[$i] = "sxm:$1";
             $fixed++;
         }
