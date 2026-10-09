@@ -52,6 +52,21 @@ sub initPlugin {
         sxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
     
+    # A playlist can end up holding the proxy http URL instead of sxm: (e.g. after a server
+    # restart). Those entries are handled by the HTTP protocol handler, so route their
+    # metadata and artwork to our handler as well.
+    Slim::Formats::RemoteMetadata->registerProvider(
+        match => qr{^http://localhost:\d+/[\w-]+\.m3u8$},
+        func  => sub {
+            my ($client, $url) = @_;
+            return Plugins::SiriusXM::ProtocolHandler->getMetadataFor($client, $url);
+        },
+    );
+    Slim::Player::ProtocolHandlers->registerIconHandler(
+        qr{^http://localhost:\d+/[\w-]+\.m3u8$},
+        sub { return __PACKAGE__->getIcon() },
+    );
+
     # Initialize player event callbacks for metadata tracking
     Plugins::SiriusXM::ProtocolHandler->initPlayerEvents();
     
