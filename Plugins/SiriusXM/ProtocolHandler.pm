@@ -348,10 +348,15 @@ sub _stopMetadataTimer {
         }
         
         my $chan = __PACKAGE__->_extractChannelIdFromUrl($playerStates{$clientId}->{url});
-        __PACKAGE__->_resetChannelMetadata($chan, $client);
 
-        # Clean up state
+        # Clean up state first so the newsong notification cannot re-enter here
         delete $playerStates{$clientId};
+
+        if ($chan) {
+            __PACKAGE__->_resetChannelMetadata($chan, $client);
+            $client->currentPlaylistUpdateTime(Time::HiRes::time());
+            Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
+        }
     }
 }
 
@@ -714,6 +719,7 @@ sub getChannelInfoFromUrl {
         name => "SiriusXM Channel",
         xmplaylist_name => undef,
         description => "SiriusXM Channel $channel_id",
+        icon => 'plugins/SiriusXM/html/images/SiriusXMLogo.png',
     };
 }
 
@@ -742,12 +748,13 @@ sub getMetadataFor {
         $isCurrentTrack = ($currentChannelId && $currentChannelId eq $channel_id);
     }
 
-    # Default to SXM channel info/artwork
+    # Default to SXM channel info/artwork, never leaving the artwork empty
+    my $default_icon = $channel_info->{icon} || 'plugins/SiriusXM/html/images/SiriusXMLogo.png';
     my $meta = {
         artist  => $channel_info->{name},
         title   => $channel_info->{description} || '',
-        icon    => $channel_info->{icon},
-        cover   => $channel_info->{icon},
+        icon    => $default_icon,
+        cover   => $default_icon,
         album   => 'SiriusXM',
         bitrate => '',
     };
