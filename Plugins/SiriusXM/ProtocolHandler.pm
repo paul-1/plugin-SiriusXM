@@ -81,58 +81,42 @@ sub initPlayerEvents {
         [['play', 'pause', 'stop', 'playlist']]
     );
 
-    Slim::Utils::Timers::killTimers($class, \&_playlistRepairTimer);
-    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 30, \&_playlistRepairTimer);
+    # Playlists restored at startup may contain the proxy http URL; check once clients are available
+    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 30, \&_repairAllPlaylists);
 }
 
-# Playlist entries can end up holding the proxy http URL instead of sxm:<channel>
-# (typically the last played track, e.g. after a restart). Rewrite them back to sxm: URLs.
+# LMS replaces the sxm:<channel> entry of the track it played with the proxy http URL.
+# Rewrite such entries back to sxm: URLs.
 sub _repairPlaylist {
     my ($class, $client) = @_;
-    return 0 unless $client;
+    return unless $client;
 
     my $playlist = Slim::Player::Playlist::playList($client);
-    return 0 unless $playlist && ref $playlist eq 'ARRAY';
+    return unless $playlist && ref $playlist eq 'ARRAY';
 
-    # Leave the entry being played/streamed alone, it is handled in onPlayerEvent
-    my %skip;
+    # The entry currently playing/streaming is handled in onPlayerEvent
+    my %active;
     if ($client->isPlaying()) {
-        $skip{Slim::Player::Source::playingSongIndex($client)} = 1;
-        $skip{Slim::Player::Source::streamingSongIndex($client)} = 1;
+        $active{$_} = 1 for Slim::Player::Source::playingSongIndex($client), Slim::Player::Source::streamingSongIndex($client);
     }
 
-    my $fixed = 0;
     for my $i (0 .. $#$playlist) {
-        next if $skip{$i};
+        next if $active{$i};
+
+        # Entries are URL strings or Track objects
         my $entry = $playlist->[$i];
-        next unless defined $entry;
+        my $url = blessed($entry) ? $entry->url : $entry;
 
-        # Entries are either URL strings or Track objects (LMS back-patches objects into the list)
-        my $entryUrl = blessed($entry) ? ($entry->can('url') ? $entry->url : undef) : (ref $entry ? undef : $entry);
-        next unless defined $entryUrl;
-
-        if ($entryUrl =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
-            $log->debug("Playlist entry $i: replacing $entryUrl with sxm:$1");
+        if ($url && $url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+            $log->info("Restoring playlist entry $i for " . $client->id . ": $url -> sxm:$1");
             $playlist->[$i] = "sxm:$1";
-            $fixed++;
         }
     }
-
-    $log->info("Restored $fixed sxm: playlist entr" . ($fixed == 1 ? 'y' : 'ies') . " for " . $client->id) if $fixed;
-    return $fixed;
 }
 
-# Periodically make sure playlists reference sxm: URLs
-sub _playlistRepairTimer {
+sub _repairAllPlaylists {
     my $class = shift;
-
-    for my $client (Slim::Player::Client::clients()) {
-        next unless $client && $client->id eq _syncMasterClient($client)->id;
-        eval { $class->_repairPlaylist($client) };
-        $log->error("Playlist repair failed for " . $client->id . ": $@") if $@;
-    }
-
-    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 300, \&_playlistRepairTimer);
+    $class->_repairPlaylist($_) for grep { $_->id eq _syncMasterClient($_)->id } Slim::Player::Client::clients();
 }
 
 # Clean up player event subscriptions and timers
@@ -143,7 +127,7 @@ sub cleanupPlayerEvents {
     
     # Unsubscribe from player events
     Slim::Control::Request::unsubscribe(\&onPlayerEvent);
-    Slim::Utils::Timers::killTimers($class, \&_playlistRepairTimer);
+    Slim::Utils::Timers::killTimers($class, \&_repairAllPlaylists);
     
     # Stop all active metadata timers
     for my $clientId (keys %playerStates) {
@@ -236,8 +220,7 @@ sub onPlayerEvent {
     }
 
     # Keep playlist entries pointing at sxm: URLs rather than the proxy http URL
-    __PACKAGE__->_repairPlaylist($realClient) if $command eq 'stop' || $command eq 'play'
-        || ($command eq 'playlist' && $subcommand =~ /^(?:load_done|loadtracks|load|newsong|stop|jump)$/);
+    __PACKAGE__->_repairPlaylist($realClient) if $command eq 'stop' || ($command eq 'playlist' && $subcommand eq 'jump');
 
     my $clientId = $realClient->id();
     my $song = $realClient->playingSong();
