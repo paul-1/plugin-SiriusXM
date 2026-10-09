@@ -8,6 +8,7 @@ use base qw(Slim::Plugin::OPMLBased);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Strings qw(string);
+use Slim::Formats::RemoteMetadata;
 use File::Spec;
 
 use Plugins::SiriusXM::API;
@@ -75,6 +76,30 @@ sub initPlugin {
     );
     
     $log->info("SiriusXM Plugin initialized successfully");
+}
+
+# Runs after all plugins are initialised, so the RadioArtwork plugin has registered its handler
+sub postinitPlugin {
+    my $class = shift;
+
+    # LMS (9.2+) looks up artwork for ICY "artist - title" streams through a single handler
+    # (Slim::Plugin::RadioArtwork). SXM supplies its own artwork, so skip that lookup for SXM streams.
+    return unless Slim::Formats::RemoteMetadata->can('getArtworkHandler');
+
+    my $original = Slim::Formats::RemoteMetadata->getArtworkHandler();
+    return unless $original;
+
+    Slim::Formats::RemoteMetadata->registerArtworkHandler( sub {
+        my ($client, $url) = @_;
+
+        my $port = $prefs->get('port') || '9999';
+        if ($url && ($url =~ /^sxm:/ || $url =~ m{^http://localhost:\Q$port\E\b/[\w-]+\.m3u8$})) {
+            $log->debug("Skipping RadioArtwork lookup for SXM stream $url");
+            return;
+        }
+
+        return $original->(@_);
+    } );
 }
 
 sub shutdownPlugin {
