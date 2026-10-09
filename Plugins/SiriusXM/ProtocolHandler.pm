@@ -61,14 +61,10 @@ sub isRepeatingStream { 0 }
 sub canDoAction {
     my ( $class, $client, $url, $action ) = @_;
 
-    # "stop" seems to be called when a user pressed FWD...
-	 if ( $action eq 'stop' ) {
-        return 0;
-    }
-    elsif ( $action eq 'rew' ) {
-        return 0;
-    }
+    $log->debug("canDoAction action=$action url=$url");
 
+    # SXM live streams can't be restarted or rewound, but must not block
+    # skipping to another track.
     return 1;
 }
 
@@ -137,14 +133,59 @@ sub onPlayerEvent {
     my $clientId = $realClient->id();
     my $song = $realClient->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
- 
     my $port = $prefs->get('port');
-   
+
+    my $is_sxm = ($url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$}) ? 1 : 0;
+
+    # If we've moved off SXM, stop SXM metadata/timer state for this client.
+    if (!$is_sxm) {
+        _stopMetadataTimer($realClient) if exists $playerStates{$clientId};
+        return;
+    }
+
+    $log->debug("Player event '$command:$subcommand' for client $clientId, URL:$url" );
+
     # Only handle SiriusXM streams (both sxm: and converted HTTP URLs)
     return unless $url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$};
 
     $log->debug("Player event '$command:$subcommand' for client $clientId, URL:$url" );
 #    $log->debug(Dumper($request));
+    
+    if ($command eq 'playlist' && $subcommand eq 'jump') {
+        my $jump_index = $request->getParam('_index');
+        $jump_index = '' unless defined $jump_index;
+
+        my $count = Slim::Player::Playlist::count($realClient);
+        my $idx   = Slim::Player::Source::streamingSongIndex($realClient);
+        my @urls  = map {
+            my $t = Slim::Player::Playlist::song($realClient, $_);
+            "$_=" . ($t ? $t->url : 'undef');
+        } (0 .. $count - 1);
+        $log->debug("playlist:jump count=$count idx=$idx tracks: " . join(', ', @urls));
+
+        my $playing   = Slim::Player::Source::playingSongIndex($realClient);
+        my $streaming = Slim::Player::Source::streamingSongIndex($realClient);
+        $log->debug("playlist:jump index='$jump_index' playingIdx=$playing streamingIdx=$streaming");
+
+        Slim::Utils::Timers::setTimer($realClient, time() + 0.5, sub {
+            my $c = shift || return;
+            my $idx   = Slim::Player::Source::streamingSongIndex($c);
+            my $track = Slim::Player::Playlist::song($c, $idx);
+            my $url   = $track ? $track->url : '';
+            my $port  = $prefs->get('port');
+            my $is_sxm = ($url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$}) ? 1 : 0;
+
+            $log->debug("post-jump streamingIdx=$idx url=$url is_sxm=$is_sxm");
+
+            if ($is_sxm && $c->isPlaying()) {
+                _startMetadataTimer($c, $url);
+            } else {
+                _stopMetadataTimer($c);
+            }
+        });
+        return;
+    }
+
 
     if ($song) {
         my $handler = $song->currentTrackHandler();
