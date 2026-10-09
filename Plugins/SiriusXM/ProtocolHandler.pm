@@ -80,6 +80,54 @@ sub initPlayerEvents {
         \&onPlayerEvent,
         [['play', 'pause', 'stop', 'playlist']]
     );
+
+    Slim::Utils::Timers::killTimers($class, \&_playlistRepairTimer);
+    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 30, \&_playlistRepairTimer);
+}
+
+# Playlist entries can end up holding the proxy http URL instead of sxm:<channel>
+# (typically the last played track, e.g. after a restart). Rewrite them back to sxm: URLs.
+sub _repairPlaylist {
+    my ($class, $client) = @_;
+    return 0 unless $client;
+
+    my $port = $prefs->get('port') || '9999';
+    my $playlist = Slim::Player::Playlist::playList($client);
+    return 0 unless $playlist && ref $playlist eq 'ARRAY';
+
+    # Leave the entry being played/streamed alone, it is handled in onPlayerEvent
+    my %skip;
+    if ($client->isPlaying()) {
+        $skip{Slim::Player::Source::playingSongIndex($client)} = 1;
+        $skip{Slim::Player::Source::streamingSongIndex($client)} = 1;
+    }
+
+    my $fixed = 0;
+    for my $i (0 .. $#$playlist) {
+        next if $skip{$i};
+        my $entry = $playlist->[$i];
+        next if ref $entry || !defined $entry;
+        if ($entry =~ m{^http://localhost:\Q$port\E/([\w-]+)\.m3u8$}) {
+            $playlist->[$i] = "sxm:$1";
+            $fixed++;
+        }
+    }
+
+    $log->info("Restored $fixed sxm: playlist entr" . ($fixed == 1 ? 'y' : 'ies') . " for " . $client->id) if $fixed;
+    return $fixed;
+}
+
+# Periodically make sure playlists reference sxm: URLs
+sub _playlistRepairTimer {
+    my $class = shift;
+
+    for my $client (Slim::Player::Client::clients()) {
+        next unless $client && $client->id eq _syncMasterClient($client)->id;
+        eval { $class->_repairPlaylist($client) };
+        $log->error("Playlist repair failed for " . $client->id . ": $@") if $@;
+    }
+
+    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 300, \&_playlistRepairTimer);
 }
 
 # Clean up player event subscriptions and timers
@@ -90,6 +138,7 @@ sub cleanupPlayerEvents {
     
     # Unsubscribe from player events
     Slim::Control::Request::unsubscribe(\&onPlayerEvent);
+    Slim::Utils::Timers::killTimers($class, \&_playlistRepairTimer);
     
     # Stop all active metadata timers
     for my $clientId (keys %playerStates) {
@@ -180,6 +229,10 @@ sub onPlayerEvent {
             });
         }
     }
+
+    # Keep playlist entries pointing at sxm: URLs rather than the proxy http URL
+    __PACKAGE__->_repairPlaylist($realClient) if $command eq 'stop' || $command eq 'play'
+        || ($command eq 'playlist' && $subcommand =~ /^(?:load_done|loadtracks|load|newsong|stop|jump)$/);
 
     my $clientId = $realClient->id();
     my $song = $realClient->playingSong();
