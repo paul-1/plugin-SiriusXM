@@ -33,6 +33,7 @@ my %playerStates = ();
 
 # Global hash to track metadata by channel ID
 my %channelMetadata = ();
+my $lastChannelInfoFetch = 0;
 
 sub new {
     my $class = shift;
@@ -278,7 +279,7 @@ sub onPlayerEvent {
         }
 
         $log->debug("No current player state, configuring");
-        my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+        my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url, $realClient);
         # Initialize player state
         $playerStates{$clientId} = {
             url => $url,
@@ -311,7 +312,7 @@ sub _startMetadataTimer {
     _stopMetadataTimer($client);
     
     # Get channel info for xmplaylist integration
-    my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+    my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url, $client);
     return unless $channel_info && $channel_info->{xmplaylist_name};
     
     $log->info("Starting metadata timer for client $clientId, channel: " . $channel_info->{name});
@@ -669,7 +670,7 @@ sub sxmToHttpUrl {
 
 # Extract channel information from the URL for metadata access
 sub getChannelInfoFromUrl {
-    my ($class, $url) = @_;
+    my ($class, $url, $client) = @_;
     
     # Use the consolidated channel ID extraction function
     my $channel_id = $class->_extractChannelIdFromUrl($url);
@@ -703,9 +704,20 @@ sub getChannelInfoFromUrl {
     } else {
         # No cache available - trigger async API call to populate cache
         # But don't wait for it, just return fallback for now
-        Plugins::SiriusXM::API->getChannels(undef, sub {
-            # Cache will be populated for next time
-        });
+        # Throttled so a failing proxy cannot cause repeated fetches
+        my $now = time();
+        if ($now - $lastChannelInfoFetch >= 30) {
+            $lastChannelInfoFetch = $now;
+            my $clientId = $client ? $client->id() : undef;
+            Plugins::SiriusXM::API->getChannels(undef, sub {
+                # Refresh the display once, and only if the channel data is now cached,
+                # otherwise the refresh would trigger another fetch.
+                return unless $clientId && $cache->get('siriusxm_channel_info');
+                my $c = Slim::Player::Client::getClient($clientId) || return;
+                $c->currentPlaylistUpdateTime(Time::HiRes::time());
+                Slim::Control::Request::notifyFromArray($c, ['playlist', 'newsong']);
+            });
+        }
     }
     
     # Fallback channel info if not found in cache    ----   May only get here if restarting from playlist.  BUt should not need this.
@@ -728,7 +740,7 @@ sub getMetadataFor {
     my $channel_id = $class->_extractChannelIdFromUrl($url);
     return {} unless $channel_id;
 
-    my $channel_info = $class->getChannelInfoFromUrl($url);
+    my $channel_info = $class->getChannelInfoFromUrl($url, $client);
     return {} unless $channel_info;
 
     my $currentSong = $client ? $client->playingSong() : undef;
