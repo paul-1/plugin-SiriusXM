@@ -108,12 +108,41 @@ sub cleanupPlayerEvents {
     %channelMetadata = ();
 }
 
+#Call this in init if there is bad data in the database (Not currently called)
+sub purgeTrackCache {
+    my $class = shift;
+    my $port  = $prefs->get('port') || '9999';
+    my $dbh   = Slim::Schema->dbh;
+
+    my $rows = $dbh->do(
+        "DELETE FROM tracks WHERE url LIKE 'sxm:%' OR url LIKE ?",
+        undef, "http://localhost:$port/%.m3u8"
+    );
+    $log->info("Purged " . ($rows + 0) . " SXM track row(s) from library.db");
+}
+
 sub _syncMasterClient {
     my ($client) = @_;
     return unless $client;
 
     my $master = eval { $client->master };
     return ($master && $master->id) ? $master : $client;
+}
+
+# Log the full playlist for a client (index, url, title)
+sub _logPlaylist {
+    my ($client, $label) = @_;
+    return unless $client && main::DEBUGLOG && $log->is_debug;
+
+    my $count = Slim::Player::Playlist::count($client) || 0;
+    my @lines;
+    for my $i (0 .. $count - 1) {
+        my $t = Slim::Player::Playlist::track($client, $i);
+        my $u = $t ? $t->url : 'undef';
+        my $title = ($t && $t->can('title')) ? ($t->title // '') : '';
+        push @lines, sprintf("  [%d] %s %s", $i, $u, $title ? "($title)" : '');
+    }
+    $log->debug("$label: playlist for " . $client->id . " has $count item(s):\n" . join("\n", @lines));
 }
 
 # Player event callback handler
@@ -127,9 +156,30 @@ sub onPlayerEvent {
 
     my $command = $request->getRequest(0) || return;
     my $subcommand = $request->getRequest(1) || '';
-     
-    return unless $client;
     
+    # Print the current playlist content.
+    if ($command eq 'playlist') {
+        # Log what was added/loaded, independent of whether SXM is currently playing
+        my $params = $request->getParamsCopy() || {};
+        $log->debug("playlist event sub='$subcommand' client=" . $realClient->id
+            . " params=" . join(', ', map { "$_=" . (defined $params->{$_} ? $params->{$_} : 'undef') } sort keys %$params));
+
+        if ($subcommand =~ /^(?:add|addtracks|insert|insertlist|load|loadtracks)$/) {
+            $log->info("Playlist add/load: "
+                . ($params->{_item} // $params->{_path} // $params->{_what} // 'see params above'));
+        }
+
+        if ($subcommand eq 'load_done') {
+            _logPlaylist($realClient, 'load_done');
+        }
+        elsif ($subcommand =~ /^(?:add|addtracks|delete|move|clear)$/) {
+            # Playlist may not be fully populated yet, so defer slightly
+            Slim::Utils::Timers::setTimer($realClient, time() + 0.5, sub {
+                _logPlaylist(shift, "after $subcommand");
+            });
+        }
+    }
+
     my $clientId = $realClient->id();
     my $song = $realClient->playingSong();
     my $url = $song ? $song->currentTrack()->url() : '';
@@ -158,7 +208,7 @@ sub onPlayerEvent {
         my $count = Slim::Player::Playlist::count($realClient);
         my $idx   = Slim::Player::Source::streamingSongIndex($realClient);
         my @urls  = map {
-            my $t = Slim::Player::Playlist::song($realClient, $_);
+            my $t = Slim::Player::Playlist::track($realClient, $_);
             "$_=" . ($t ? $t->url : 'undef');
         } (0 .. $count - 1);
         $log->debug("playlist:jump count=$count idx=$idx tracks: " . join(', ', @urls));
@@ -170,7 +220,7 @@ sub onPlayerEvent {
         Slim::Utils::Timers::setTimer($realClient, time() + 0.5, sub {
             my $c = shift || return;
             my $idx   = Slim::Player::Source::streamingSongIndex($c);
-            my $track = Slim::Player::Playlist::song($c, $idx);
+            my $track = Slim::Player::Playlist::track($c, $idx);
             my $url   = $track ? $track->url : '';
             my $port  = $prefs->get('port');
             my $is_sxm = ($url =~ /^sxm:/ || $url =~ m{^http://localhost:$port\b/[\w-]+\.m3u8$}) ? 1 : 0;
@@ -661,10 +711,16 @@ sub getChannelInfoFromUrl {
 # Provide metadata for the stream
 sub getMetadataFor {
     my ($class, $client, $url, undef, $song) = @_;
+#    $log->debug("getMetadataFor ENTER url=" . ($url // 'undef') . " song=" . ($song ? 'y' : 'n'));
+    $song ||= $client ? $client->playingSong() : undef;
 
-    $song ||= $client->playingSong();
-    return {} unless $song;
+    my $channel_id = $class->_extractChannelIdFromUrl($url);
+    return {} unless $channel_id;
 
+    my $channel_info = $class->getChannelInfoFromUrl($url);
+    return {} unless $channel_info;
+
+    my $currentSong = $client ? $client->playingSong() : undef;
     # Extract channel ID from the requested URL
     my $channel_id = $class->_extractChannelIdFromUrl($url);
     return {} unless $channel_id;
@@ -692,7 +748,7 @@ sub getMetadataFor {
         
         # If no cached metadata, try song pluginData for backward compatibility
         if (!$cached_meta || !keys %$cached_meta) {
-            $cached_meta = $song->pluginData('xmplaylist_meta');
+            $cached_meta = $song && $song->pluginData('xmplaylist_meta');
         }
         
         # Use rich metadata if available
