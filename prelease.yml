@@ -1,0 +1,105 @@
+name: Pre-Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Verify tag is on develop
+        run: |
+          git fetch origin develop
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/develop; then
+            echo "::error::Tagged commit is not on develop"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils zip
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Update version in Plugins/SiriusXM/install.xml
+        run: |
+          sed -i "s|<version>.*</version>|<version>${{ steps.version.outputs.version }}</version>|" Plugins/SiriusXM/install.xml
+          grep -o '<version>.*</version>' Plugins/SiriusXM/install.xml
+
+      - name: Update version in repo.xml
+        run: |
+          sed -i "/plugin name/s/version=\"[^\"]*\"/version=\"${{ steps.version.outputs.version }}\"/" repo.xml
+          tail -n+2 repo.xml | grep -o 'version="[^"]*"'
+
+      - name: Create plugin package
+        run: |
+          mkdir -p package
+          cp -r Plugins/SiriusXM package/
+          cd package
+          zip -r ../SiriusXM-${{ steps.version.outputs.version }}.zip SiriusXM/
+          cd ..
+
+          SHA=$(sha1sum SiriusXM-${{ steps.version.outputs.version }}.zip | cut -d' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_ENV"
+          echo "Package SHA: $SHA"
+
+      - name: Create versioned repo.xml
+        run: |
+          cp repo.xml repo.versioned.xml
+
+          sed -i "s|<url>.*</url>|<url>https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/SiriusXM-${{ steps.version.outputs.version }}.zip</url>|" repo.versioned.xml
+          sed -i "s|<sha>.*</sha>|<sha>${{ env.sha }}</sha>|" repo.versioned.xml
+
+          xmllint --noout Plugins/SiriusXM/install.xml
+          xmllint --noout repo.versioned.xml
+
+      - name: Publish versioned prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: SiriusXM Plugin v${{ steps.version.outputs.version }} (Pre-release)
+          prerelease: true
+          draft: false
+          files: |
+            SiriusXM-${{ steps.version.outputs.version }}.zip
+            repo.versioned.xml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create rolling beta feed file
+        run: |
+          cp repo.versioned.xml repo-beta.xml
+          sed -i "s|<url>.*</url>|<url>https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/SiriusXM-${{ steps.version.outputs.version }}.zip</url>|" repo-beta.xml
+          sed -i "s|<sha>.*</sha>|<sha>${{ env.sha }}</sha>|" repo-beta.xml
+          xmllint --noout repo-beta.xml
+
+      - name: Publish rolling beta feed release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta
+          name: SiriusXM Plugin Beta (rolling)
+          prerelease: true
+          draft: false
+          make_latest: false
+          files: |
+            repo-beta.xml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
