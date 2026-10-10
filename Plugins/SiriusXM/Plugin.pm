@@ -8,6 +8,7 @@ use base qw(Slim::Plugin::OPMLBased);
 use Slim::Utils::Prefs;
 use Slim::Utils::Log;
 use Slim::Utils::Strings qw(string);
+use Slim::Formats::RemoteMetadata;
 use File::Spec;
 
 use Plugins::SiriusXM::API;
@@ -51,6 +52,21 @@ sub initPlugin {
         sxm => 'Plugins::SiriusXM::ProtocolHandler'
     );
     
+    # A playlist can end up holding the proxy http URL instead of sxm: (e.g. after a server
+    # restart). Those entries are handled by the HTTP protocol handler, so route their
+    # metadata and artwork to our handler as well.
+    Slim::Formats::RemoteMetadata->registerProvider(
+        match => qr{^http://localhost:\d+/[\w-]+\.m3u8$},
+        func  => sub {
+            my ($client, $url) = @_;
+            return Plugins::SiriusXM::ProtocolHandler->getMetadataFor($client, $url);
+        },
+    );
+    Slim::Player::ProtocolHandlers->registerIconHandler(
+        qr{^http://localhost:\d+/[\w-]+\.m3u8$},
+        sub { return __PACKAGE__->getIcon() },
+    );
+
     # Initialize player event callbacks for metadata tracking
     Plugins::SiriusXM::ProtocolHandler->initPlayerEvents();
     
@@ -75,6 +91,30 @@ sub initPlugin {
     );
     
     $log->info("SiriusXM Plugin initialized successfully");
+}
+
+# Runs after all plugins are initialised, so the RadioArtwork plugin has registered its handler
+sub postinitPlugin {
+    my $class = shift;
+
+    # LMS (9.2+) looks up artwork for ICY "artist - title" streams through a single handler
+    # (Slim::Plugin::RadioArtwork). SXM supplies its own artwork, so skip that lookup for SXM streams.
+    return unless Slim::Formats::RemoteMetadata->can('getArtworkHandler');
+
+    my $original = Slim::Formats::RemoteMetadata->getArtworkHandler();
+    return unless $original;
+
+    Slim::Formats::RemoteMetadata->registerArtworkHandler( sub {
+        my ($client, $url) = @_;
+
+        my $port = $prefs->get('port') || '9999';
+        if ($url && ($url =~ /^sxm:/ || $url =~ m{^http://localhost:\Q$port\E\b/[\w-]+\.m3u8$})) {
+            $log->debug("Skipping RadioArtwork lookup for SXM stream $url");
+            return;
+        }
+
+        return $original->(@_);
+    } );
 }
 
 sub shutdownPlugin {

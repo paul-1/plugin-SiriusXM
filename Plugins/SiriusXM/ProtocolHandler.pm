@@ -12,7 +12,7 @@ use Slim::Utils::Cache;
 use Slim::Utils::Timers;
 use Slim::Networking::SimpleAsyncHTTP;
 use Slim::Player::Playlist;
-use Scalar::Util qw(refaddr);
+use Scalar::Util qw(refaddr blessed);
 use Time::HiRes qw(time);
 use JSON::XS;
 use Data::Dumper;
@@ -33,6 +33,7 @@ my %playerStates = ();
 
 # Global hash to track metadata by channel ID
 my %channelMetadata = ();
+my $lastChannelInfoFetch = 0;
 
 sub new {
     my $class = shift;
@@ -79,6 +80,43 @@ sub initPlayerEvents {
         \&onPlayerEvent,
         [['play', 'pause', 'stop', 'playlist']]
     );
+
+    # Playlists restored at startup may contain the proxy http URL; check once clients are available
+    Slim::Utils::Timers::setTimer($class, Time::HiRes::time() + 30, \&_repairAllPlaylists);
+}
+
+# LMS replaces the sxm:<channel> entry of the track it played with the proxy http URL.
+# Rewrite such entries back to sxm: URLs.
+sub _repairPlaylist {
+    my ($class, $client) = @_;
+    return unless $client;
+
+    my $playlist = Slim::Player::Playlist::playList($client);
+    return unless $playlist && ref $playlist eq 'ARRAY';
+
+    # The entry currently playing/streaming is handled in onPlayerEvent
+    my %active;
+    if ($client->isPlaying()) {
+        $active{$_} = 1 for Slim::Player::Source::playingSongIndex($client), Slim::Player::Source::streamingSongIndex($client);
+    }
+
+    for my $i (0 .. $#$playlist) {
+        next if $active{$i};
+
+        # Entries are URL strings or Track objects
+        my $entry = $playlist->[$i];
+        my $url = blessed($entry) ? $entry->url : $entry;
+
+        if ($url && $url =~ m{^http://localhost:\d+/([\w-]+)\.m3u8$}) {
+            $log->info("Restoring playlist entry $i for " . $client->id . ": $url -> sxm:$1");
+            $playlist->[$i] = "sxm:$1";
+        }
+    }
+}
+
+sub _repairAllPlaylists {
+    my $class = shift;
+    $class->_repairPlaylist($_) for grep { $_->id eq _syncMasterClient($_)->id } Slim::Player::Client::clients();
 }
 
 # Clean up player event subscriptions and timers
@@ -89,6 +127,7 @@ sub cleanupPlayerEvents {
     
     # Unsubscribe from player events
     Slim::Control::Request::unsubscribe(\&onPlayerEvent);
+    Slim::Utils::Timers::killTimers($class, \&_repairAllPlaylists);
     
     # Stop all active metadata timers
     for my $clientId (keys %playerStates) {
@@ -179,6 +218,9 @@ sub onPlayerEvent {
             });
         }
     }
+
+    # Keep playlist entries pointing at sxm: URLs rather than the proxy http URL
+    __PACKAGE__->_repairPlaylist($realClient) if $command eq 'stop' || ($command eq 'playlist' && $subcommand eq 'jump');
 
     my $clientId = $realClient->id();
     my $song = $realClient->playingSong();
@@ -278,7 +320,7 @@ sub onPlayerEvent {
         }
 
         $log->debug("No current player state, configuring");
-        my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+        my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url, $realClient);
         # Initialize player state
         $playerStates{$clientId} = {
             url => $url,
@@ -311,7 +353,7 @@ sub _startMetadataTimer {
     _stopMetadataTimer($client);
     
     # Get channel info for xmplaylist integration
-    my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url);
+    my $channel_info = __PACKAGE__->getChannelInfoFromUrl($url, $client);
     return unless $channel_info && $channel_info->{xmplaylist_name};
     
     $log->info("Starting metadata timer for client $clientId, channel: " . $channel_info->{name});
@@ -347,6 +389,9 @@ sub _stopMetadataTimer {
             Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
         }
         
+        my $chan = __PACKAGE__->_extractChannelIdFromUrl($playerStates{$clientId}->{url});
+        __PACKAGE__->_resetChannelMetadata($chan, $client);
+
         # Clean up state
         delete $playerStates{$clientId};
     }
@@ -563,6 +608,14 @@ sub _updateClientMetadata {
             $client->currentPlaylistUpdateTime(Time::HiRes::time());
             Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
         }
+    } else {
+        my $song = $client->playingSong();
+        my $channel_id = $song ? __PACKAGE__->_extractChannelIdFromUrl($song->currentTrack()->url()) : undef;
+        if ($channel_id) {
+            __PACKAGE__->_resetChannelMetadata($channel_id, $client);
+            $client->currentPlaylistUpdateTime(Time::HiRes::time());
+            Slim::Control::Request::notifyFromArray($client, ['playlist', 'newsong']);
+        }
     }
 }
 
@@ -658,7 +711,7 @@ sub sxmToHttpUrl {
 
 # Extract channel information from the URL for metadata access
 sub getChannelInfoFromUrl {
-    my ($class, $url) = @_;
+    my ($class, $url, $client) = @_;
     
     # Use the consolidated channel ID extraction function
     my $channel_id = $class->_extractChannelIdFromUrl($url);
@@ -692,9 +745,20 @@ sub getChannelInfoFromUrl {
     } else {
         # No cache available - trigger async API call to populate cache
         # But don't wait for it, just return fallback for now
-        Plugins::SiriusXM::API->getChannels(undef, sub {
-            # Cache will be populated for next time
-        });
+        # Throttled so a failing proxy cannot cause repeated fetches
+        my $now = time();
+        if ($now - $lastChannelInfoFetch >= 30) {
+            $lastChannelInfoFetch = $now;
+            my $clientId = $client ? $client->id() : undef;
+            Plugins::SiriusXM::API->getChannels(undef, sub {
+                # Refresh the display once, and only if the channel data is now cached,
+                # otherwise the refresh would trigger another fetch.
+                return unless $clientId && $cache->get('siriusxm_channel_info');
+                my $c = Slim::Player::Client::getClient($clientId) || return;
+                $c->currentPlaylistUpdateTime(Time::HiRes::time());
+                Slim::Control::Request::notifyFromArray($c, ['playlist', 'newsong']);
+            });
+        }
     }
     
     # Fallback channel info if not found in cache    ----   May only get here if restarting from playlist.  BUt should not need this.
@@ -717,20 +781,12 @@ sub getMetadataFor {
     my $channel_id = $class->_extractChannelIdFromUrl($url);
     return {} unless $channel_id;
 
-    my $channel_info = $class->getChannelInfoFromUrl($url);
+    my $channel_info = $class->getChannelInfoFromUrl($url, $client);
     return {} unless $channel_info;
 
     my $currentSong = $client ? $client->playingSong() : undef;
-    # Extract channel ID from the requested URL
-    my $channel_id = $class->_extractChannelIdFromUrl($url);
-    return {} unless $channel_id;
-
-    # Get basic channel info
-    my $channel_info = $class->getChannelInfoFromUrl($url);
-    return {} unless $channel_info;
 
     # Check if this URL/channel is currently being played by this client
-    my $currentSong = $client->playingSong();
     my $isCurrentTrack = 0;
     
     if ($currentSong) {
@@ -739,52 +795,50 @@ sub getMetadataFor {
         $isCurrentTrack = ($currentChannelId && $currentChannelId eq $channel_id);
     }
 
-    my $meta = {};
+    # Default to SXM channel info/artwork
+    my $meta = {
+        artist  => $channel_info->{name},
+        title   => $channel_info->{description} || '',
+        icon    => $channel_info->{icon},
+        cover   => $channel_info->{icon},
+        album   => 'SiriusXM',
+        bitrate => '',
+    };
 
-    # Only use external metadata (xmplaylist) for the currently playing track
+    # Only overlay external metadata (xmplaylist) for the currently playing track
     if ($isCurrentTrack && $prefs->get('enable_metadata')) {
-        # Check for cached channel metadata first
         my $cached_meta = $channelMetadata{$channel_id};
-        
-        # If no cached metadata, try song pluginData for backward compatibility
+
         if (!$cached_meta || !keys %$cached_meta) {
             $cached_meta = $song && $song->pluginData('xmplaylist_meta');
         }
-        
-        # Use rich metadata if available
+
         if ($cached_meta && keys %$cached_meta) {
-            $meta->{title} = $cached_meta->{title} if $cached_meta->{title};
+            $meta->{title}  = $cached_meta->{title}  if $cached_meta->{title};
             $meta->{artist} = $cached_meta->{artist} if $cached_meta->{artist};
-            $meta->{cover} = $cached_meta->{cover} if $cached_meta->{cover};
-            $meta->{icon} = $cached_meta->{icon} if $cached_meta->{icon};
-            $meta->{album} = $cached_meta->{album} if $cached_meta->{album};
-            $meta->{bitrate} = '';
-            
-#            $log->debug("Using rich metadata for current track channel $channel_id: " . ($meta->{title} || 'Unknown'));
-        } else {
-            # Fall back to basic channel info for current track
-            $meta->{artist} = $channel_info->{name};
-            $meta->{title} = $channel_info->{description} || '';
-            $meta->{icon} = $channel_info->{icon};
-            $meta->{cover} = $channel_info->{icon};
-            $meta->{album} = 'SiriusXM';
-            $meta->{bitrate} = '';
-            
-#            $log->debug("Using basic channel info for current track channel $channel_id");
+            $meta->{album}  = $cached_meta->{album}  if $cached_meta->{album};
+            # Track artwork overrides channel artwork only when present
+            if ($cached_meta->{cover}) {
+                $meta->{cover} = $cached_meta->{cover};
+                $meta->{icon}  = $cached_meta->{icon} || $cached_meta->{cover};
+            }
         }
-    } else {
-        # For non-current tracks, only return basic channel artwork and info
-        $meta->{artist} = $channel_info->{name};
-        $meta->{title} = $channel_info->{description} || '';
-        $meta->{icon} = $channel_info->{icon};
-        $meta->{cover} = $channel_info->{icon};
-        $meta->{album} = 'SiriusXM';
-        $meta->{bitrate} = '';
-        
-#        $log->debug("Using channel artwork for non-current track channel $channel_id");
     }
 
     return $meta;
+}
+
+# Reset cached metadata so the default channel name/artwork is shown
+sub _resetChannelMetadata {
+    my ($class, $channel_id, $client) = @_;
+    return unless $channel_id;
+
+    delete $channelMetadata{$channel_id};
+
+    if ($client) {
+        my $song = $client->playingSong();
+        $song->pluginData('xmplaylist_meta', undef) if $song;
+    }
 }
 
 # Clear player states for channels different from the specified URL
@@ -816,6 +870,9 @@ sub _clearPlayerStatesForDifferentChannel {
         if ($client && $state->{timer}) {
            Slim::Utils::Timers::killTimers($client, \&_onMetadataTimer);
         }
+
+        $class->_resetChannelMetadata($existingChannelId, $client);
+        delete $channelMetadata{$newChannelId};
 
         # Remove the player state
         delete $playerStates{$clientId};
