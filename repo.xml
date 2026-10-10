@@ -12,6 +12,7 @@
               - Download the smallest playlist size needed.
               - Track Playing timestamp against xmplaylist.com play time for metadata sync.
               - Make sure player is not a sync-slave when updating metadata (1.0.1)
+              - Allow Channels to be in playlist and let Fwd-Rev move to next track.  (1.1.0)
             </changes>
             <title lang="EN">SiriusXM</title>
             <desc lang="EN">Stream SiriusXM satellite radio through Lyrion Music Server</desc>
